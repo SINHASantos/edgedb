@@ -1455,7 +1455,7 @@ aa';
         """
 
     @tb.must_fail(errors.EdgeQLSyntaxError,
-                  r"Unexpected 'foo'", line=3, col=27)
+                  r"Missing ',' before the shape item 'foo'", line=3, col=27)
     def test_edgeql_syntax_shape_44(self):
         """
         SELECT Foo {
@@ -1498,6 +1498,61 @@ aa';
         UPDATE Foo
         SET {
             foo -= Bar
+        };
+        """
+
+    @tb.must_fail(errors.EdgeQLSyntaxError,
+                  r"Missing ',' before the shape item 'name'", line=4, col=13)
+    def test_edgeql_syntax_shape_49(self):
+        """
+        SELECT Foo {
+            id
+            name
+        };
+        """
+
+    @tb.must_fail(errors.EdgeQLSyntaxError,
+                  r"Missing ',' before the shape item 'name'", line=6, col=13)
+    def test_edgeql_syntax_shape_50(self):
+        """
+        SELECT Foo {
+            bar: {
+                id
+            }
+            name
+        };
+        """
+
+    @tb.must_fail(errors.EdgeQLSyntaxError,
+                  r"Missing ',' before the shape item 'name'", line=4, col=13)
+    def test_edgeql_syntax_shape_51(self):
+        """
+        SELECT Foo {
+            bar := .id
+            name
+        };
+        """
+
+    @tb.must_fail(errors.EdgeQLSyntaxError,
+                  r"Missing ',' before the shape item 'name'", line=5, col=17)
+    def test_edgeql_syntax_shape_52(self):
+        """
+        SELECT Foo {
+            bar: {
+                @linkprop
+                name
+            }
+        };
+        """
+
+    @tb.must_fail(errors.EdgeQLSyntaxError,
+                  r"Unexpected 'Bar'", line=3, col=18)
+    def test_edgeql_syntax_shape_53(self):
+        """
+        INSERT Foo {
+            bar: Bar {
+                val := 1
+            }
         };
         """
 
@@ -1964,6 +2019,24 @@ aa';
     def test_edgeql_syntax_array_05(self):
         """
         SELECT (get_nested_obj())['a']['b']['c'];
+        """
+
+    @tb.must_fail(errors.EdgeQLSyntaxError,
+                  r"Missing ',' before the array item 'User'", line=4, col=13)
+    def test_edgeql_syntax_array_06(self):
+        """
+        SELECT [
+            1
+            User
+        ];
+        """
+
+    @tb.must_fail(errors.EdgeQLSyntaxError,
+                  r"Missing ':' in array slice expression", line=3, col=28)
+    def test_edgeql_syntax_array_07(self):
+        """
+        WITH x := 2
+        SELECT [1, 2, 3][1 x];
         """
 
     def test_edgeql_syntax_cast_01(self):
@@ -2825,6 +2898,16 @@ aa';
     def test_edgeql_syntax_tuple_03(self):
         """
         SELECT ();
+        """
+
+    @tb.must_fail(errors.EdgeQLSyntaxError,
+                  r"Missing ',' before the tuple item 'User'", line=4, col=13)
+    def test_edgeql_syntax_tuple_04(self):
+        """
+        SELECT (
+            1
+            User
+        );
         """
 
     def test_edgeql_syntax_introspect_01(self):
