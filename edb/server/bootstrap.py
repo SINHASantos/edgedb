@@ -49,6 +49,7 @@ from edb.schema import objects as s_obj
 from edb.schema import reflection as s_refl
 from edb.schema import schema as s_schema
 from edb.schema import std as s_std
+from edb.schema import version as s_ver
 
 from edb.server import buildmeta
 from edb.server import config
@@ -318,12 +319,17 @@ def _process_delta(delta, schema):
         debug.header('Delta Plan')
         debug.dump(delta, schema=schema)
 
-    delta = delta_cmds.CommandMeta.adapt(delta)
-
     context = sd.CommandContext()
     context.stdmode = True
 
-    schema = delta.apply(schema, context)
+    if not delta.canonical:
+        # Canonicalize
+        sd.apply(delta, schema=schema)
+
+    delta = delta_cmds.CommandMeta.adapt(delta)
+    context = sd.CommandContext()
+    context.stdmode = True
+    schema = sd.apply(delta, schema=schema, context=context)
 
     if debug.flags.delta_pgsql_plan:
         debug.header('PgSQL Delta Plan')
@@ -419,6 +425,14 @@ async def _make_stdlib(testmode: bool, global_ids) -> StdlibBits:
 
         types.update(plan.new_types)
         plan.generate(current_block)
+
+    sv = sn.UnqualName('__schema_version__')
+    schema_version = s_ver.CreateSchemaVersion(classname=sv)
+    schema_version.set_attribute_value('name', sv)
+    schema_version.set_attribute_value('version', uuidgen.uuid1mc())
+    schema, plan = _process_delta(schema_version, schema)
+    std_plans.append(schema_version)
+    plan.generate(current_block)
 
     stdglobals = '\n'.join([
         f'''CREATE SUPERUSER ROLE {edbdef.EDGEDB_SUPERUSER} {{
