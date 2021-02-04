@@ -21,14 +21,10 @@ from typing import *
 
 import uuid
 
-from edb import errors
-
-from edb.edgeql import ast as qlast
 from edb.edgeql import qltypes
 
 from . import delta as sd
 from . import objects as so
-from . import schema as s_schema
 
 
 class SchemaVersion(

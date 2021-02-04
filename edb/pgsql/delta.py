@@ -296,10 +296,41 @@ class CreateSchemaVersion(
 
 class AlterSchemaVersion(
     SchemaVersionCommand,
-    CreateObject,
+    AlterObject,
     adapts=s_ver.AlterSchemaVersion,
 ):
-    pass
+
+    def apply(
+        self,
+        schema: s_schema.Schema,
+        context: sd.CommandContext,
+    ) -> s_schema.Schema:
+        schema = super().apply(schema, context)
+        expected_ver = self.get_orig_attribute_value('version')
+        check = dbops.Query(
+            f'''
+                SELECT
+                    edgedb.raise_on_not_null(
+                        (SELECT NULLIF(
+                            (SELECT
+                                version::text
+                            FROM
+                                edgedb."_SchemaSchemaVersion"
+                            FOR UPDATE),
+                            {ql(str(expected_ver))}
+                        )),
+                        'serialization_failure',
+                        msg => (
+                            'Cannot serialize DDL: '
+                            || (SELECT version::text FROM
+                                edgedb."_SchemaSchemaVersion")
+                        )
+                    )
+                INTO _dummy_text
+            '''
+        )
+        self.pgops.add(check)
+        return schema
 
 
 class PseudoTypeCommand(ObjectMetaCommand):
