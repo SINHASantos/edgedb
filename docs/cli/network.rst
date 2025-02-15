@@ -4,8 +4,8 @@
 Network usage
 =============
 
-Generally command-line tools connect only to the database host. But
-there are two exceptions:
+Generally command-line tools connect only to the database host with a few
+exceptions:
 
 1. When the command-line tool starts, it checks if its version is up to
    date. :ref:`Details <ref_cli_edgedb_version_check>`
@@ -14,6 +14,8 @@ there are two exceptions:
    docker images and also invoke package managers and the docker
    engine to do :ref:`index updates and related data.
    <ref_cli_edgedb_net_server>`
+3. The CLI communicates with the EdgeDB Cloud API to provide easy access to
+   your EdgeDB Cloud instances.
 
 
 .. _ref_cli_edgedb_version_check:
@@ -49,7 +51,7 @@ To disable version check do one of two things:
 
 1. Use ``--no-cli-update-check`` command-line parameter to disable just
    for this invocation
-2. Export ``EDGEDB_NO_VERSION_CHECK=true`` in the environment.
+2. Export ``EDGEDB_RUN_VERSION_CHECK=never`` in the environment.
 
 To verify that check is skipped and no network access is being done
 logging facility can be used::
@@ -58,8 +60,8 @@ logging facility can be used::
    $ edgedb --no-cli-update-check
    [..snip..] Skipping version check due to --no-cli-update-check
    edgedb>
-   $ EDGEDB_NO_VERSION_CHECK=true edgedb
-   [..snip..] Skipping version check due to EDGEDB_NO_VERSION_CHECK
+   $ EDGEDB_RUN_VERSION_CHECK=never edgedb
+   [..snip..] Skipping version check due to EDGEDB_RUN_VERSION_CHECK=never
    edgedb>
 
 

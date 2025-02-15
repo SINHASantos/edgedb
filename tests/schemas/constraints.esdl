@@ -70,14 +70,17 @@ scalar type constraint_my_enum extending str {
 
 
 abstract link translated_label {
-    property lang -> str;
-    property prop1 -> str;
+    lang: str;
+    prop1: str;
 }
 
 abstract link link_with_unique_property {
     property unique_property -> str {
-        constraint exclusive;
+        # TODO: Move the constraint back here once linkprop constraints
+        # supported in conflict selects.
+        # constraint exclusive;
     }
+    constraint exclusive on (@unique_property);
 }
 
 abstract link link_with_unique_property_inherited
@@ -103,6 +106,9 @@ type Object {
     property c_length_2 -> constraint_length_2;
     property c_length_3 -> constraint_length_2 {
         constraint min_len_value(10);
+    }
+    property c_one_of -> str {
+        constraint one_of('foo', 'bar');
     }
 
     property c_minmax -> constraint_minmax;
@@ -137,6 +143,19 @@ type UniqueName {
     link translated_label extending translated_label -> Label {
         constraint exclusive on ((__subject__@source, __subject__@lang));
         constraint exclusive on (__subject__@prop1);
+    }
+
+    multi link translated_labels extending translated_label -> Label {
+        constraint exclusive on ((@source, @lang));
+        constraint exclusive on (__subject__@prop1);
+    }
+
+    link translated_label_tgt extending translated_label -> Label {
+        constraint exclusive on ((__subject__@target, __subject__@lang));
+    }
+
+    multi link translated_labels_tgt extending translated_label -> Label {
+        constraint exclusive on ((@target, @lang));
     }
 }
 
@@ -263,6 +282,7 @@ type PropertyContainer {
         constraint exclusive
     }
 }
+type PropertyContainerChild extending PropertyContainer;
 
 type Pair {
     required property x -> str;
@@ -290,4 +310,11 @@ type Slicing {
     constraint exclusive on ((.y[1:3]));
     constraint exclusive on ((.z[1:3]));
     constraint exclusive on ((.u[1:3]));
+}
+
+scalar type OrderStatus extending enum<open, processing, complete>;
+
+type Order {
+    required property status -> OrderStatus;
+    constraint exclusive on ((OrderStatus.open in .status));
 }

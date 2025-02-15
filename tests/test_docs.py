@@ -6,7 +6,7 @@
 ##
 
 
-from typing import *
+from typing import List
 
 import collections
 import json
@@ -23,6 +23,13 @@ try:
     import docutils.parsers
     import docutils.utils
     import docutils.frontend
+    import docutils.parsers.rst.directives.body  # type: ignore
+    from edb.tools.docs.shared import make_CodeBlock
+
+    docutils.parsers.rst.directives.register_directive(
+        'code-block',
+        make_CodeBlock(docutils.parsers.rst.directives.body.CodeBlock)
+    )
 except ImportError:
     docutils = None  # type: ignore
 
@@ -48,13 +55,9 @@ class TestDocSnippets(unittest.TestCase):
     * all source code in "code-block" directives is parsed to
       check that the syntax is valid;
 
-    * lines must be shorter than 79 characters;
-
     * any ReST warnings (like improper headers or broken indentation)
       are reported as errors.
     """
-
-    MAX_LINE_LEN = 79
 
     CodeSnippet = collections.namedtuple(
         'CodeSnippet',
@@ -139,11 +142,6 @@ class TestDocSnippets(unittest.TestCase):
                         f'Mismatched lint-on/lint-off in '
                         f'{filename}, line {lineno}')
 
-            if len(line) > self.MAX_LINE_LEN and lint_on:
-                reporter.lint_errors.add(
-                    f'Line longer than {self.MAX_LINE_LEN} characters in '
-                    f'{filename}, line {lineno}')
-
         if not lint_on:
             reporter.lint_errors.add(
                 f'Unexpected EOF. No closing \'.. lint-on\' found in '
@@ -194,7 +192,8 @@ class TestDocSnippets(unittest.TestCase):
                                 'code' in node.attributes['classes'])
                         )
                         for subdir in subdirs:
-                            subdir.line += node_parent_line
+                            if subdir.line is not None:
+                                subdir.line += node_parent_line
                             directives.append(subdir)
 
         for directive in directives:
@@ -268,6 +267,7 @@ class TestDocSnippets(unittest.TestCase):
     def run_block_test(self, block):
         try:
             lang = block.lang
+            expect_invalid = False
 
             if lang.endswith('-repl'):
                 lang = lang.rpartition('-')[0]
@@ -299,74 +299,93 @@ class TestDocSnippets(unittest.TestCase):
             else:
                 code = [block.code]
 
-            for snippet in code:
-                if lang == 'edgeql':
-                    ql_parser.parse_block(snippet)
-                elif lang == 'sdl':
-                    # Strip all the "using extension ..." and comment
-                    # lines as they interfere with our module
-                    # detection.
-                    sdl = re.sub(
-                        r'(using\s+extension\s+\w+;)|(#.*?\n)',
-                        '',
-                        snippet
-                    ).strip()
+            if lang.endswith('-invalid'):
+                lang = lang[:-8]
+                expect_invalid = True
 
-                    # the snippet itself may either contain a module
-                    # block or have a fully-qualified top-level name
-                    if not sdl or re.match(
-                            r'''(?xm)
-                                (\bmodule\s+\w+\s*{) |
-                                (^.*
-                                    (type|annotation|link|property|constraint)
-                                    \s+(\w+::\w+)\s+
-                                    ({|extending)
-                                )
-                            ''',
-                            sdl):
-                        ql_parser.parse_sdl(snippet)
+            try:
+                for snippet in code:
+                    if lang == 'edgeql':
+                        ql_parser.parse_block(snippet)
+                    elif lang == 'sdl':
+                        # Strip all the "using extension ..." and comment
+                        # lines as they interfere with our module
+                        # detection.
+                        sdl = re.sub(
+                            r'(using\s+extension\s+\w+;)|(#.*?\n)',
+                            '',
+                            snippet
+                        ).strip()
+
+                        # the snippet itself may either contain a module
+                        # block or have a fully-qualified top-level name
+                        if not sdl or re.match(
+                                r'''(?xm)
+                                    (\bmodule\s+\w+\s*{) |
+                                    (^.*
+                                        (type|annotation|link|property|constraint)
+                                        \s+(\w+::\w+)\s+
+                                        ({|extending)
+                                    )
+                                ''',
+                                sdl):
+                            ql_parser.parse_sdl(snippet)
+                        else:
+                            ql_parser.parse_sdl(
+                                f'module default {{ {snippet} }}'
+                            )
+                    elif lang == 'edgeql-result':
+                        # REPL results
+                        pass
+                    elif lang == 'pseudo-eql':
+                        # Skip "pseudo-eql" language as we don't have a
+                        # parser for it.
+                        pass
+                    elif lang == 'graphql':
+                        graphql_parser.parse(snippet)
+                    elif lang == 'graphql-schema':
+                        # The graphql-schema can be highlighted using graphql
+                        # lexer, but it does not have a dedicated parser.
+                        pass
+                    elif lang == 'json':
+                        json.loads(snippet)
+                    elif lang in {
+                        'bash',
+                        'powershell',
+                        'shell',
+                        'c',
+                        'javascript',
+                        'python',
+                        'typescript',
+                        'go',
+                        'yaml',
+                        'jsx',
+                        'rust',
+                        'tsx',
+                        'elixir',
+                        'toml',
+                        'sql',
+                        'dockerfile'
+                    }:
+                        pass
+                    elif lang[-5:] == '-diff':
+                        pass
                     else:
-                        ql_parser.parse_sdl(f'module default {{ {snippet} }}')
-                elif lang == 'edgeql-result':
-                    # REPL results
-                    pass
-                elif lang == 'pseudo-eql':
-                    # Skip "pseudo-eql" language as we don't have a
-                    # parser for it.
-                    pass
-                elif lang == 'graphql':
-                    graphql_parser.parse(snippet)
-                elif lang == 'graphql-schema':
-                    # The graphql-schema can be highlighted using graphql
-                    # lexer, but it does not have a dedicated parser.
-                    pass
-                elif lang == 'json':
-                    json.loads(snippet)
-                elif lang in {
-                    'bash',
-                    'powershell',
-                    'shell',
-                    'c',
-                    'javascript',
-                    'python',
-                    'typescript',
-                    'go',
-                    'yaml',
-                    'jsx',
-                    'rust',
-                    'tsx',
-                    'elixir',
-                    'toml'
-                }:
-                    pass
-                elif lang[-5:] == '-diff':
-                    pass
-                else:
-                    raise LookupError(f'unknown code-lang {lang}')
+                        raise LookupError(f'unknown code-lang {lang}')
+            except LookupError as ex:
+                raise ex
+            except Exception as ex:
+                if not expect_invalid:
+                    raise ex
+            else:
+                if expect_invalid:
+                    raise AssertionError("code block is marked with '-invalid'"
+                                         " lang, but did not fail validation")
         except Exception as ex:
             raise AssertionError(
                 f'unable to parse {block.lang} code block in '
-                f'{block.filename}, around line {block.lineno}') from ex
+                f'{block.filename}, around line {block.lineno}: '
+                f'{code}') from ex
 
     @unittest.skipIf(docutils is None, 'docutils is missing')
     def test_cqa_doc_snippets(self):
@@ -440,19 +459,6 @@ class TestDocSnippets(unittest.TestCase):
             self.run_block_test(blocks[0])
 
     @unittest.skipIf(docutils is None, 'docutils is missing')
-    def test_doc_test_broken_long_lines(self):
-        source = f'''
-        aaaaaa aa aaa:
-        - aaa
-        - {'a' * self.MAX_LINE_LEN}
-        - aaa
-        '''
-
-        with self.assertRaisesRegex(self.RestructuredTextStyleError,
-                                    r'lint errors:[.\s]*Line longer'):
-            self.extract_code_blocks(source, '<test>')
-
-    @unittest.skipIf(docutils is None, 'docutils is missing')
     def test_doc_test_bad_header(self):
         source = textwrap.dedent('''
             Section
@@ -476,7 +482,6 @@ class TestDocSnippets(unittest.TestCase):
                     sys.executable,
                     '-m', 'sphinx',
                     '-n',
-                    '-W',  # fail on warnings
                     '-b', 'xml',
                     '-q',
                     '-D', 'master_doc=index',
@@ -493,4 +498,20 @@ class TestDocSnippets(unittest.TestCase):
                 f'Unable to build docs with Sphinx.\n\n'
                 f'STDOUT:\n{proc.stdout}\n\n'
                 f'STDERR:\n{proc.stderr}\n'
+            )
+
+        errors = []
+        ignored_errors = re.compile(
+            r'^.* WARNING: undefined label: edgedb-'
+            r'(python|js|go|dart|dotnet|elixir|java)-.*$'
+        )
+        for line in proc.stderr.splitlines():
+            if not ignored_errors.match(line):
+                errors.append(line)
+
+        if len(errors) > 0:
+            errors = '\n'.join(errors)
+            raise AssertionError(
+                f'Unable to build docs with Sphinx.\n\n'
+                f'{errors}\n\n'
             )

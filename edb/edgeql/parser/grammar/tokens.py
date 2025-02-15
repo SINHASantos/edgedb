@@ -22,23 +22,60 @@ from __future__ import annotations
 import re
 import sys
 import types
+import typing
 
 from edb.common import parsing
 
 from . import keywords
-from . import precedence
 
 
 clean_string = re.compile(r"'(?:\s|\n)+'")
 string_quote = re.compile(r'\$(?:[A-Za-z_][A-Za-z_0-9]*)?\$')
 
 
-class TokenMeta(parsing.TokenMeta):
+class Token(parsing.Token, is_internal=True):
     pass
 
 
-class Token(parsing.Token, metaclass=TokenMeta,
-            precedence_class=precedence.PrecedenceMeta):
+class GrammarToken(Token, is_internal=True):
+    """
+    Instead of having different grammars, we prefix each query with a special
+    grammar token which directs the parser to appropriate grammar.
+
+    This greatly reduces the combined size of grammar specifications, since the
+    overlap between grammars is substantial.
+    """
+
+
+class T_STARTBLOCK(GrammarToken):
+    pass
+
+
+class T_STARTEXTENSION(GrammarToken):
+    pass
+
+
+class T_STARTFRAGMENT(GrammarToken):
+    pass
+
+
+class T_STARTMIGRATION(GrammarToken):
+    pass
+
+
+class T_STARTSDLDOCUMENT(GrammarToken):
+    pass
+
+
+class T_STRINTERPSTART(GrammarToken):
+    pass
+
+
+class T_STRINTERPCONT(GrammarToken):
+    pass
+
+
+class T_STRINTERPEND(GrammarToken):
     pass
 
 
@@ -75,6 +112,10 @@ class T_RBRACE(Token, lextoken='}'):
 
 
 class T_DOUBLECOLON(Token, lextoken='::'):
+    pass
+
+
+class T_DOUBLESTAR(Token, lextoken='**'):
     pass
 
 
@@ -130,23 +171,28 @@ class T_AT(Token, lextoken='@'):
     pass
 
 
-class T_ARGUMENT(Token):
+class T_PARAMETER(Token):
     pass
 
 
-class T_ASSIGN(Token):
+class T_PARAMETERANDTYPE(Token):
+    # A special token produced by normalization
     pass
 
 
-class T_ADDASSIGN(Token):
+class T_ASSIGN(Token, lextoken=':='):
     pass
 
 
-class T_REMASSIGN(Token):
+class T_ADDASSIGN(Token, lextoken='+='):
     pass
 
 
-class T_ARROW(Token):
+class T_REMASSIGN(Token, lextoken='-='):
+    pass
+
+
+class T_ARROW(Token, lextoken='->'):
     pass
 
 
@@ -170,23 +216,19 @@ class T_PIPE(Token, lextoken='|'):
     pass
 
 
-class T_NAMEDONLY(Token):
+class T_NAMEDONLY(Token, lextoken='named only'):
     pass
 
 
-class T_SETANNOTATION(Token):
+class T_SETTYPE(Token, lextoken='set type'):
     pass
 
 
-class T_SETTYPE(Token):
+class T_EXTENSIONPACKAGE(Token, lextoken='extension package'):
     pass
 
 
-class T_EXTENSIONPACKAGE(Token):
-    pass
-
-
-class T_ORDERBY(Token):
+class T_ORDERBY(Token, lextoken='order by'):
     pass
 
 
@@ -214,7 +256,23 @@ class T_SCONST(Token):
     pass
 
 
-class T_RSCONST(Token):
+class T_DISTINCTFROM(Token, lextoken="?!="):
+    pass
+
+
+class T_GREATEREQ(Token, lextoken=">="):
+    pass
+
+
+class T_LESSEQ(Token, lextoken="<="):
+    pass
+
+
+class T_NOTDISTINCTFROM(Token, lextoken="?="):
+    pass
+
+
+class T_NOTEQ(Token, lextoken="!="):
     pass
 
 
@@ -222,16 +280,12 @@ class T_IDENT(Token):
     pass
 
 
-class T_OP(Token):
+class T_EOI(Token):
     pass
 
 
-class T_SUBSTITUTION(Token):
-    pass
-
-
-class T_EOF(Token):
-    pass
+# explicitly define tokens which are referenced elsewhere
+T_THEN: typing.Optional[Token] = None
 
 
 def _gen_keyword_tokens():
@@ -245,7 +299,7 @@ def _gen_keyword_tokens():
 
     for token, _ in keywords.edgeql_keywords.values():
         clsname = 'T_{}'.format(token)
-        clskwds = dict(metaclass=parsing.TokenMeta, token=token)
+        clskwds = dict(token=token)
         cls = types.new_class(clsname, (Token,), clskwds, clsexec)
         setattr(mod, clsname, cls)
 

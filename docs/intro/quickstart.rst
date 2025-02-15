@@ -18,29 +18,100 @@ data, and writing your first query. Let's jump in!
 First let's install the EdgeDB CLI. Open a terminal and run the appropriate
 command below.
 
-**macOS/Linux**
+.. note:: Great news for Node users!
 
-.. code-block:: bash
+    Skip installing and start using the EdgeDB CLI right away! Just prepend
+    :ref:`any CLI command <ref_cli_overview>` with ``npx`` or your package
+    manager's equivalent. For example, to create a new project, you can use
+    ``npx edgedb project init``.
 
-  $ curl https://sh.edgedb.com --proto '=https' -sSf1 | sh
+Linux
+-----
 
-**Windows (Powershell)**
+.. tabs::
 
-.. code-block::
+    .. code-tab:: bash
+        :caption: Script
 
-  PS> iwr https://ps1.edgedb.com -useb | iex
+        $ curl https://sh.edgedb.com --proto '=https' -sSf1 | sh
 
-This command downloads and executes a bash script that installs the ``edgedb``
-CLI on your machine. You may be asked for your password. Once the installation
-completes, you may need to **restart your terminal** before you can use the
-``edgedb`` command.
+    .. code-tab:: bash
+        :caption: APT
+
+        $ # Import the EdgeDB packaging key
+        $ sudo mkdir -p /usr/local/share/keyrings && \
+          sudo curl --proto '=https' --tlsv1.2 -sSf \
+            -o /usr/local/share/keyrings/edgedb-keyring.gpg \
+            https://packages.edgedb.com/keys/edgedb-keyring.gpg && \
+        $ # Add the EdgeDB package repository
+        $ echo deb [signed-by=/usr/local/share/keyrings/edgedb-keyring.gpg]\
+            https://packages.edgedb.com/apt \
+            $(grep "VERSION_CODENAME=" /etc/os-release | cut -d= -f2) main \
+            | sudo tee /etc/apt/sources.list.d/edgedb.list
+        $ # Install the EdgeDB package
+        $ sudo apt-get update && sudo apt-get install edgedb-5
+
+    .. code-tab:: bash
+        :caption: YUM
+
+        $ # Add the EdgeDB package repository
+        $ sudo curl --proto '=https' --tlsv1.2 -sSfL \
+            https://packages.edgedb.com/rpm/edgedb-rhel.repo \
+            > /etc/yum.repos.d/edgedb.repo
+        $ # Install the EdgeDB package
+        $ sudo yum install edgedb-5
+
+macOS
+-----
+
+.. tabs::
+
+    .. code-tab:: bash
+        :caption: Script
+
+        $ curl https://sh.edgedb.com --proto '=https' -sSf1 | sh
+
+    .. code-tab:: bash
+        :caption: Homebrew
+
+        $ # Add the EdgeDB tap to your Homebrew
+        $ brew tap edgedb/tap
+        $ # Install EdgeDB CLI
+        $ brew install edgedb-cli
+
+Windows (Powershell)
+--------------------
 
 .. note::
 
-  Check out our additional installation methods `for various Linux distros\
-  </install#linux-debianubuntults>`_, `via Homebrew on macOS\
-  </install#macos-homebrew>`_, and `for the Windows Command Prompt\
-  </install#windows-commandprompt>`_.
+    EdgeDB on Windows requires WSL 2 to create local instances because the
+    EdgeDB server runs on Linux. It is *not* required if you will use the CLI
+    only to manage EdgeDB Cloud and/or other remote instances. This quickstart
+    *does* create local instances, so WSL 2 is required to complete the
+    quickstart.
+
+.. code-block:: powershell
+
+    PS> iwr https://ps1.edgedb.com -useb | iex
+
+.. note:: Command prompt installation
+
+    To install EdgeDB in the Windows Command prompt, follow these steps:
+
+    1. `Download the CLI <https://packages.edgedb.com/dist/x86_64-pc-windows-msvc/edgedb-cli.exe>`__
+
+    2. Navigate to the download location in the command prompt
+
+    3. Run the installation command:
+
+    .. code-block::
+
+        edgedb-cli.exe _self_install
+
+The script installation methods download and execute a bash script that
+installs the ``edgedb`` CLI on your machine. You may be asked for your
+password. Once the installation completes, you may need to **restart your
+terminal** before you can use the ``edgedb`` command.
 
 Now let's set up your EdgeDB project.
 
@@ -71,22 +142,25 @@ up your first EdgeDB instance. You should see something like this:
   No `edgedb.toml` found in `/path/to/quickstart` or above
   Do you want to initialize a new project? [Y/n]
   > Y
-  Specify the name of EdgeDB instance to use with this project [quickstart]:
+  Specify the name of EdgeDB instance to use with this project
+  [default: quickstart]:
   > quickstart
   Checking EdgeDB versions...
-  Specify the version of EdgeDB to use with this project [default: 2.x]:
-  > 2.x
+  Specify the version of EdgeDB to use with this project [default: 5.x]:
+  > 5.x
+  Specify branch name: [default: main]:
+  > main
   ┌─────────────────────┬───────────────────────────────────────────────┐
   │ Project directory   │ ~/path/to/quickstart                          │
   │ Project config      │ ~/path/to/quickstart/edgedb.toml              │
   │ Schema dir (empty)  │ ~/path/to/quickstart/dbschema                 │
   │ Installation method │ portable package                              │
-  │ Version             │ 2.x+c21decd                                   │
+  │ Version             │ 5.x+cc4f3b5                                   │
   │ Instance name       │ quickstart                                    │
   └─────────────────────┴───────────────────────────────────────────────┘
   Downloading package...
-  00:00:01 [====================] 32.98MiB/32.98MiB 32.89MiB/s | ETA: 0s
-  Successfully installed 2.x+c21decd
+  00:00:01 [====================] 41.40 MiB/41.40 MiB 32.89MiB/s | ETA: 0s
+  Successfully installed 5.x+cc4f3b5
   Initializing EdgeDB instance...
   Applying migrations...
   Everything is up to date. Revision initial
@@ -96,9 +170,10 @@ up your first EdgeDB instance. You should see something like this:
 
 This did a couple things.
 
-1. First, it scaffolded your project by creating an ``edgedb.toml`` config
-   file and a schema file ``dbschema/default.esdl``. In the next section,
-   you'll define a schema in ``default.esdl``.
+1. First, it scaffolded your project by creating an
+   :ref:`ref_reference_edgedb_toml` config file and a schema file
+   ``dbschema/default.esdl``. In the next section, you'll define a schema in
+   ``default.esdl``.
 
 2. Second, it spun up an EdgeDB instance called ``quickstart`` and "linked" it
    to the current directory. As long as you're inside the project
@@ -109,17 +184,19 @@ This did a couple things.
 .. note::
 
   Quick note! You can have several **instances** of EdgeDB running on your
-  computer simultaneously. Each instance contains several **databases**. Each
-  database may contain several **modules** (though commonly your schema
-  will be entirely defined inside the ``default`` module).
+  computer simultaneously. Each instance may be **branched** many times. Each
+  branch may have an independent schema consisting of a number of **modules**
+  (though commonly your schema will be entirely defined inside the ``default``
+  module).
 
 Let's connect to our new instance! Run ``edgedb`` in your terminal to open an
 interactive REPL to your instance. You're now connected to a live EdgeDB
-instance running on your computer! Try executing a simple query:
+instance running on your computer! Try executing a simple query (``select 1 + 1;``) after the 
+REPL prompt (``quickstart:main>``):
 
 .. code-block:: edgeql-repl
 
-  db> select 1 + 1;
+  quickstart:main> select 1 + 1;
   {2}
 
 Run ``\q`` to exit the REPL. More interesting queries are coming soon,
@@ -141,7 +218,7 @@ see the following file structure.
   │   ├── default.esdl
   │   ├── migrations
 
-EdgeDB schemas are defined with a dedicated schema description language called
+EdgeDB schemas are defined with a dedicated schema definition language called
 (predictably) EdgeDB SDL (or just **SDL** for short). It's an elegant,
 declarative way to define your data model.
 
@@ -164,17 +241,31 @@ Let's build a simple movie database. We'll need to define two **object types**
 ``dbschema/default.esdl`` in your editor of choice and paste the following:
 
 .. code-block:: sdl
+    :version-lt: 3.0
 
-  module default {
-    type Person {
-      required property name -> str;
-    }
+    module default {
+      type Person {
+        required property name -> str;
+      }
 
-    type Movie {
-      property title -> str;
-      multi link actors -> Person;
-    }
-  };
+      type Movie {
+        property title -> str;
+        multi link actors -> Person;
+      }
+    };
+
+.. code-block:: sdl
+
+    module default {
+      type Person {
+        required name: str;
+      }
+
+      type Movie {
+        title: str;
+        multi actors: Person;
+      }
+    };
 
 
 A few things to note here.
@@ -197,7 +288,7 @@ Now we're ready to run a migration to apply this schema to the database.
 
 Generate a migration file with ``edgedb migration create``. This command
 gathers up our ``*.esdl`` files and sends them to the database. The *database
-itself* parses these files, compares them against it's current schema, and
+itself* parses these files, compares them against its current schema, and
 generates a migration plan! Then the database sends this plan back to the CLI,
 which creates a migration file.
 
@@ -243,13 +334,21 @@ Before we proceed, let's try making a small change to our schema: making the
 ``title`` property of ``Movie`` required. First, update the schema file:
 
 .. code-block:: sdl-diff
+    :version-lt: 3.0
 
+        type Movie {
+    -     property title -> str;
+    +     required property title -> str;
+          multi link actors -> Person;
+        }
 
-      type Movie {
-  -     property title -> str;
-  +     required property title -> str;
-        multi link actors -> Person;
-      }
+.. code-block:: sdl-diff
+
+        type Movie {
+    -     title: str;
+    +     required title: str;
+          multi actors: Person;
+        }
 
 Then create another migration. Because this isn't the initial migration, we
 see something a little different than before.
@@ -277,12 +376,13 @@ Enter ``y`` to confirm the change.
   > y
   Please specify an expression to populate existing objects in
   order to make property 'title' of object type 'default::Movie' required:
-  fill_expr>
+  fill_expr> <std::str>{}
 
 Hm, now we're seeing another prompt. Because ``title`` is changing from
 *optional* to *required*, EdgeDB is asking us what to do for all the ``Movie``
 objects that don't currently have a value for ``title`` defined. We'll just
-specify a placeholder value: ``"Untitled"``.
+specify a placeholder value of "Untitled". Replace the ``<std::str>{}`` value
+with ``"Untitled"`` and press Enter.
 
 .. code-block::
 
@@ -297,7 +397,7 @@ lines:
 
   ALTER TYPE default::Movie {
     ALTER PROPERTY title {
-      SET REQUIRED USING ("Untitled");
+      SET REQUIRED USING ('Untitled');
     };
   };
 
@@ -327,26 +427,28 @@ into every EdgeDB instance (v2.0+ only). To open the dashboard:
   http://localhost:107xx/ui?authToken=<jwt token>
 
 You should see a simple landing page, as below. You'll see a card for each
-database running on your instance—remember: each instance can contain multiple
-databases!
+branch of your instance. Remember: each instance can be branched multiple
+times!
 
 .. image:: images/ui_landing.jpg
   :width: 100%
 
-Currently, there's only one database, which is simply called ``edgedb`` by
-default. Click the ``edgedb`` card.
+Currently, there's only one branch, which is simply called ``main`` by
+default. Click the ``main`` card.
 
 .. image:: images/ui_db.jpg
   :width: 100%
 
-Then click ``Open REPL`` so we can start writing some queries. We'll start
-simple: ``select "Hello world!"``. Click ``RUN`` to execute the query.
+Then click ``Open Editor`` so we can start writing some queries. We'll start
+simple: ``select "Hello world!";``. Click ``RUN`` to execute the query.
 
 .. image:: images/ui_hello.jpg
     :width: 100%
 
-The query should appear in the "query notebook" on the right, along with the
-result of the query.
+The result of the query will appear on the right.
+
+The query will also be added to your history of previous queries, which can be
+accessed via the "HISTORY" tab located on the lower left side of the editor.
 
 Now let's actually ``insert`` an object into our database. Copy the following
 query into the query textarea and hit ``Run``.
@@ -382,7 +484,8 @@ Finally, we can run a ``select`` query to fetch all the data we just inserted.
     }
   };
 
-Click ``COPY AS JSON`` to copy the result of this query to your clipboard. It
+Click the outermost ``COPY`` button in the top right of the query result area
+to copy the result of this query to your clipboard as JSON. The copied text
 will look something like this:
 
 .. code-block:: json
@@ -391,19 +494,30 @@ will look something like this:
     {
       "title": "Dune",
       "actors": [
-        { "name": "Timothee Chalamet" },
-        { "name": "Zendaya" }
+        {
+          "name": "Timothee Chalamet"
+        },
+        {
+          "name": "Zendaya"
+        }
       ]
     }
   ]
 
 EdgeDB UI is a useful development tool, but in practice your application will
 likely be using one of EdgeDB's *client libraries* to execute queries. EdgeDB
-provides official libraries for
-`JavaScript/TypeScript <https://github.com/edgedb/edgedb-js>`__,
-`Go <https://github.com/edgedb/edgedb-go>`__,
-`Python <https://github.com/edgedb/edgedb-python>`__, and
-`Rust <https://github.com/edgedb/edgedb-rust>`_. Check out the :ref:`Clients
+provides official libraries for many langauges:
+
+- :ref:`JavaScript/TypeScript <edgedb-js-intro>`
+- :ref:`Go <edgedb-go-intro>`
+- :ref:`Python <edgedb-python-intro>`
+- :ref:`Rust <ref_rust_index>`
+- :ref:`C# and F# <edgedb-dotnet-intro>`
+- :ref:`Java <edgedb-java-intro>`
+- :ref:`Dart <edgedb-dart-intro>`
+- :ref:`Elixir <edgedb-elixir-intro>`
+
+Check out the :ref:`Clients
 <ref_intro_clients>` guide to get started with the language of your choice.
 
 .. _ref_quickstart_onwards:
@@ -421,9 +535,10 @@ and used a client library.
   the other pages in the Getting Started section, which will cover important
   topics like migrations, the schema language, and EdgeQL in greater detail.
 
-- For guided tours of major concepts, check out the
-  showcase pages for `Data Modeling </showcase/data-modeling>`_,
-  `EdgeQL </showcase/edgeql>`_, and `Migrations </showcase/migrations>`_.
+- For guided tours of major concepts, check out the showcase pages for `Data
+  Modeling <https://www.edgedb.com/showcase/data-modeling>`_, `EdgeQL
+  <https://www.edgedb.com/showcase/edgeql>`_, and `Migrations
+  <https://www.edgedb.com/showcase/migrations>`_.
 
 - For a deep dive into the EdgeQL query language, check out the
   `Interactive Tutorial </tutorial>`_.
@@ -433,10 +548,14 @@ and used a client library.
   total beginner through EdgeDB, from the basics all the way through advanced
   concepts.
 
-- To start building an application using the language of your choice, check
-  out our client libraries for
-  `JavaScript/TypeScript </docs/clients/01_js/index>`__,
-  `Python </docs/clients/00_python/index>`__, and
-  `Go </docs/clients/02_go/index>`__.
+- To start building an application using the language of your choice, check out
+  our client libraries:
 
-- Or just jump into the :ref:`docs <index_toplevel>`!
+  - :ref:`JavaScript/TypeScript <edgedb-js-intro>`
+  - :ref:`Go <edgedb-go-intro>`
+  - :ref:`Python <edgedb-python-intro>`
+  - :ref:`Rust <ref_rust_index>`
+  - :ref:`C# and F# <edgedb-dotnet-intro>`
+  - :ref:`Java <edgedb-java-intro>`
+  - :ref:`Dart <edgedb-dart-intro>`
+  - :ref:`Elixir <edgedb-elixir-intro>`

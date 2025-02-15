@@ -19,53 +19,45 @@
 
 from __future__ import annotations
 
+import re
 import textwrap
-from typing import *
+from typing import Any, Tuple, Iterable, Dict, List
 
 from edb.common import ordered
 
 from ..common import qname as qn
 from ..common import quote_ident as qi
 from ..common import quote_literal as ql
+from .. import ast as pgast
 
 from . import base
 from . import ddl
 from . import tables
 
 
-class IndexColumn(base.DBObject):
-    def __init__(self, name):
-        self.name = name
-
-    def __repr__(self):
-        return '<%s.%s "%s">' % (
-            self.__class__.__module__, self.__class__.__name__, self.name)
-
-
-class TextSearchIndexColumn(IndexColumn):
-    def __init__(self, name, weight, language):
-        super().__init__(name)
-        self.weight = weight
-        self.language = language
-
-    def code(self, block: base.PLBlock) -> str:
-        return (f"setweight(to_tsvector({ql(self.language)}, "
-                f"coalesce({qi(self.name)}, '')), {ql(self.weight)})")
-
-
 class Index(tables.InheritableTableObject):
     def __init__(
-            self, name, table_name, unique=True, exprs=None, predicate=None,
-            inherit=False, metadata=None, columns=None):
+        self,
+        name: str,
+        table_name: Tuple[str, str],
+        unique: bool = True,
+        exprs: Iterable[str] | None = None,
+        with_clause: Dict[str, str] | None = None,
+        predicate: str | None = None,
+        inherit: bool = False,
+        metadata: Dict[str, Any] | None = None,
+        columns: Iterable[str | pgast.Star] | None = None,
+    ) -> None:
         super().__init__(inherit=inherit, metadata=metadata)
 
         assert table_name[1] != 'feature'
 
         self.name = name
         self.table_name = table_name
-        self._columns = ordered.OrderedSet()
+        self._columns: ordered.OrderedSet[str] = ordered.OrderedSet()
         if columns:
             self.add_columns(columns)
+        self.with_clause = with_clause
         self.predicate = predicate
         self.unique = unique
         self.exprs = exprs
@@ -73,49 +65,74 @@ class Index(tables.InheritableTableObject):
         self.add_metadata('fullname', self.name)
 
     @property
-    def name_in_catalog(self):
+    def name_in_catalog(self) -> str:
         return self.name
 
-    def add_columns(self, columns):
+    def add_columns(self, columns: Iterable[str | pgast.Star]) -> None:
         for col in columns:
-            if isinstance(col, str):
-                self._columns.add(col)
-            else:
-                self._columns.add(col.name)
+            if isinstance(col, pgast.Star):
+                raise NotImplementedError()
+            self._columns.add(col)
 
-    def creation_code(self, block: base.PLBlock) -> str:
+    def creation_code(self) -> str:
         if self.exprs:
             exprs = self.exprs
         else:
             exprs = [qi(c) for c in self.columns]
 
-        # TODO: Make NULLs behavior configurable
-        expr = ', '.join(f'({e}) NULLS FIRST' for e in exprs)
+        # Break down the code into the index name (if present) and the rest of
+        # the expression
+        m = re.match(r'(?P<using>\w+)?\s*(?P<expr>.+)',
+                     self.get_metadata('code').strip())
+        assert m is not None
+        using = m['using']
+        expr = m['expr']
 
-        code = '''
-            CREATE {unique} INDEX {name}
-                ON {table} ({expr}) {predicate}'''.format(
+        code = 'CREATE'
+        if self.unique:
+            code += ' UNIQUE'
+        code += f' INDEX {qn(self.name_in_catalog)} ON {qn(*self.table_name)}'
 
-            unique='UNIQUE' if self.unique else '',
-            name=qn(self.name_in_catalog),
-            table=qn(*self.table_name),
-            expr=expr,
-            predicate=('WHERE {}'.format(self.predicate)
-                       if self.predicate else '')
-        )
+        if using:
+            code += f' USING {using}'
+
+        # expr is expected to be wrapped in parentheses, but in order to
+        # manipulate it better we strip the parentheses
+        expr = expr[1:-1].replace('__col__', '{col}')
+        expr = ', '.join(expr.format(col=e) for e in exprs)
+
+        kwargs = self.get_metadata('kwargs')
+        if kwargs is not None:
+            # Escape the expression first
+            expr = expr.replace('{', '{{').replace('}', '}}')
+            expr = re.sub(r'(__kw_(\w+?)__)', r'{\2}', expr)
+            expr = expr.format(**kwargs)
+
+        # Put the stripped parentheses back
+        code += f'({expr})'
+
+        if self.with_clause:
+            with_content = ','.join(
+                f'{k}={v}' for (k, v) in self.with_clause.items()
+            )
+            code += f' WITH ({with_content})'
+
+        if self.predicate:
+            code += f' WHERE {self.predicate}'
+
         return code
 
     @property
-    def columns(self):
+    def columns(self) -> List[str]:
         return list(self._columns)
 
-    def get_type(self):
+    def get_type(self) -> str:
         return 'INDEX'
 
-    def get_id(self):
+    def get_id(self) -> str:
         return qn(self.table_name[0], self.name_in_catalog)
 
-    def get_oid(self):
+    def get_oid(self) -> base.Query:
         qry = textwrap.dedent(f'''\
             SELECT
                 'pg_class'::regclass::oid AS classoid,
@@ -134,14 +151,20 @@ class Index(tables.InheritableTableObject):
 
         return base.Query(text=qry)
 
-    def copy(self):
+    def copy(self) -> Index:
         return self.__class__(
-            name=self.name, table_name=self.table_name, unique=self.unique,
-            expr=self.expr, predicate=self.predicate, columns=self.columns,
-            metadata=self.metadata.copy()
-            if self.metadata is not None else None)
+            name=self.name,
+            table_name=self.table_name,
+            unique=self.unique,
+            exprs=self.exprs,
+            predicate=self.predicate,
+            columns=self.columns,
+            metadata=(
+                self.metadata.copy() if self.metadata is not None else None
+            )
+        )
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return \
             '<%(mod)s.%(cls)s table=%(table)s name=%(name)s ' \
             'cols=(%(cols)s) unique=%(uniq)s predicate=%(pred)s>' % \
@@ -154,28 +177,11 @@ class Index(tables.InheritableTableObject):
              'table': '{}.{}'.format(*self.table_name)}
 
 
-class TextSearchIndex(Index):
-    def __init__(self, name, table_name, columns):
-        super().__init__(name, table_name)
-        self.add_columns(columns)
-
-    def creation_code(self, block: base.PLBlock) -> str:
-        code = \
-            'CREATE INDEX %(name)s ON %(table)s ' \
-            'USING gin((%(cols)s)) %(predicate)s' % \
-            {'name': qn(self.name),
-             'table': qn(*self.table_name),
-             'cols': ' || '.join(c.code(block) for c in self.columns),
-             'predicate': ('WHERE %s' % self.predicate
-                           if self.predicate else '')}
-        return code
-
-
 class IndexExists(base.Condition):
-    def __init__(self, index_name):
+    def __init__(self, index_name: tuple[str, str]):
         self.index_name = index_name
 
-    def code(self, block: base.PLBlock) -> str:
+    def code(self) -> str:
         return textwrap.dedent(f'''\
             SELECT
                    i.indexrelid
@@ -192,24 +198,39 @@ class IndexExists(base.Condition):
 
 
 class CreateIndex(ddl.CreateObject):
-    def __init__(self, index, *, conditional=False, **kwargs):
+    def __init__(
+        self,
+        index: Index,
+        *,
+        conditional: bool = False,
+        **kwargs: Any
+    ) -> None:
         super().__init__(index, **kwargs)
         self.index = index
         if conditional:
             self.neg_conditions.add(
-                IndexExists((index.table_name[0], index.name_in_catalog)))
+                IndexExists((index.table_name[0], index.name_in_catalog))
+            )
 
-    def code(self, block: base.PLBlock) -> str:
-        return self.index.creation_code(block)
+    def code(self) -> str:
+        return self.index.creation_code()
 
 
 class DropIndex(ddl.DropObject):
-    def __init__(self, index, *, conditional=False, **kwargs):
+    def __init__(
+        self,
+        index: Index,
+        *,
+        conditional: bool = False,
+        **kwargs: Any
+    ):
         super().__init__(index, **kwargs)
         if conditional:
             self.conditions.add(
-                IndexExists((index.table_name[0], index.name_in_catalog)))
+                IndexExists((index.table_name[0], index.name_in_catalog))
+            )
 
-    def code(self, block: base.PLBlock) -> str:
+    def code(self) -> str:
+        assert isinstance(self.object, Index)
         name = qn(self.object.table_name[0], self.object.name_in_catalog)
         return f'DROP INDEX {name}'

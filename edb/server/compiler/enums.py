@@ -18,17 +18,20 @@
 
 
 from __future__ import annotations
-from typing import *
+from typing import Callable, TypeVar, TYPE_CHECKING
 
 import enum
 
 from edb.common import enum as strenum
 from edb.edgeql import qltypes as ir
-from edb.protocol.enums import Cardinality
+from edb.protocol.enums import Cardinality as Cardinality
 
 
 if TYPE_CHECKING:
     Error_T = TypeVar('Error_T')
+
+
+TypeTag = ir.TypeTag
 
 
 class Capability(enum.IntFlag):
@@ -40,18 +43,21 @@ class Capability(enum.IntFlag):
     PERSISTENT_CONFIG = 1 << 4    # noqa
 
     ALL               = 0xFFFF_FFFF_FFFF_FFFF  # noqa
+    WRITE             = (MODIFICATIONS | DDL | PERSISTENT_CONFIG)  # noqa
+    NONE              = 0  # noqa
 
     def make_error(
         self,
         allowed: Capability,
         error_constructor: Callable[[str], Error_T],
+        reason: str,
     ) -> Error_T:
         for item in Capability:
             if item & allowed:
                 continue
             if self & item:
                 return error_constructor(
-                    f"cannot execute {CAPABILITY_TITLES[item]}")
+                    f"cannot execute {CAPABILITY_TITLES[item]}: {reason}")
         raise AssertionError(
             f"extra capability not found in"
             f" {self} allowed {allowed}"
@@ -77,6 +83,12 @@ class OutputFormat(strenum.StrEnum):
 class InputFormat(strenum.StrEnum):
     BINARY = 'BINARY'
     JSON = 'JSON'
+
+
+class InputLanguage(strenum.StrEnum):
+    EDGEQL = 'EDGEQL'
+    SQL = 'SQL'
+    SQL_PARAMS = 'SQL_PARAMS'
 
 
 def cardinality_from_ir_value(card: ir.Cardinality) -> Cardinality:

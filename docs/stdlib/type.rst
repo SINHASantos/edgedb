@@ -27,6 +27,36 @@ Types
       - :eql:op-desc:`introspect`
 
 
+Finding an object's type
+------------------------
+
+You can find the type of an object via that object's ``__type__`` link, which
+carries various information about the object's type, including the type's
+``name``.
+
+.. code-block:: edgeql-repl
+
+    db> select <json>Person {
+    ...  __type__: {
+    ...    name
+    ...    }
+    ...  } limit 1;
+    {Json("{\"__type__\": {\"name\": \"default::Villain\"}}")}
+
+This information can be pulled into the top level by assigning a name to
+the ``name`` property inside ``__type__``:
+
+.. code-block:: edgeql-repl
+
+    db> select <json>Person { type := .__type__.name } limit 1;
+    {Json("{\"type\": \"default::Villain\"}")}
+
+.. note::
+
+    There's nothing magical about the ``__type__`` link: it's a standard link
+    that exists on every object due to their inheritance from
+    :eql:type:`BaseObject`, linking to the current object's type.
+
 ----------
 
 
@@ -83,6 +113,7 @@ Types
     object must satisfy ``object is (A | B | C)``.
 
     .. code-block:: sdl
+        :version-lt: 3.0
 
         abstract type Named {
             required property name -> str;
@@ -98,6 +129,24 @@ Types
 
         type User extending Named {
             multi link stuff -> Named | Text;
+        }
+
+    .. code-block:: sdl
+
+        abstract type Named {
+            required name: str;
+        }
+
+        abstract type Text {
+            required body: str;
+        }
+
+        type Item extending Named;
+
+        type Note extending Text;
+
+        type User extending Named {
+            multi stuff: Named | Text;
         }
 
     With the above schema, the following would be valid:
@@ -212,10 +261,11 @@ Types
         with module example
         select Text {
             name :=
-                Text[is Issue].name IF Text is Issue ELSE
+                Text[is Issue].name if Text is Issue else
                 <str>{},
                 # the cast to str is necessary here, because
-                # the type of the computed expression must be defined
+                # the type of the computed expression must be
+                # defined
             body,
         };
 
@@ -259,10 +309,20 @@ Types
     that don't indicate their respective target types:
 
     .. code-block:: sdl
+        :version-lt: 3.0
 
         type Foo {
             property bar -> int16;
             link baz -> Bar;
+        }
+
+        type Bar extending Foo;
+
+    .. code-block:: sdl
+
+        type Foo {
+            bar: int16;
+            baz: Bar;
         }
 
         type Bar extending Foo;
@@ -315,7 +375,7 @@ Types
     Static type introspection operator.
 
     This operator returns the :ref:`introspection type
-    <ref_eql_introspection>` corresponding to type provided as
+    <ref_datamodel_introspection>` corresponding to type provided as
     operand. It works well in combination with :eql:op:`typeof`.
 
     Currently, the ``introspect`` operator only supports :ref:`scalar
@@ -327,10 +387,20 @@ Types
     that don't indicate their respective target types:
 
     .. code-block:: sdl
+        :version-lt: 3.0
 
         type Foo {
             property bar -> int16;
             link baz -> Bar;
+        }
+
+        type Bar extending Foo;
+
+    .. code-block:: sdl
+
+        type Foo {
+            bar: int16;
+            baz: Bar;
         }
 
         type Bar extending Foo;

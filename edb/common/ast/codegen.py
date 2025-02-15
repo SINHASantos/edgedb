@@ -18,13 +18,21 @@
 
 
 from __future__ import annotations
-from typing import *
+from typing import Any, Optional, Union, Iterable, Sequence, List
+from dataclasses import dataclass
 
 import itertools
 import textwrap
 
 from . import base
 from .visitor import NodeVisitor
+
+
+@dataclass(kw_only=True, eq=False, match_args=False, slots=True, frozen=True)
+class Options:
+    indent_with: str = ' ' * 4
+    add_line_information: bool = False
+    pretty: bool = True
 
 
 class SourceGenerator(NodeVisitor):
@@ -52,11 +60,25 @@ class SourceGenerator(NodeVisitor):
         visitor = getattr(self, method, self.generic_visit)
         return visitor(node)
 
-    def write(
-        self,
-        *x: str,
-        delimiter: Optional[str] = None
+    def visit_indented(
+        self, node: base.AST, indent: bool = True, nest: bool = False
     ) -> None:
+        if nest:
+            self.write("(")
+        if indent:
+            self.new_lines = 1
+            self.char_indentation += 1
+        res = self.visit(node)
+        if indent:
+            self.char_indentation -= 1
+        if nest:
+            self.write(")")
+            self.new_lines = 1
+        return res
+
+    def write(self, *x: str, delimiter: Optional[str] = None) -> None:
+        if not x:
+            return
         if self.new_lines:
             if self.result and self.pretty:
                 self.current_line += self.new_lines
@@ -108,6 +130,9 @@ class SourceGenerator(NodeVisitor):
             self.write('# line: %s' % node.lineno)
             self.new_lines = 1
 
+    def finish(self) -> str:
+        return ''.join(self.result)
+
     @classmethod
     def to_source(
         cls,
@@ -120,7 +145,7 @@ class SourceGenerator(NodeVisitor):
         generator = cls(indent_with, add_line_information,  # type: ignore
                         pretty=pretty, **kwargs)
         generator.visit(node)
-        return ''.join(generator.result)
+        return generator.finish()
 
     def indent_text(self, text: str) -> str:
         return textwrap.indent(text, self.indent_with * self.indentation)

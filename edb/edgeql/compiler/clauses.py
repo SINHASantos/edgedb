@@ -22,7 +22,7 @@
 
 from __future__ import annotations
 
-from typing import *
+from typing import Optional, Sequence, List
 
 from edb.edgeql import ast as qlast
 from edb.ir import ast as irast
@@ -32,7 +32,6 @@ from edb.schema import name as sn
 
 from . import context
 from . import dispatch
-from . import inference
 from . import polyres
 from . import schemactx
 from . import setgen
@@ -52,16 +51,17 @@ def compile_where_clause(
     with ctx.newscope(fenced=True) as subctx:
         subctx.expr_exposed = context.Exposure.UNEXPOSED
         subctx.path_scope.unnest_fence = True
+        subctx.disallow_dml = "in a FILTER clause"
         ir_expr = dispatch.compile(where, ctx=subctx)
-        bool_t = ctx.env.get_track_schema_type(sn.QualName('std', 'bool'))
+        bool_t = ctx.env.get_schema_type_and_track(sn.QualName('std', 'bool'))
         ir_set = setgen.scoped_set(ir_expr, typehint=bool_t, ctx=subctx)
 
     return ir_set
 
 
 def compile_orderby_clause(
-        sortexprs: Optional[Sequence[qlast.SortExpr]], *,
-        ctx: context.ContextLevel) -> Optional[List[irast.SortExpr]]:
+    sortexprs: Optional[Sequence[qlast.SortExpr]], *, ctx: context.ContextLevel
+) -> Optional[List[irast.SortExpr]]:
 
     if not sortexprs:
         return None
@@ -73,19 +73,20 @@ def compile_orderby_clause(
 
     with ctx.new() as subctx:
         subctx.expr_exposed = context.Exposure.UNEXPOSED
+        subctx.disallow_dml = "in an ORDER BY clause"
         for sortexpr in sortexprs:
             with subctx.newscope(fenced=True) as exprctx:
                 exprctx.path_scope.unnest_fence = True
                 ir_sortexpr = dispatch.compile(sortexpr.path, ctx=exprctx)
                 ir_sortexpr = setgen.scoped_set(
                     ir_sortexpr, force_reassign=True, ctx=exprctx)
-                ir_sortexpr.context = sortexpr.context
+                ir_sortexpr.span = sortexpr.span
 
                 # Check that the sortexpr type is actually orderable
                 # with either '>' or '<' based on the DESC or ASC sort
                 # order.
                 env = exprctx.env
-                sort_type = inference.infer_type(ir_sortexpr, env)
+                sort_type = setgen.get_set_type(ir_sortexpr, ctx=ctx)
                 # Postgres by default treats ASC as using '<' and DESC
                 # as using '>'. We should do the same.
                 if sortexpr.direction == qlast.SortDesc:
@@ -110,14 +111,14 @@ def compile_orderby_clause(
                             f'type {sort_type_name!r} cannot be used in '
                             f'ORDER BY clause because ordering is not '
                             f'defined for it',
-                            context=sortexpr.context)
+                            span=sortexpr.span)
 
                     elif len(matched) > 1:
                         raise errors.QueryError(
                             f'type {sort_type_name!r} cannot be used in '
                             f'ORDER BY clause because ordering is '
                             f'ambiguous for it',
-                            context=sortexpr.context)
+                            span=sortexpr.span)
 
             result.append(
                 irast.SortExpr(
@@ -129,8 +130,8 @@ def compile_orderby_clause(
 
 
 def compile_limit_offset_clause(
-        expr: Optional[qlast.Base], *,
-        ctx: context.ContextLevel) -> Optional[irast.Set]:
+    expr: Optional[qlast.Base], *, ctx: context.ContextLevel
+) -> Optional[irast.Set]:
     if expr is None:
         ir_set = None
     else:
@@ -141,10 +142,10 @@ def compile_limit_offset_clause(
             subctx.partial_path_prefix = None
 
             ir_expr = dispatch.compile(expr, ctx=subctx)
-            int_t = ctx.env.get_track_schema_type(
+            int_t = ctx.env.get_schema_type_and_track(
                 sn.QualName('std', 'int64'))
             ir_set = setgen.scoped_set(
                 ir_expr, force_reassign=True, typehint=int_t, ctx=subctx)
-            ir_set.context = expr.context
+            ir_set.span = expr.span
 
     return ir_set

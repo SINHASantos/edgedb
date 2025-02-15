@@ -19,22 +19,24 @@
 
 from __future__ import annotations
 
-from typing import *
+from typing import Any, Dict
 
 from edb.tools.pygments.edgeql import EdgeQLLexer
 
 from sphinx import domains as s_domains
-from sphinx.directives import code as s_code
+from docutils.parsers.rst import directives as d_directives  # type: ignore
 
 from . import shared
 
 
-class SDLSynopsisDirective(s_code.CodeBlock):
+class SDLSynopsisDirective(shared.CodeBlock):
 
     has_content = True
     optional_arguments = 0
     required_arguments = 0
-    option_spec: Dict[str, Any] = {}
+    option_spec: Dict[str, Any] = {
+        'version-lt': d_directives.unchanged_required
+    }
 
     def run(self):
         self.arguments = ['sdl-synopsis']
@@ -44,7 +46,7 @@ class SDLSynopsisDirective(s_code.CodeBlock):
 class SDLDomain(s_domains.Domain):
 
     name = "sdl"
-    label = "EdgeDB Schema Definition Language"
+    label = "Gel Schema Definition Language"
 
     directives = {
         'synopsis': SDLSynopsisDirective,

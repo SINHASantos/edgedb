@@ -29,7 +29,7 @@ Description
 -----------
 
 The command ``create abstract annotation`` defines a new annotation
-for use in the current database.
+for use in the current :versionreplace:`database;5.0:branch`.
 
 If *name* is qualified with a module name, then the annotation is created
 in that module, otherwise it is created in the current module.
@@ -275,4 +275,5 @@ Drop the ``title`` annotation from the ``User`` object type:
   * - :ref:`Schema > Annotations <ref_datamodel_annotations>`
   * - :ref:`SDL > Annotations <ref_eql_sdl_annotations>`
   * - :ref:`Cheatsheets > Annotations <ref_cheatsheet_annotations>`
-  * - :ref:`Introspection > Object types <ref_eql_introspection_object_types>`
+  * - :ref:`Introspection > Object types
+      <ref_datamodel_introspection_object_types>`

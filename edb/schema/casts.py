@@ -18,7 +18,7 @@
 
 
 from __future__ import annotations
-from typing import *
+from typing import Any, Optional, Type, Mapping, cast
 
 import functools
 
@@ -34,10 +34,8 @@ from . import functions as s_func
 from . import name as sn
 from . import objects as so
 from . import types as s_types
+from . import schema as s_schema
 from . import utils
-
-if TYPE_CHECKING:
-    from edb.schema import schema as s_schema
 
 
 _NOT_REACHABLE = 10000000
@@ -174,11 +172,21 @@ def is_castable(
 
 
 def get_cast_fullname_from_names(
-    module: str,
-    from_type: str,
-    to_type: str,
+    from_type: sn.Name,
+    to_type: sn.Name,
 ) -> sn.QualName:
-    quals = [from_type, to_type]
+    std = not (
+        (
+            isinstance(from_type, sn.QualName)
+            and sn.UnqualName(from_type.module) not in s_schema.STD_MODULES
+        ) or (
+            isinstance(to_type, sn.QualName)
+            and sn.UnqualName(to_type.module) not in s_schema.STD_MODULES
+        )
+    )
+    module = 'std' if std else '__ext_casts__'
+
+    quals = [str(from_type), str(to_type)]
     shortname = sn.QualName(module, 'cast')
     return sn.QualName(
         module=shortname.module,
@@ -188,14 +196,12 @@ def get_cast_fullname_from_names(
 
 def get_cast_fullname(
     schema: s_schema.Schema,
-    module: str,
     from_type: s_types.TypeShell[s_types.Type],
     to_type: s_types.TypeShell[s_types.Type],
 ) -> sn.QualName:
     return get_cast_fullname_from_names(
-        module,
-        str(from_type.get_name(schema)),
-        str(to_type.get_name(schema)),
+        from_type.get_name(schema),
+        to_type.get_name(schema),
     )
 
 
@@ -264,7 +270,7 @@ class CastCommand(sd.QualifiedObjectCommand[Cast],
         if not context.stdmode and not context.testmode:
             raise errors.UnsupportedFeatureError(
                 'user-defined casts are not supported',
-                context=astnode.context
+                span=astnode.span
             )
 
         return super()._cmd_tree_from_ast(schema, astnode, context)
@@ -273,7 +279,7 @@ class CastCommand(sd.QualifiedObjectCommand[Cast],
     def _classname_from_ast(
         cls,
         schema: s_schema.Schema,
-        astnode: qlast.NamedDDL,
+        astnode: qlast.ObjectDDL,
         context: sd.CommandContext,
     ) -> sn.QualName:
         assert isinstance(astnode, qlast.CastCommand)
@@ -293,8 +299,7 @@ class CastCommand(sd.QualifiedObjectCommand[Cast],
             schema=schema,
         )
 
-        module = 'std' if context.stdmode else '__derived__'
-        return get_cast_fullname(schema, module, from_type, to_type)
+        return get_cast_fullname(schema, from_type, to_type)
 
     def canonicalize_attributes(
         self,
@@ -326,7 +331,7 @@ class CreateCast(CastCommand, sd.CreateObject[Cast]):
             raise errors.DuplicateCastDefinitionError(
                 f'a cast from {from_type.get_displayname(schema)!r} '
                 f'to {to_type.get_displayname(schema)!r} is already defined',
-                context=self.source_context)
+                span=self.span)
 
         return super()._create_begin(schema, context)
 
@@ -452,3 +457,18 @@ class AlterCast(CastCommand, sd.AlterObject[Cast]):
 
 class DeleteCast(CastCommand, sd.DeleteObject[Cast]):
     astnode = qlast.DropCast
+
+    def _delete_begin(
+        self,
+        schema: s_schema.Schema,
+        context: sd.CommandContext,
+    ) -> s_schema.Schema:
+        schema = super()._delete_begin(schema, context)
+        if not context.canonical:
+            from_type = self.scls.get_from_type(schema)
+            if op := from_type.as_type_delete_if_unused(schema):
+                self.add_caused(op)
+            to_type = self.scls.get_to_type(schema)
+            if op := to_type.as_type_delete_if_unused(schema):
+                self.add_caused(op)
+        return schema

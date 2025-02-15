@@ -23,14 +23,23 @@ There's a :ref:`corresponding SDL declaration <ref_eql_sdl_modules>`
 for a module, although in SDL a module declaration is likely to also
 include that module's content.
 
+.. versionadded:: 3.0
+
+    You may also create a nested module.
+
+    .. eql:synopsis::
+
+        create module <parent-name>::<name> [ if not exists ];
+
 Description
 -----------
 
 The command ``create module`` defines a new module for the current
-database. The name of the new module must be distinct from any
-existing module in the current database. Unlike :ref:`SDL module
-declaration <ref_eql_sdl_modules>` the ``create module`` command does
-not have sub-commands, as module contents are created separately.
+:versionreplace:`database;5.0:branch`. The name of the new module must be
+distinct from any existing module in the current
+:versionreplace:`database;5.0:branch`. Unlike :ref:`SDL module declaration
+<ref_eql_sdl_modules>` the ``create module`` command does not have
+sub-commands, as module contents are created separately.
 
 Parameters
 ----------
@@ -50,6 +59,14 @@ Create a new module:
 
     create module payments;
 
+.. versionadded:: 3.0
+
+    Create a new nested module:
+
+    .. code-block:: edgeql
+
+        create module payments::currencies;
+
 
 Drop module
 ===========
@@ -67,9 +84,9 @@ Remove a module.
 Description
 -----------
 
-The command ``drop module`` removes an existing module from the
-current database. All schema items and data contained in the module
-are removed as well.
+The command ``drop module`` removes an existing empty module from the
+current :versionreplace:`database;5.0:branch`. If the module contains any
+schema items, this command will fail.
 
 
 Examples

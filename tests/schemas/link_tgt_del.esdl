@@ -23,11 +23,17 @@ abstract type Named {
     }
 }
 
-type Target1 extending Named;
+type Target1 extending Named {
+     multi link extra_tgt -> Target1;
+};
 type Target1Child extending Target1;
+type Target2 extending Named;
 
 type Source1 extending Named {
     link tgt1_restrict -> Target1 {
+        on target delete restrict;
+    }
+    link tgt_union_restrict -> Target1 | Target2 {
         on target delete restrict;
     }
     link tgt1_allow -> Target1 {
@@ -46,6 +52,9 @@ type Source1 extending Named {
         on target delete allow;
     }
     multi link tgt1_m2m_del_source -> Target1 {
+        on target delete delete source;
+    }
+    multi link tgt_union_m2m_del_source -> Target1 | Target2 {
         on target delete delete source;
     }
 
@@ -82,6 +91,7 @@ type Source2 extending Named {
     link src1_del_source -> Source1 {
         on target delete delete source;
     }
+    multi link tgt_m2m -> Target1;
 }
 
 type Source3 extending Source1;
@@ -101,3 +111,12 @@ abstract type AbsSource1 extending Named {
 }
 
 type ChildSource1 extending AbsSource1;
+
+type SchemaSource extending Named {
+    link schema_restrict -> schema::Object {
+        on target delete restrict;
+    }
+    link schema_m_restrict -> schema::Object {
+        on target delete restrict;
+    }
+}

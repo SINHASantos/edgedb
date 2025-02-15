@@ -20,6 +20,12 @@ Sets
     * - :eql:op:`set union set <union>`
       - :eql:op-desc:`union`
 
+    * - :eql:op:`set intersect set <intersect>`
+      - :eql:op-desc:`intersect`
+
+    * - :eql:op:`set except set <except>`
+      - :eql:op-desc:`except`
+
     * - :eql:op:`exists set <exists>`
       - :eql:op-desc:`exists`
 
@@ -89,7 +95,7 @@ Sets
 
 .. eql:operator:: distinct: distinct set of anytype -> set of anytype
 
-    Return a set without repeating any elements.
+    Produces a set of all unique elements in the given set.
 
     ``distinct`` is a set operator that returns a new set where
     no member is equal to any other member.
@@ -108,10 +114,12 @@ Sets
 
     :index: intersection
 
-    Test the membership of an element in a set.
+    Checks if a given element is a member of a given set.
 
-    Set membership operators ``in`` and ``not in`` that test for each
-    element of ``A`` whether it is present in ``B``.
+    Set membership operators ``in`` and ``not in`` test whether each element
+    of the left operand is present in the right operand. This means supplying
+    a set as the left operand will produce a set of boolean results, one for
+    each element in the left operand.
 
     .. code-block:: edgeql-repl
 
@@ -140,7 +148,7 @@ Sets
 
 .. eql:operator:: union: set of anytype union set of anytype -> set of anytype
 
-    Merge two sets.
+    Merges two sets.
 
     Since EdgeDB sets are formally multisets, ``union`` is a *multiset sum*,
     so effectively it merges two multisets keeping all of their members.
@@ -148,7 +156,44 @@ Sets
     For example, applying ``union`` to ``{1, 2, 2}`` and
     ``{2}``, results in ``{1, 2, 2, 2}``.
 
-    If you need a distinct union, wrap it with :eql:op:`distinct`.
+    If you need a distinct union, wrap it with the :eql:op:`distinct`
+    operator.
+
+
+----------
+
+
+.. eql:operator:: intersect: set of anytype intersect set of anytype \
+                                -> set of anytype
+
+    .. versionadded:: 3.0
+
+    Produces a set containing the common items between the given sets.
+
+    .. note::
+
+        The ordering of the returned set may not match that of the operands.
+
+    If you need a distinct intersection, wrap it with the :eql:op:`distinct`
+    operator.
+
+
+----------
+
+
+.. eql:operator:: except: set of anytype except set of anytype \
+                                -> set of anytype
+
+    .. versionadded:: 3.0
+
+    Produces a set of all items in the first set which are not in the second.
+
+    .. note::
+
+        The ordering of the returned set may not match that of the operands.
+
+    If you need a distinct set of exceptions, wrap it with the
+    :eql:op:`distinct` operator.
 
 
 ----------
@@ -159,21 +204,21 @@ Sets
 
     :index: if else ifelse elif ternary
 
-    Conditionally provide one or the other result.
+    Produces one of two possible results based on a given condition.
 
     .. eql:synopsis::
 
         <left_expr> if <condition> else <right_expr>
 
-    If :eql:synopsis:`<condition>` is ``true``, then the value of the
-    ``if..else`` expression is the value of :eql:synopsis:`<left_expr>`;
-    if :eql:synopsis:`<condition>` is ``false``, the result is the value of
-    :eql:synopsis:`<right_expr>`.
+    If the :eql:synopsis:`<condition>` is ``true``, the ``if...else``
+    expression produces the value of the :eql:synopsis:`<left_expr>`. If the
+    :eql:synopsis:`<condition>` is ``false``, however, the ``if...else``
+    expression produces the value of the :eql:synopsis:`<right_expr>`.
 
     .. code-block:: edgeql-repl
 
-        db> select 'hello' if 2 * 2 = 4 else 'bye';
-        {'hello'}
+        db> select 'real life' if 2 * 2 = 4 else 'dream';
+        {'real life'}
 
     ``if..else`` expressions can be chained when checking multiple conditions
     is necessary:
@@ -187,18 +232,96 @@ Sets
         ...        'Other';
         {'Banana'}
 
+    It can be used to create, update, or delete different objects based on
+    some condition:
+
+    .. code-block:: edgeql
+    
+        with
+          name := <str>$0,
+          admin := <bool>$1
+        select (insert AdminUser { name := name }) if admin
+          else (insert User { name := name });
+
+    .. note::
+
+        DML (i.e., :ref:`insert <ref_eql_insert>`, :ref:`update
+        <ref_eql_update>`, :ref:`delete <ref_eql_delete>`) was not supported
+        in ``if...else`` prior to EdgeDB 4.0. If you need to do one of these
+        on an older version of EdgeDB, you can use a 
+        :ref:`for loop conditional <ref_eql_for_conditional_dml>` as a
+        workaround.
+
+
 -----------
 
+
+.. eql:operator:: if..then..else: if bool then set of anytype else set of \
+                                anytype -> set of anytype
+
+    .. versionadded:: 4.0
+
+    Produces one of two possible results based on a given condition.
+    
+    Uses ``then`` for an alternative syntax order to ``if..else`` above.
+
+    .. eql:synopsis::
+
+        if <condition> then <left_expr> else <right_expr>
+
+    If the :eql:synopsis:`<condition>` is ``true``, the ``if...else``
+    expression produces the value of the :eql:synopsis:`<left_expr>`. If the
+    :eql:synopsis:`<condition>` is ``false``, however, the ``if...else``
+    expression produces the value of the :eql:synopsis:`<right_expr>`.
+
+    .. code-block:: edgeql-repl
+
+        db> select if 2 * 2 = 4 then 'real life' else 'dream';
+        {'real life'}
+
+    ``if..else`` expressions can be chained when checking multiple conditions
+    is necessary:
+
+    .. code-block:: edgeql-repl
+
+        db> with color := 'yellow', select
+        ... if color = 'red' then
+        ...   'Apple'
+        ... else if color = 'yellow' then
+        ...   'Banana'
+        ... else if color = 'orange' then
+        ...   'Orange'
+        ... else
+        ...   'Other';
+        {'Banana'}
+
+    It can be used to create, update, or delete different objects based on
+    some condition:
+
+    .. code-block:: edgeql
+    
+        with
+          name := <str>$0,
+          admin := <bool>$1
+        select if admin then (
+            insert AdminUser { name := name }
+        ) else (
+            insert User { name := name }
+        )
+
+
+-----------
 
 .. eql:operator:: coalesce: optional anytype ?? set of anytype \
                               -> set of anytype
 
-    Coalesce.
+    Produces the first of its operands that is not an empty set.
 
-    Evaluate to ``A`` for non-empty ``A``, otherwise evaluate to ``B``.
+    This evaluates to ``A`` for an non-empty ``A``, otherwise evaluates to
+    ``B``.
 
     A typical use case of the coalescing operator is to provide default
-    values for optional properties.
+    values for optional properties:
 
     .. code-block:: edgeql
 
@@ -206,9 +329,17 @@ Sets
         # for all issues.
         select (Issue.name, Issue.priority.name ?? 'n/a');
 
-    Without the coalescing operator the above query would skip any
+    Without the coalescing operator, the above query will skip any
     ``Issue`` without priority.
 
+    As of EdgeDB 4.0, the coalescing operator can be used to express
+    things like "select or insert if missing":
+  
+    .. code-block:: edgeql
+
+        select 
+          (select User filter .name = 'Alice') ??
+          (insert User { name := 'Alice' }); 
 
 ----------
 
@@ -269,11 +400,11 @@ Sets
 
 .. eql:operator:: exists: exists set of anytype -> bool
 
-    Test whether a set is not empty.
+    Determines whether a set is empty or not.
 
     ``exists`` is an aggregate operator that returns a singleton set
-    ``{true}`` if the input set is not empty and returns ``{false}``
-    otherwise.
+    ``{true}`` if the input set is not empty, and returns ``{false}``
+    otherwise:
 
     .. code-block:: edgeql-repl
 
@@ -288,7 +419,7 @@ Sets
 
     :index: is type intersection
 
-    Filter the set based on type.
+    Filters a set based on its type. Will return back the specified type.
 
     The type intersection operator removes all elements from the input set
     that aren't of the specified type. Additionally, since it
@@ -300,6 +431,7 @@ Sets
     Consider the following types:
 
     .. code-block:: sdl
+        :version-lt: 3.0
 
         type User {
             required property name -> str;
@@ -317,6 +449,24 @@ Sets
             required property body -> str;
         }
 
+    .. code-block:: sdl
+
+        type User {
+            required name: str;
+        }
+
+        abstract type Owned {
+            required owner: User;
+        }
+
+        type Issue extending Owned {
+            required title: str;
+        }
+
+        type Comment extending Owned {
+            required body: str;
+        }
+
     The following expression will get all :eql:type:`Objects <Object>`
     owned by all users (if there are any):
 
@@ -324,17 +474,17 @@ Sets
 
         select User.<owner;
 
-    By default :ref:`backlinks <ref_datamodel_links>` don't infer any
+    By default, :ref:`backlinks <ref_datamodel_links>` don't infer any
     type information beyond the fact that it's an :eql:type:`Object`.
-    To ensure that this path specifically reaches ``Issue`` the type
-    intersection operator must be used:
+    To ensure that this path specifically reaches ``Issue``, the type
+    intersection operator must then be used:
 
     .. code-block:: edgeql
 
         select User.<owner[is Issue];
 
-        # With the use of type intersection it's possible to refer to
-        # specific property of Issue now:
+        # With the use of type intersection it's possible to refer
+        # to a specific property of Issue now:
         select User.<owner[is Issue].title;
 
 
@@ -348,15 +498,17 @@ Sets
 
     :index: multiplicity uniqueness
 
-    Check that the input set contains only unique elements, i.e a *proper set*.
+    Checks that the input set contains only unique elements.
 
-    If the input set contains duplicate elements, ``assert_distinct`` raises a
-    ``ConstraintViolationError``.  This function is useful
-    as a runtime distinctness assertion in queries and computed
-    expressions that should always return proper sets, but where static
-    multiplicity inference is not capable enough or outright impossible.
-    An optional *message* named argument can be used to customize the error
-    message.
+    If the input set contains duplicate elements (i.e. it is not a *proper
+    set*), ``assert_distinct`` raises a ``ConstraintViolationError``.
+    Otherwise, this function returns the input set.
+
+    This function is useful as a runtime distinctness assertion in queries and
+    computed expressions that should always return proper sets, but where
+    static multiplicity inference is not capable enough or outright
+    impossible. An optional *message* named argument can be used to customize
+    the error message:
 
     .. code-block:: edgeql-repl
 
@@ -393,15 +545,17 @@ Sets
 
     :index: cardinality singleton
 
-    Check that the input set contains no more than one element.
+    Checks that the input set contains no more than one element.
 
-    If the input set contains more than one element, ``assert_single``
-    raises a ``CardinalityViolationError``.  This function is useful
-    as a runtime cardinality assertion in queries and computed
-    expressions that should always return sets with at most a single
-    element, but where static cardinality inference is not capable
-    enough or outright impossible.  An optional *message* named argument
-    can be used to customize the error message.
+    If the input set contains more than one element, ``assert_single`` raises
+    a ``CardinalityViolationError``. Otherwise, this function returns the
+    input set.
+
+    This function is useful as a runtime cardinality assertion in queries and
+    computed expressions that should always return sets with at most a single
+    element, but where static cardinality inference is not capable enough or
+    outright impossible. An optional *message* named argument can be used to
+    customize the error message.
 
     .. code-block:: edgeql-repl
 
@@ -415,6 +569,12 @@ Sets
         db> select assert_single((select User), message := "too many users!")
         ERROR: CardinalityViolationError: too many users!
 
+    .. note::
+
+        ``assert_single`` can be useful in many of the same contexts as ``limit
+        1`` with the key difference being that ``limit 1`` doesn't produce an
+        error if more than a single element exists in the set.
+
 ----------
 
 
@@ -425,15 +585,17 @@ Sets
 
     :index: cardinality existence empty
 
-    Check that the input set contains at least one element.
+    Checks that the input set contains at least one element.
 
     If the input set is empty, ``assert_exists`` raises a
-    ``CardinalityViolationError``.  This function is useful
-    as a runtime existence assertion in queries and computed
-    expressions that should always return sets with at least a single
-    element, but where static cardinality inference is not capable
-    enough or outright impossible.  An optional *message* named argument
-    can be used to customize the error message.
+    ``CardinalityViolationError``.  Otherwise, this function returns the input
+    set.
+
+    This function is useful as a runtime existence assertion in queries and
+    computed expressions that should always return sets with at least a single
+    element, but where static cardinality inference is not capable enough or
+    outright impossible. An optional *message* named argument can be used to
+    customize the error message.
 
     .. code-block:: edgeql-repl
 
@@ -457,7 +619,7 @@ Sets
 
     :index: aggregate
 
-    Return the number of elements in a set.
+    Returns the number of elements in a set.
 
     .. code-block:: edgeql-repl
 
@@ -480,12 +642,12 @@ Sets
 
     :index: aggregate
 
-    Return the sum of the set of numbers.
+    Returns the sum of the set of numbers.
 
-    The result type depends on the input set type. The general rule is
-    that the type of the input set is preserved (as if a simple
-    :eql:op:`+<plus>` was used) while trying to reduce the chance of
-    an overflow (so all integers produce :eql:type:`int64` sum).
+    The result type depends on the input set type. The general rule of thumb
+    is that the type of the input set is preserved (as if a simple
+    :eql:op:`+<plus>` was used) while trying to reduce the chance of an
+    overflow (so all integers produce :eql:type:`int64` sum).
 
     .. code-block:: edgeql-repl
 
@@ -503,10 +665,10 @@ Sets
 
     :index: aggregate
 
-    Generalized boolean :eql:op:`and` applied to the set of *values*.
+    Returns ``true`` if none of the values in the given set are ``false``.
 
-    The result is ``true`` if all of the *values* are ``true`` or the
-    set of *values* is ``{}``. Return ``false`` otherwise.
+    The result is ``true`` if all of the *values* are ``true`` or the set of
+    *values* is ``{}``, with ``false`` returned otherwise.
 
     .. code-block:: edgeql-repl
 
@@ -524,10 +686,10 @@ Sets
 
     :index: aggregate
 
-    Generalized boolean :eql:op:`or` applied to the set of *values*.
+    Returns ``true`` if any of the values in the given set is ``true``.
 
-    The result is ``true`` if any of the *values* are ``true``. Return
-    ``false`` otherwise.
+    The result is ``true`` if any of the *values* are ``true``, with ``false``
+    returned otherwise.
 
     .. code-block:: edgeql-repl
 
@@ -546,7 +708,7 @@ Sets
 
     :index: enumerate
 
-    Return a set of tuples of the form ``(index, element)``.
+    Returns a set of tuples in the form of ``(index, element)``.
 
     The ``enumerate()`` function takes any set and produces a set of
     tuples containing the zero-based index number and the value for each
@@ -554,7 +716,7 @@ Sets
 
     .. note::
 
-        The ordering of the returned set is not guaranteed, however
+        The ordering of the returned set is not guaranteed, however,
         the assigned indexes are guaranteed to be in order of the
         original set.
 
@@ -576,7 +738,7 @@ Sets
 
     :index: aggregate
 
-    Return the smallest value of the input set.
+    Returns the smallest value in the given set.
 
     .. code-block:: edgeql-repl
 
@@ -591,7 +753,7 @@ Sets
 
     :index: aggregate
 
-    Return the greatest value of the input set.
+    Returns the largest value in the given set.
 
     .. code-block:: edgeql-repl
 

@@ -18,7 +18,24 @@
 
 
 from __future__ import annotations
-from typing import *
+from typing import (
+    Any,
+    Callable,
+    Optional,
+    Tuple,
+    Type,
+    TypeVar,
+    Union,
+    Iterable,
+    Mapping,
+    Sequence,
+    Dict,
+    List,
+    Set,
+    FrozenSet,
+    cast,
+    TYPE_CHECKING,
+)
 
 import collections
 import decimal
@@ -29,8 +46,11 @@ from edb import errors
 from edb.common import levenshtein
 from edb.edgeql import ast as qlast
 
+from edb.ir import statypes
+
 from . import name as sn
 from . import objects as so
+from . import expr as s_expr
 
 if TYPE_CHECKING:
     from . import objtypes as s_objtypes
@@ -64,7 +84,7 @@ def ast_ref_to_unqualname(ref: qlast.ObjectRef) -> sn.UnqualName:
     if ref.module:
         raise errors.InternalServerError(
             f'unexpected fully-qualified name: {ast_ref_to_name(ref)}',
-            context=ref.context,
+            span=ref.span,
         )
     else:
         return sn.UnqualName(name=ref.name)
@@ -74,7 +94,7 @@ def resolve_name(
     lname: sn.Name,
     *,
     metaclass: Optional[Type[so.Object]] = None,
-    sourcectx: Optional[parsing.ParserContext] = None,
+    sourcectx: Optional[parsing.Span] = None,
     modaliases: Mapping[Optional[str], str],
     schema: s_schema.Schema,
 ) -> sn.Name:
@@ -119,14 +139,14 @@ def ast_objref_to_object_shell(
         metaclass=metaclass,
         modaliases=modaliases,
         schema=schema,
-        sourcectx=ref.context,
+        sourcectx=ref.span,
     )
 
     return so.ObjectShell(
         name=name,
         origname=lname,
         schemaclass=metaclass,
-        sourcectx=ref.context,
+        sourcectx=ref.span,
     )
 
 
@@ -150,14 +170,14 @@ def ast_objref_to_type_shell(
         metaclass=mcls,
         modaliases=modaliases,
         schema=schema,
-        sourcectx=ref.context,
+        sourcectx=ref.span,
     )
 
     return s_types.TypeShell(
         name=name,
         origname=lname,
         schemaclass=mcls,
-        sourcectx=ref.context,
+        sourcectx=ref.span,
     )
 
 
@@ -168,6 +188,7 @@ def ast_to_type_shell(
     module: Optional[str] = None,
     modaliases: Mapping[Optional[str], str],
     schema: s_schema.Schema,
+    allow_generalized_bases: bool = False,
 ) -> s_types.TypeShell[s_types.TypeT_co]:
 
     if isinstance(node, qlast.TypeOp):
@@ -185,38 +206,76 @@ def ast_to_type_shell(
             and isinstance(node.maintype, qlast.ObjectRef)
             and node.maintype.name == 'enum'):
         from . import scalars as s_scalars
+        from edb.pgsql import common as pg_common
 
         assert node.subtypes
 
+        elements: List[str] = []
+        element_spans: List[Optional[parsing.Span]] = []
+
         if isinstance(node.subtypes[0], qlast.TypeExprLiteral):
-            return s_scalars.AnonymousEnumTypeShell(  # type: ignore
-                elements=[
-                    est.val.value
-                    for est in cast(List[qlast.TypeExprLiteral], node.subtypes)
-                ],
-            )
+            # handling enums as literals
+            # eg. enum<'A','B','C'>
+            for subtype_expr_literal in cast(
+                List[qlast.TypeExprLiteral], node.subtypes
+            ):
+                elements.append(subtype_expr_literal.val.value)
+                element_spans.append(subtype_expr_literal.val.span)
         else:
-            elements: List[str] = []
-            for est in cast(List[qlast.TypeName], node.subtypes):
-                if (not isinstance(est, qlast.TypeName) or
-                        not isinstance(est.maintype, qlast.ObjectRef)):
+            # handling enums as typenames
+            # eg. enum<A,B,C>
+            for subtype_type_name in cast(
+                List[qlast.TypeName], node.subtypes
+            ):
+                if (
+                    not isinstance(subtype_type_name, qlast.TypeName)
+                    or not isinstance(
+                        subtype_type_name.maintype, qlast.ObjectRef
+                    )
+                ):
                     raise errors.EdgeQLSyntaxError(
                         f'enums do not support mapped values',
-                        context=est.context,
+                        span=subtype_type_name.span,
                     )
-                elements.append(est.maintype.name)
-            return s_scalars.AnonymousEnumTypeShell(  # type: ignore
-                elements=elements
-            )
+                elements.append(subtype_type_name.maintype.name)
+                element_spans.append(subtype_type_name.maintype.span)
+
+        for element, element_span in zip(elements, element_spans):
+            if len(element) > pg_common.MAX_ENUM_LABEL_LENGTH:
+                raise errors.SchemaDefinitionError(
+                    f'enum labels cannot exceed '
+                    f'{pg_common.MAX_ENUM_LABEL_LENGTH} characters',
+                    span=element_span,
+                )
+
+        return s_scalars.AnonymousEnumTypeShell(  # type: ignore
+            elements=elements
+        )
 
     elif node.subtypes is not None:
         from . import types as s_types
 
         assert isinstance(node.maintype, qlast.ObjectRef)
-        coll = s_types.Collection.get_class(node.maintype.name)
-        subtypes_list: List[s_types.TypeShell[s_types.Type]] = []
+        coll = None
+        try:
+            coll = s_types.Collection.get_class(node.maintype.name)
+        except errors.SchemaError:
+            if not allow_generalized_bases:
+                raise
 
-        if issubclass(coll, s_types.Tuple):
+        subtypes_list: List[s_types.TypeShell[s_types.Type]] = []
+        if coll is None:
+            assert allow_generalized_bases
+            res = ast_objref_to_type_shell(
+                node.maintype,
+                modaliases=modaliases,
+                metaclass=metaclass,
+                schema=schema,
+            )
+            res.extra_args = tuple(node.subtypes)
+            return res
+
+        elif issubclass(coll, s_types.Tuple):
             # Note: if we used abc Tuple here, then we would need anyway
             # to assert it is an instance of s_types.Tuple to make mypy happy
             # (rightly so, because later we use from_subtypes method)
@@ -234,7 +293,7 @@ def ast_to_type_shell(
                     if type_name in names:
                         raise errors.SchemaError(
                             f"named tuple has duplicate field '{type_name}'",
-                            context=st.context)
+                            span=st.span)
                     names.add(type_name)
                 else:
                     unnamed = True
@@ -244,7 +303,7 @@ def ast_to_type_shell(
                     raise errors.EdgeQLSyntaxError(
                         f'mixing named and unnamed tuple declaration '
                         f'is not supported',
-                        context=node.subtypes[0].context,
+                        span=node.subtypes[0].span,
                     )
 
                 subtypes[type_name] = ast_to_type_shell(
@@ -263,7 +322,7 @@ def ast_to_type_shell(
             except errors.SchemaError as e:
                 # all errors raised inside are pertaining to subtypes, so
                 # the context should point to the first subtype
-                e.set_source_context(node.subtypes[0].context)
+                e.set_span(node.subtypes[0].span)
                 raise e
 
         elif issubclass(coll, s_types.Array):
@@ -281,13 +340,13 @@ def ast_to_type_shell(
                 raise errors.SchemaError(
                     f'unexpected number of subtypes,'
                     f' expecting 1, got {len(subtypes_list)}',
-                    context=node.context,
+                    span=node.span,
                 )
 
             if isinstance(subtypes_list[0], s_types.ArrayTypeShell):
                 raise errors.UnsupportedFeatureError(
                     'nested arrays are not supported',
-                    context=node.subtypes[0].context,
+                    span=node.subtypes[0].span,
                 )
 
             try:
@@ -296,10 +355,10 @@ def ast_to_type_shell(
                     subtypes=subtypes_list,
                 )
             except errors.SchemaError as e:
-                e.set_source_context(node.context)
+                e.set_span(node.span)
                 raise e
 
-        elif issubclass(coll, s_types.Range):
+        elif issubclass(coll, (s_types.Range, s_types.MultiRange)):
             for st in node.subtypes:
                 subtypes_list.append(
                     ast_to_type_shell(
@@ -314,7 +373,7 @@ def ast_to_type_shell(
                 raise errors.SchemaError(
                     f'unexpected number of subtypes,'
                     f' expecting 1, got {len(subtypes_list)}',
-                    context=node.context,
+                    span=node.span,
                 )
 
             # FIXME: need to check that subtypes are only anypoint
@@ -325,21 +384,14 @@ def ast_to_type_shell(
                     subtypes=subtypes_list,
                 )
             except errors.SchemaError as e:
-                e.set_source_context(node.context)
+                e.set_span(node.span)
                 raise e
 
-    elif isinstance(node.maintype, qlast.AnyType):
+    elif isinstance(node.maintype, qlast.PseudoObjectRef):
         from . import pseudo as s_pseudo
         return s_pseudo.PseudoTypeShell(
-            name=sn.UnqualName('anytype'),
-            sourcectx=node.maintype.context,
-        )  # type: ignore
-
-    elif isinstance(node.maintype, qlast.AnyTuple):
-        from . import pseudo as s_pseudo
-        return s_pseudo.PseudoTypeShell(
-            name=sn.UnqualName('anytuple'),
-            sourcectx=node.maintype.context,
+            name=sn.UnqualName(node.maintype.name),
+            sourcectx=node.maintype.span,
         )  # type: ignore
 
     assert isinstance(node.maintype, qlast.ObjectRef)
@@ -366,7 +418,7 @@ def type_op_ast_to_type_shell(
     if node.op != '|':
         raise errors.UnsupportedFeatureError(
             f'unsupported type expression operator: {node.op}',
-            context=node.context,
+            span=node.span,
         )
 
     if module is None:
@@ -375,7 +427,7 @@ def type_op_ast_to_type_shell(
     if module is None:
         raise errors.InternalServerError(
             'cannot determine module for derived compound type',
-            context=node.context,
+            span=node.span,
         )
 
     left = ast_to_type_shell(
@@ -399,12 +451,14 @@ def type_op_ast_to_type_shell(
                 components=left.components + right.components,
                 module=module,
                 schemaclass=metaclass,
+                sourcectx=node.span,
             )
         else:
             return s_types.UnionTypeShell(
                 components=left.components + (right,),
                 module=module,
                 schemaclass=metaclass,
+                sourcectx=node.span,
             )
     else:
         if isinstance(right, s_types.UnionTypeShell):
@@ -412,12 +466,14 @@ def type_op_ast_to_type_shell(
                 components=(left,) + right.components,
                 schemaclass=metaclass,
                 module=module,
+                sourcectx=node.span,
             )
         else:
             return s_types.UnionTypeShell(
                 components=(left, right),
                 module=module,
                 schemaclass=metaclass,
+                sourcectx=node.span,
             )
 
 
@@ -479,10 +535,18 @@ def typeref_to_ast(
 
     result: qlast.TypeExpr
 
-    if t.is_type() and cast(s_types.Type, t).is_any(schema):
-        result = qlast.TypeName(name=_name, maintype=qlast.AnyType())
-    elif t.is_type() and cast(s_types.Type, t).is_anytuple(schema):
-        result = qlast.TypeName(name=_name, maintype=qlast.AnyTuple())
+    if isinstance(t, s_types.Type) and t.is_any(schema):
+        result = qlast.TypeName(
+            name=_name, maintype=qlast.PseudoObjectRef(name='anytype')
+        )
+    elif isinstance(t, s_types.Type) and t.is_anytuple(schema):
+        result = qlast.TypeName(
+            name=_name, maintype=qlast.PseudoObjectRef(name='anytuple')
+        )
+    elif isinstance(t, s_types.Type) and t.is_anyobject(schema):
+        result = qlast.TypeName(
+            name=_name, maintype=qlast.PseudoObjectRef(name='anyobject')
+        )
     elif isinstance(t, s_types.Tuple) and t.is_named(schema):
         result = qlast.TypeName(
             name=_name,
@@ -495,7 +559,8 @@ def typeref_to_ast(
                 for sn, st in t.iter_subtypes(schema)
             ]
         )
-    elif isinstance(t, (s_types.Array, s_types.Tuple, s_types.Range)):
+    elif isinstance(t, (s_types.Array, s_types.Tuple,
+                        s_types.Range, s_types.MultiRange)):
         # Here the concrete type Array is used because t.get_schema_name()
         # is used, which is not defined for more generic collections and abcs
         result = qlast.TypeName(
@@ -509,9 +574,8 @@ def typeref_to_ast(
                 for st in t.get_subtypes(schema)
             ]
         )
-    elif t.is_type() and cast(s_types.Type, t).is_union_type(schema):
-        object_set: Optional[so.ObjectSet[s_types.Type]] = \
-            cast(s_types.Type, t).get_union_of(schema)
+    elif isinstance(t, s_types.Type) and t.is_union_type(schema):
+        object_set = t.get_union_of(schema)
         assert object_set is not None
 
         component_objects = tuple(object_set.objects(schema))
@@ -559,13 +623,11 @@ def shell_to_ast(
     qlref: qlast.BaseObjectRef
 
     if isinstance(t, s_pseudo.PseudoTypeShell):
-        if t.name.name == 'anytype':
-            qlref = qlast.AnyType()
-        elif t.name.name == 'anytuple':
-            qlref = qlast.AnyTuple()
-        else:
+        if t.name.name not in {'anytype', 'anytuple', 'anyobject'}:
             raise AssertionError(f'unexpected pseudo type shell: {t.name!r}')
-        result = qlast.TypeName(name=_name, maintype=qlref)
+        result = qlast.TypeName(
+            name=_name, maintype=qlast.PseudoObjectRef(name=t.name.name)
+        )
     elif isinstance(t, s_types.TupleTypeShell):
         if t.is_named():
             result = qlast.TypeName(
@@ -605,6 +667,17 @@ def shell_to_ast(
             name=_name,
             maintype=qlast.ObjectRef(
                 name='range',
+            ),
+            subtypes=[
+                shell_to_ast(schema, st)
+                for st in t.get_subtypes(schema)
+            ]
+        )
+    elif isinstance(t, s_types.MultiRangeTypeShell):
+        result = qlast.TypeName(
+            name=_name,
+            maintype=qlast.ObjectRef(
+                name='multirange',
             ),
             subtypes=[
                 shell_to_ast(schema, st)
@@ -663,8 +736,7 @@ def is_nontrivial_container(value: Any) -> Optional[Iterable[Any]]:
 
 
 def get_class_nearest_common_ancestors(
-    schema: s_schema.Schema,
-    classes: Iterable[so.InheritingObjectT]
+    schema: s_schema.Schema, classes: Iterable[so.InheritingObjectT]
 ) -> List[so.InheritingObjectT]:
     # First, find the intersection of parents
     classes = list(classes)
@@ -685,8 +757,7 @@ def get_class_nearest_common_ancestors(
 
 
 def minimize_class_set_by_most_generic(
-    schema: s_schema.Schema,
-    classes: Iterable[so.InheritingObjectT]
+    schema: s_schema.Schema, classes: Iterable[so.InheritingObjectT]
 ) -> List[so.InheritingObjectT]:
     """Minimize the given set of objects by filtering out all subclasses."""
 
@@ -707,8 +778,7 @@ def minimize_class_set_by_most_generic(
 
 
 def minimize_class_set_by_least_generic(
-    schema: s_schema.Schema,
-    classes: Iterable[so.InheritingObjectT]
+    schema: s_schema.Schema, classes: Iterable[so.InheritingObjectT]
 ) -> List[so.InheritingObjectT]:
     """Minimize the given set of objects by filtering out all superclasses."""
 
@@ -736,21 +806,36 @@ def merge_reduce(
     *,
     ignore_local: bool,
     schema: s_schema.Schema,
-    f: Callable[[List[T]], T],
+    f: Callable[[T, T], T],
     type: Type[T],
 ) -> Optional[T]:
-    values = []
+    values: list[tuple[T, str]] = []
     if not ignore_local:
         ours = target.get_explicit_local_field_value(schema, field_name, None)
         if ours is not None:
-            values.append(ours)
+            vn = target.get_verbosename(schema, with_parent=True)
+            values.append((ours, vn))
     for source in sources:
         theirs = source.get_explicit_field_value(schema, field_name, None)
         if theirs is not None:
-            values.append(theirs)
+            vn = source.get_verbosename(schema, with_parent=True)
+            values.append((theirs, vn))
 
     if values:
-        return f(values)
+        val = values[0][0]
+        desc = values[0][1]
+        cdn = target.get_schema_class_displayname()
+        for other_val, other_desc in values[1:]:
+            try:
+                val = f(val, other_val)
+            except Exception:
+                raise errors.SchemaDefinitionError(
+                    f'invalid {cdn} definition: {field_name} is defined '
+                    f'as {val} in {desc}, but is defined as {other_val} '
+                    f'in {other_desc}, which is incompatible'
+                )
+
+        return val
     else:
         return None
 
@@ -777,20 +862,42 @@ def find_item_suggestions(
     from . import modules as s_mod
 
     orig_modname = name.module if isinstance(name, sn.QualName) else None
-    modname = modaliases.get(orig_modname, orig_modname)
 
     suggestions: List[so.Object] = []
 
-    if modname:
-        module = schema.get_global(s_mod.Module, modname, None)
-        if module:
+    if modname := modaliases.get(orig_modname, None):
+        if schema.get_global(s_mod.Module, modname, None):
             suggestions.extend(
                 schema.get_objects(
                     included_modules=[sn.UnqualName(modname)],
                 ),
             )
 
-    if not orig_modname:
+        modname = f'std::{modname}'
+        if schema.get_global(s_mod.Module, modname, None):
+            suggestions.extend(
+                schema.get_objects(
+                    included_modules=[sn.UnqualName(modname)],
+                ),
+            )
+
+    if orig_modname:
+        if schema.get_global(s_mod.Module, orig_modname, None):
+            suggestions.extend(
+                schema.get_objects(
+                    included_modules=[sn.UnqualName(orig_modname)],
+                ),
+            )
+
+        modname = f'std::{orig_modname}'
+        if schema.get_global(s_mod.Module, modname, None):
+            suggestions.extend(
+                schema.get_objects(
+                    included_modules=[sn.UnqualName(modname)],
+                ),
+            )
+
+    else:
         suggestions.extend(
             schema.get_objects(
                 included_modules=[sn.UnqualName("std")],
@@ -903,8 +1010,9 @@ def enrich_schema_lookup_error(
     item_type: Optional[so.ObjectMeta] = None,
     suggestion_limit: int = 3,
     condition: Optional[Callable[[so.Object], bool]] = None,
-    context: Optional[parsing.ParserContext] = None,
+    span: Optional[parsing.Span] = None,
     pointer_parent: Optional[so.Object] = None,
+    hint_text: str = 'did you mean'
 ) -> None:
 
     all_suggestions = itertools.chain(
@@ -926,95 +1034,60 @@ def enrich_schema_lookup_error(
         names = [name for _, name in suggestions]
 
         if len(names) > 1:
-            hint = f'did you mean one of these: {", ".join(names)}?'
+            hint = f'{hint_text} one of these: {", ".join(names)}?'
         else:
-            hint = f'did you mean {names[0]!r}?'
+            hint = f'{hint_text} {names[0]!r}?'
 
         error.set_hint_and_details(hint=hint)
 
-    if context is not None:
-        error.set_source_context(context)
+    if span is not None:
+        error.set_span(span)
 
 
 def ensure_union_type(
     schema: s_schema.Schema,
-    types: Iterable[s_types.Type],
+    types: Sequence[s_types.Type],
     *,
     opaque: bool = False,
     module: Optional[str] = None,
-    preserve_derived: bool = False,
     transient: bool = False,
 ) -> Tuple[s_schema.Schema, s_types.Type, bool]:
 
     from edb.schema import objtypes as s_objtypes
-    from edb.schema import types as s_types
 
-    type_set: Set[s_types.Type] = set()
-    for t in types:
-        union_of = t.get_union_of(schema)
-        if union_of:
-            type_set.update(union_of.objects(schema))
-        else:
-            type_set.add(t)
-    # IF we need to preserve derived types, that means that we don't
-    # want to minimize them and instead keep them as is to be
-    # considered in the type union.
-    derived: Set[s_types.Type] = set()
-    components: Set[s_types.Type] = set()
-    for t in type_set:
-        if (
-            preserve_derived and
-            isinstance(t, s_types.InheritingType) and
-            t.get_is_derived(schema)
-        ):
-            derived.add(t)
-        else:
-            components.add(t)
-
-    components_list: List[s_types.Type]
-
-    if all(isinstance(c, s_types.InheritingType) for c in components):
-        components_list = list(minimize_class_set_by_most_generic(
-            schema,
-            cast(Set[s_types.InheritingType], components),
-        ))
-    else:
-        components_list = list(components)
-    components_list.extend(list(derived))
-
-    if len(components_list) == 1 and not opaque:
-        return schema, next(iter(components_list)), False
+    if len(types) == 1 and not opaque:
+        return schema, next(iter(types)), False
 
     seen_scalars = False
     seen_objtypes = False
     created = False
 
-    for component in components_list:
-        if isinstance(component, s_objtypes.ObjectType):
+    for t in types:
+        if isinstance(t, s_objtypes.ObjectType):
             if seen_scalars:
-                raise _union_error(schema, components_list)
+                raise _union_error(schema, types)
             seen_objtypes = True
         else:
             if seen_objtypes:
-                raise _union_error(schema, components_list)
+                raise _union_error(schema, types)
             seen_scalars = True
 
     if seen_scalars:
-        uniontype: s_types.Type = components_list[0]
-        for t1 in components_list[1:]:
+        uniontype: s_types.Type = types[0]
+        for t1 in types[1:]:
 
             schema, common_type = (
                 uniontype.find_common_implicitly_castable_type(t1, schema)
             )
 
             if common_type is None:
-                raise _union_error(schema, components_list)
+                raise _union_error(schema, types)
             else:
                 uniontype = common_type
     else:
         objtypes = cast(
             Sequence[s_objtypes.ObjectType],
-            components_list,
+            types,
         )
         schema, uniontype, created = s_objtypes.get_or_create_union_type(
             schema,
@@ -1027,18 +1100,78 @@ def ensure_union_type(
     return schema, uniontype, created
 
 
-def get_union_type(
+def simplify_union_types(
     schema: s_schema.Schema,
-    types: Iterable[s_types.Type],
-    *,
-    opaque: bool = False,
-    module: Optional[str] = None,
-) -> Tuple[s_schema.Schema, s_types.Type]:
+    types: Sequence[s_types.Type],
+) -> Sequence[s_types.Type]:
+    """Minimize the types used to create a union of types.
 
-    schema, union, _ = ensure_union_type(
-        schema, types, opaque=opaque, module=module)
+    Any unions types are unwrapped. Then, any unnecessary subclasses are
+    removed.
+    """
 
-    return schema, union
+    from edb.schema import types as s_types
+
+    components: Set[s_types.Type] = set()
+    for t in types:
+        union_of = t.get_union_of(schema)
+        if union_of:
+            components.update(union_of.objects(schema))
+        else:
+            components.add(t)
+
+    if all(isinstance(c, s_types.InheritingType) for c in components):
+        return list(minimize_class_set_by_most_generic(
+            schema,
+            cast(Set[s_types.InheritingType], components),
+        ))
+    else:
+        return list(components)
+
+
+def simplify_union_types_preserve_derived(
+    schema: s_schema.Schema,
+    types: Sequence[s_types.Type],
+) -> Sequence[s_types.Type]:
+    """Minimize the types used to create a union of types.
+
+    Any unions types are unwrapped. Then, any unnecessary subclasses are
+    removed.
+
+    Derived types are always preserved for 'std::UNION', 'std::IF', and
+    'std::??'.
+    """
+
+    from edb.schema import types as s_types
+
+    components: Set[s_types.Type] = set()
+    for t in types:
+        union_of = t.get_union_of(schema)
+        if union_of:
+            components.update(union_of.objects(schema))
+        else:
+            components.add(t)
+
+    derived = set(
+        t
+        for t in components
+        if (
+            isinstance(t, s_types.InheritingType)
+            and t.get_is_derived(schema)
+        )
+    )
+
+    nonderived: Sequence[s_types.Type] = [
+        t
+        for t in components
+        if t not in derived
+    ]
+    nonderived = minimize_class_set_by_most_generic(
+        schema,
+        cast(Set[s_types.InheritingType], nonderived),
+    )
+
+    return list(nonderived) + list(derived)
 
 
 def get_non_overlapping_union(
@@ -1060,21 +1193,139 @@ def get_non_overlapping_union(
         return frozenset(all_objects), True
 
 
-def _union_error(schema: s_schema.Schema, components: Iterable[s_types.Type]) \
-        -> errors.SchemaError:
+def get_type_expr_non_overlapping_union(
+    type: s_types.Type,
+    schema: s_schema.Schema,
+) -> Tuple[FrozenSet[s_types.Type], bool]:
+    """Get a non-overlapping set of the type's descendants"""
+
+    from edb.schema import types as s_types
+
+    expanded_types = expand_type_expr_descendants(type, schema)
+
+    # filter out subclasses
+    expanded_types = {
+        type
+        for type in expanded_types
+        if not any(
+            type is not other and type.issubclass(schema, other)
+            for other in expanded_types
+        )
+    }
+
+    non_overlapping, union_is_exhaustive = get_non_overlapping_union(
+        schema, cast(set[so.InheritingObject], expanded_types)
+    )
+
+    return cast(FrozenSet[s_types.Type], non_overlapping), union_is_exhaustive
+
+
+def expand_type_expr_descendants(
+    type: s_types.Type,
+    schema: s_schema.Schema,
+    *,
+    expand_opaque_union: bool = True,
+) -> set[s_types.Type]:
+    """Expand types and type expressions to get descendants"""
+
+    from edb.schema import types as s_types
+
+    if sub_union := type.get_union_of(schema):
+        # Expanding a union
+        # Get the union of the component descendants
+        return set.union(*(
+            expand_type_expr_descendants(
+                component, schema,
+            )
+            for component in sub_union.objects(schema)
+        ))
+
+    elif sub_intersection := type.get_intersection_of(schema):
+        # Expanding an intersection
+        # Get the intersection of component descendants
+        return set.intersection(*(
+            expand_type_expr_descendants(
+                component, schema
+            )
+            for component in sub_intersection.objects(schema)
+        ))
+
+    elif type.is_view(schema):
+        # When expanding a view, simply unpeel the view.
+        return expand_type_expr_descendants(
+            type.peel_view(schema), schema
+        )
+
+    # Return simple type and all its descendants.
+    # Some types (eg. BaseObject) have non-simple descendants, filter them out.
+    return {type} | {
+        c for c in cast(
+            set[s_types.Type],
+            set(cast(so.InheritingObject, type).descendants(schema))
+        )
+        if (
+            not c.is_union_type(schema)
+            and not c.is_intersection_type(schema)
+            and not c.is_view(schema)
+        )
+    }
+
+
+def _union_error(
+    schema: s_schema.Schema, components: Iterable[s_types.Type]
+) -> errors.SchemaError:
     names = ', '.join(sorted(c.get_displayname(schema) for c in components))
-    return errors.SchemaError(f'cannot create a union of {names}')
+    return errors.SchemaError(f'using incompatible types {names}')
 
 
 def ensure_intersection_type(
     schema: s_schema.Schema,
-    types: Iterable[s_types.Type],
+    types: Sequence[s_types.Type],
     *,
     transient: bool = False,
     module: Optional[str] = None,
-) -> Tuple[s_schema.Schema, s_types.Type, bool]:
+) -> Tuple[s_schema.Schema, s_types.Type]:
 
     from edb.schema import objtypes as s_objtypes
+
+    if len(types) == 1:
+        return schema, next(iter(types))
+
+    seen_scalars = False
+    seen_objtypes = False
+
+    for t in types:
+        if t.is_object_type():
+            if seen_scalars:
+                raise _intersection_error(schema, types)
+            seen_objtypes = True
+        else:
+            if seen_objtypes:
+                raise _intersection_error(schema, types)
+            seen_scalars = True
+
+    if seen_scalars:
+        # Non-related scalars and collections cannot for intersection types.
+        raise _intersection_error(schema, types)
+    else:
+        return s_objtypes.get_or_create_intersection_type(
+            schema,
+            components=cast(Iterable[s_objtypes.ObjectType], types),
+            module=module,
+            transient=transient,
+        )
+
+
+def simplify_intersection_types(
+    schema: s_schema.Schema,
+    types: Sequence[s_types.Type],
+) -> Sequence[s_types.Type]:
+    """Minimize the types used to create an intersection of types.
+
+    Any intersection types are unwrapped. Then, any unnecessary superclasses are
+    removed.
+    """
+
     from edb.schema import types as s_types
 
     components: Set[s_types.Type] = set()
@@ -1085,60 +1336,18 @@ def ensure_intersection_type(
         else:
             components.add(t)
 
-    components_list: Sequence[s_types.Type]
-
     if all(isinstance(c, s_types.InheritingType) for c in components):
-        components_list = minimize_class_set_by_least_generic(
+        return minimize_class_set_by_least_generic(
             schema,
             cast(Set[s_types.InheritingType], components),
         )
     else:
-        components_list = list(components)
-
-    if len(components_list) == 1:
-        return schema, next(iter(components_list)), False
-
-    seen_scalars = False
-    seen_objtypes = False
-
-    for component in components_list:
-        if component.is_object_type():
-            if seen_scalars:
-                raise _intersection_error(schema, components_list)
-            seen_objtypes = True
-        else:
-            if seen_objtypes:
-                raise _intersection_error(schema, components_list)
-            seen_scalars = True
-
-    if seen_scalars:
-        # Non-related scalars and collections cannot for intersection types.
-        raise _intersection_error(schema, components_list)
-    else:
-        return s_objtypes.get_or_create_intersection_type(
-            schema,
-            components=cast(Iterable[s_objtypes.ObjectType], components_list),
-            module=module,
-            transient=transient,
-        )
+        return list(components)
 
 
-def get_intersection_type(
-    schema: s_schema.Schema,
-    types: Iterable[s_types.Type],
-    *,
-    module: Optional[str] = None,
-) -> Tuple[s_schema.Schema, s_types.Type]:
-
-    schema, intersection, _ = ensure_intersection_type(
-        schema, types, module=module)
-
-    return schema, intersection
-
-
-def _intersection_error(schema: s_schema.Schema,
-                        components: Iterable[s_types.Type]) \
-        -> errors.SchemaError:
+def _intersection_error(
+    schema: s_schema.Schema, components: Iterable[s_types.Type]
+) -> errors.SchemaError:
     names = ', '.join(sorted(c.get_displayname(schema) for c in components))
     return errors.SchemaError(f'cannot create an intersection of {names}')
 
@@ -1147,22 +1356,58 @@ MAX_INT64 = 2 ** 63 - 1
 MIN_INT64 = -2 ** 63
 
 
-def const_ast_from_python(val: Any) -> qlast.BaseConstant:
+def const_ast_from_python(val: Any, with_secrets: bool=False) -> qlast.Expr:
     if isinstance(val, str):
-        return qlast.StringConstant.from_python(val)
+        return qlast.Constant.string(val)
     elif isinstance(val, bool):
-        return qlast.BooleanConstant(value='true' if val else 'false')
+        return qlast.Constant.boolean(val)
     elif isinstance(val, int):
         if MIN_INT64 <= val <= MAX_INT64:
-            return qlast.IntegerConstant(value=str(val))
+            return qlast.Constant.integer(val)
         else:
             raise ValueError(f'int64 value out of range: {val}')
     elif isinstance(val, decimal.Decimal):
-        return qlast.DecimalConstant(value=f'{val}n')
+        return qlast.Constant(value=f'{val}n', kind=qlast.ConstantKind.DECIMAL)
     elif isinstance(val, float):
-        return qlast.FloatConstant(value=str(val))
+        return qlast.Constant(value=str(val), kind=qlast.ConstantKind.FLOAT)
     elif isinstance(val, bytes):
-        return qlast.BytesConstant.from_python(val)
+        return qlast.BytesConstant(value=val)
+    elif isinstance(val, statypes.Duration):
+        return qlast.TypeCast(
+            type=qlast.TypeName(
+                maintype=qlast.ObjectRef(module='__std__', name='duration'),
+            ),
+            expr=qlast.Constant.string(value=val.to_iso8601()),
+        )
+    elif isinstance(val, statypes.EnumScalarType):
+        qltype = val.get_edgeql_type()
+        return qlast.TypeCast(
+            type=qlast.TypeName(
+                maintype=qlast.ObjectRef(
+                    module=qltype.module, name=qltype.name),
+            ),
+            expr=qlast.Constant.string(value=val.to_str()),
+        )
+    elif isinstance(val, statypes.CompositeType):
+        return qlast.InsertQuery(
+            subject=name_to_ast_ref(sn.name_from_string(val._tspec.name)),
+            shape=[
+                qlast.ShapeElement(
+                    expr=qlast.Path(steps=[qlast.Ptr(name=ptr)]),
+                    compexpr=const_ast_from_python(
+                        getattr(val, ptr), with_secrets=with_secrets
+                    ),
+                )
+                for ptr, typ in val._tspec.fields.items()
+                if not (typ.secret and not with_secrets) and not typ.protected
+            ],
+        )
+    elif isinstance(val, (set, frozenset)):
+        return qlast.Set(elements=[
+            const_ast_from_python(x, with_secrets=with_secrets) for x in val
+        ])
+    elif val is None:
+        return qlast.Set(elements=[])
     else:
         raise ValueError(f'unexpected constant type: {type(val)!r}')
 
@@ -1173,10 +1418,20 @@ def get_config_type_shape(
     path: List[qlast.PathElement],
 ) -> List[qlast.ShapeElement]:
     from . import objtypes as s_objtypes
-    shape = []
+    shape = [
+        qlast.ShapeElement(
+            expr=qlast.Path(steps=[qlast.Ptr(name='_tname')], ),
+            compexpr=qlast.Path(
+                steps=path + [
+                    qlast.Ptr(name='__type__'),
+                    qlast.Ptr(name='name'),
+                ],
+            ),
+        ),
+    ]
     seen: Set[str] = set()
 
-    stypes = [stype] + list(stype.descendants(schema))
+    stypes = [stype] + list(stype.ordered_descendants(schema))
 
     for t in stypes:
         t_name = t.get_name(schema)
@@ -1200,33 +1455,16 @@ def get_config_type_shape(
                     ),
                 )
 
-            elem_path.append(qlast.Ptr(ptr=qlast.ObjectRef(name=pn)))
+            elem_path.append(qlast.Ptr(name=pn))
 
             ptype = p.get_target(schema)
             assert ptype is not None
+            if str(ptype.get_name(schema)) == 'cfg::AbstractConfig':
+                continue
 
             if isinstance(ptype, s_objtypes.ObjectType):
                 subshape = get_config_type_shape(
                     schema, ptype, path + elem_path)
-                subshape.append(
-                    qlast.ShapeElement(
-                        expr=qlast.Path(
-                            steps=[
-                                qlast.Ptr(
-                                    ptr=qlast.ObjectRef(name='_tname'),
-                                ),
-                            ],
-                        ),
-                        compexpr=qlast.Path(
-                            steps=path + elem_path + [
-                                qlast.Ptr(
-                                    ptr=qlast.ObjectRef(name='__type__')),
-                                qlast.Ptr(
-                                    ptr=qlast.ObjectRef(name='name')),
-                            ],
-                        ),
-                    ),
-                )
             else:
                 subshape = []
 
@@ -1245,9 +1483,10 @@ def get_config_type_shape(
 def type_shell_multi_substitute(
     mapping: Dict[sn.Name, s_types.TypeShell[s_types.TypeT_co]],
     typ: s_types.TypeShell[s_types.TypeT_co],
+    schema: s_schema.Schema,
 ) -> s_types.TypeShell[s_types.TypeT_co]:
     for name, new in mapping.items():
-        typ = type_shell_substitute(name, new, typ)
+        typ = type_shell_substitute(name, new, typ, schema)
     return typ
 
 
@@ -1255,6 +1494,7 @@ def type_shell_substitute(
     name: sn.Name,
     new: s_types.TypeShell[s_types.TypeT_co],
     typ: s_types.TypeShell[s_types.TypeT_co],
+    schema: s_schema.Schema,
 ) -> s_types.TypeShell[s_types.TypeT_co]:
     from . import types as s_types
 
@@ -1263,48 +1503,71 @@ def type_shell_substitute(
         return new
 
     if isinstance(typ, s_types.UnionTypeShell):
+        assert isinstance(typ.name, sn.QualName)
         return s_types.UnionTypeShell(
-            module=typ.module,
+            module=typ.name.module,
             schemaclass=typ.schemaclass,
             opaque=typ.opaque,
             components=[
-                type_shell_substitute(name, new, c)
+                type_shell_substitute(name, new, c, schema)
                 for c in typ.components
-            ]
+            ],
         )
     elif isinstance(typ, s_types.IntersectionTypeShell):
+        assert isinstance(typ.name, sn.QualName)
         return s_types.IntersectionTypeShell(
-            module=typ.module,
+            module=typ.name.module,
             schemaclass=typ.schemaclass,
             components=[
-                type_shell_substitute(name, new, c)
+                type_shell_substitute(name, new, c, schema)
                 for c in typ.components
-            ]
+            ],
         )
     elif isinstance(typ, s_types.ArrayTypeShell):
         return s_types.ArrayTypeShell(
-            name=sn.UnqualName('__unresolved__'),
+            name=None,
             expr=typ.expr,
             typemods=typ.typemods,
             schemaclass=typ.schemaclass,
-            subtype=type_shell_substitute(name, new, typ.subtype),
+            subtype=type_shell_substitute(name, new, typ.subtype, schema),
         )
     elif isinstance(typ, s_types.TupleTypeShell):
         return s_types.TupleTypeShell(
-            name=sn.UnqualName('__unresolved__'),
+            name=None,
             typemods=typ.typemods,
             schemaclass=typ.schemaclass,
             subtypes={
-                k: type_shell_substitute(name, new, v)
+                k: type_shell_substitute(name, new, v, schema)
                 for k, v in typ.subtypes.items()
-            }
+            },
         )
     elif isinstance(typ, s_types.RangeTypeShell):
         return s_types.RangeTypeShell(
-            name=sn.UnqualName('__unresolved__'),
+            name=None,
             typemods=typ.typemods,
             schemaclass=typ.schemaclass,
-            subtype=type_shell_substitute(name, new, typ.subtype),
+            subtype=type_shell_substitute(name, new, typ.subtype, schema),
         )
     else:
         return typ
+
+
+def try_compile_irast_to_sql_tree(
+    compiled_expr: s_expr.CompiledExpression,
+    span: Optional[parsing.Span]
+) -> None:
+    # compile the expression to sql to preempt errors downstream
+
+    from edb.pgsql import compiler as pg_compiler
+
+    try:
+        pg_compiler.compile_ir_to_sql_tree(
+            compiled_expr.irast,
+            output_format=pg_compiler.OutputFormat.NATIVE,
+            singleton_mode=True,
+        )
+    except errors.EdgeDBError as exception:
+        exception.set_span(span)
+        raise exception
+    except:
+        raise

@@ -21,6 +21,7 @@ from __future__ import annotations
 import typing
 
 from edb import errors
+from edb.common import parsing
 
 from edb.edgeql import ast as qlast
 from edb.edgeql import qltypes
@@ -34,41 +35,56 @@ from . import tokens
 
 
 class Stmt(Nonterm):
-    def reduce_TransactionStmt(self, *kids):
-        self.val = kids[0].val
+    val: qlast.Command
 
-    def reduce_DescribeStmt(self, *kids):
+    @parsing.inline(0)
+    def reduce_TransactionStmt(self, stmt):
+        pass
+
+    @parsing.inline(0)
+    def reduce_DescribeStmt(self, stmt):
         # DESCRIBE
-        self.val = kids[0].val
+        pass
 
-    def reduce_SqlDebugStmt(self, *kids):
-        # DESCRIBE
-        self.val = kids[0].val
+    @parsing.inline(0)
+    def reduce_AnalyzeStmt(self, stmt):
+        # ANALYZE
+        pass
 
-    def reduce_ExprStmt(self, *kids):
-        self.val = kids[0].val
+    @parsing.inline(0)
+    def reduce_AdministerStmt(self, stmt):
+        pass
+
+    @parsing.inline(0)
+    def reduce_ExprStmt(self, stmt):
+        pass
 
 
 class TransactionMode(Nonterm):
+
     def reduce_ISOLATION_SERIALIZABLE(self, *kids):
         self.val = (qltypes.TransactionIsolationLevel.SERIALIZABLE,
-                    kids[0].context)
+                    kids[0].span)
+
+    def reduce_ISOLATION_REPEATABLE_READ(self, *kids):
+        self.val = (qltypes.TransactionIsolationLevel.REPEATABLE_READ,
+                    kids[0].span)
 
     def reduce_READ_WRITE(self, *kids):
         self.val = (qltypes.TransactionAccessMode.READ_WRITE,
-                    kids[0].context)
+                    kids[0].span)
 
     def reduce_READ_ONLY(self, *kids):
         self.val = (qltypes.TransactionAccessMode.READ_ONLY,
-                    kids[0].context)
+                    kids[0].span)
 
     def reduce_DEFERRABLE(self, *kids):
         self.val = (qltypes.TransactionDeferMode.DEFERRABLE,
-                    kids[0].context)
+                    kids[0].span)
 
     def reduce_NOT_DEFERRABLE(self, *kids):
         self.val = (qltypes.TransactionDeferMode.NOT_DEFERRABLE,
-                    kids[0].context)
+                    kids[0].span)
 
 
 class TransactionModeList(ListNonterm, element=TransactionMode,
@@ -77,14 +93,17 @@ class TransactionModeList(ListNonterm, element=TransactionMode,
 
 
 class OptTransactionModeList(Nonterm):
+
+    @parsing.inline(0)
     def reduce_TransactionModeList(self, *kids):
-        self.val = kids[0].val
+        pass
 
     def reduce_empty(self, *kids):
         self.val = []
 
 
 class TransactionStmt(Nonterm):
+
     def reduce_START_TRANSACTION_OptTransactionModeList(self, *kids):
         modes = kids[2].val
 
@@ -97,14 +116,14 @@ class TransactionStmt(Nonterm):
                 if isolation is not None:
                     raise errors.EdgeQLSyntaxError(
                         f"only one isolation level can be specified",
-                        context=mode_ctx)
+                        span=mode_ctx)
                 isolation = mode
 
             elif isinstance(mode, qltypes.TransactionAccessMode):
                 if access is not None:
                     raise errors.EdgeQLSyntaxError(
                         f"only one access mode can be specified",
-                        context=mode_ctx)
+                        span=mode_ctx)
                 access = mode
 
             else:
@@ -112,7 +131,7 @@ class TransactionStmt(Nonterm):
                 if deferrable is not None:
                     raise errors.EdgeQLSyntaxError(
                         f"deferrable mode can only be specified once",
-                        context=mode_ctx)
+                        span=mode_ctx)
                 deferrable = mode
 
         self.val = qlast.StartTransaction(
@@ -135,11 +154,13 @@ class TransactionStmt(Nonterm):
 
 
 class DescribeFmt(typing.NamedTuple):
+
     language: typing.Optional[qltypes.DescribeLanguage] = None
     options: typing.Optional[qlast.Options] = None
 
 
 class DescribeFormat(Nonterm):
+    val: DescribeFmt
 
     def reduce_empty(self, *kids):
         self.val = DescribeFmt(
@@ -175,21 +196,14 @@ class DescribeFormat(Nonterm):
         self.val = DescribeFmt(
             language=qltypes.DescribeLanguage.TEXT,
             options=qlast.Options(
-                options={'VERBOSE': qlast.Flag(
-                    name='VERBOSE', val=True, context=kids[2].context)}
+                options={'VERBOSE': qlast.OptionFlag(
+                    name='VERBOSE', val=True, span=kids[2].span)}
             ),
         )
 
 
-class SqlDebugStmt(Nonterm):
-    def reduce_debug(self, *kids):
-        """%reduce DESCRIBE ALTER SCONST"""
-        self.val = qlast.SQLDebugStmt(
-            source=kids[2].clean_value,
-        )
-
-
 class DescribeStmt(Nonterm):
+    val: qlast.DescribeStmt
 
     def reduce_DESCRIBE_SCHEMA(self, *kids):
         """%reduce DESCRIBE SCHEMA DescribeFormat"""
@@ -201,6 +215,14 @@ class DescribeStmt(Nonterm):
 
     def reduce_DESCRIBE_CURRENT_DATABASE_CONFIG(self, *kids):
         """%reduce DESCRIBE CURRENT DATABASE CONFIG DescribeFormat"""
+        self.val = qlast.DescribeStmt(
+            object=qlast.DescribeGlobal.DatabaseConfig,
+            language=kids[4].val.language,
+            options=kids[4].val.options,
+        )
+
+    def reduce_DESCRIBE_CURRENT_BRANCH_CONFIG(self, *kids):
+        """%reduce DESCRIBE CURRENT BRANCH CONFIG DescribeFormat"""
         self.val = qlast.DescribeStmt(
             object=qlast.DescribeGlobal.DatabaseConfig,
             language=kids[4].val.language,
@@ -252,14 +274,39 @@ class DescribeStmt(Nonterm):
         ):
             raise errors.InvalidSyntaxError(
                 f'unexpected DESCRIBE format: {lang!r}',
-                context=kids[3].context,
+                span=kids[3].span,
             )
         if kids[3].val.options:
             raise errors.InvalidSyntaxError(
                 f'DESCRIBE CURRENT MIGRATION does not support options',
-                context=kids[3].context,
+                span=kids[3].span,
             )
 
         self.val = qlast.DescribeCurrentMigration(
             language=lang,
         )
+
+
+class AnalyzeStmt(Nonterm):
+    val: qlast.ExplainStmt
+
+    def reduce_ANALYZE_NamedTuple_ExprStmt(self, *kids):
+        _, args, stmt = kids
+        self.val = qlast.ExplainStmt(
+            args=args.val,
+            query=stmt.val,
+        )
+
+    def reduce_ANALYZE_ExprStmt(self, *kids):
+        _, stmt = kids
+        self.val = qlast.ExplainStmt(
+            query=stmt.val,
+        )
+
+
+class AdministerStmt(Nonterm):
+    val: qlast.AdministerStmt
+
+    def reduce_ADMINISTER_FuncExpr(self, *kids):
+        _, expr = kids
+        self.val = qlast.AdministerStmt(expr=expr.val)

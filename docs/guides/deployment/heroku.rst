@@ -6,17 +6,6 @@ Heroku
 
 :edb-alt-title: Deploying EdgeDB to Heroku
 
-
-.. warning::
-
-    Deployment to Heroku is currently not working due to a change in Heroku's
-    Postgres extension schema. We plan to implement changes to address this and
-    will update this guide to remove this warning once we have done so. See
-    `the relevant Github issue <heroku_deploy_issue_>`_ for more information or
-    to subscribe to notifications.
-
-.. _heroku_deploy_issue: https://github.com/edgedb/edgedb/issues/4744
-
 In this guide we show how to deploy EdgeDB to Heroku using a Heroku PostgreSQL
 add-on as the backend.
 
@@ -53,17 +42,15 @@ First copy the code, initialize a new git repo, and create a new heroku app.
    $ heroku apps:create --buildpack heroku/nodejs
    $ edgedb project init --non-interactive
 
-If you are using the `JS query builder for EdgeDB <js-query-builder>`_ then you
-will need to check the ``dbschema/edgeql-js`` directory in to your git repo
-after running ``yarn edgeql-js``. The ``edgeql-js`` command cannot be run
-during the build step on Heroku because it needs access to a running EdgeDB
-instance which is not available at build time on Heroku.
-
-.. _js-query-builder: https://www.edgedb.com/docs/clients/01_js/index
+If you are using the :ref:`JS query builder for EdgeDB <edgedb-js-qb>` then
+you will need to check the ``dbschema/edgeql-js`` directory in to your git
+repo after running ``yarn edgeql-js``. The ``edgeql-js`` command cannot be
+run during the build step on Heroku because it needs access to a running
+EdgeDB instance which is not available at build time on Heroku.
 
 .. code-block:: bash
 
-   $ yarn install && npx edgeql-js
+   $ yarn install && npx @edgedb/generate edgeql-js
 
 The ``dbschema/edgeql-js`` directory was added to the ``.gitignore`` in the
 upstream project so we'll remove it here.
@@ -85,7 +72,7 @@ this guide.
 
 .. code-block:: bash
 
-   $ heroku addons:create heroku-postgresql:standard-0
+   $ heroku addons:create --wait heroku-postgresql:standard-0
 
 
 Add the EdgeDB Buildpack
@@ -126,3 +113,21 @@ Commit the changes and push to Heroku to deploy the app.
    $ git add .
    $ git commit -m "first commit"
    $ git push heroku main
+
+
+Scale the web dyno
+==================
+
+The default dyno size has 512MB of memory which is a little under powered to
+run EdgeDB. Scale the dyno so that it has 1GB of memory available.
+
+.. code-block:: bash
+
+   $ heroku ps:type web=standard-2x
+
+Health Checks
+=============
+
+Using an HTTP client, you can perform health checks to monitor the status of
+your EdgeDB instance. Learn how to use them with our :ref:`health checks guide
+<ref_guide_deployment_health_checks>`.

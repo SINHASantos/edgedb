@@ -20,15 +20,16 @@
 """Compilation helpers for output formatting and serialization."""
 
 from __future__ import annotations
-from typing import *
+from typing import Optional, Tuple, Union, Sequence, List
 
 import itertools
 
 from edb.ir import ast as irast
 from edb.ir import typeutils as irtyputils
 
-from edb.schema import defines as s_defs
 from edb.schema import casts as s_casts
+from edb.schema import defines as s_defs
+from edb.schema import name as sn
 
 from edb.pgsql import ast as pgast
 from edb.pgsql import common
@@ -155,8 +156,13 @@ def array_as_json_object(
     el_type = styperef.subtypes[0]
 
     is_tuple = irtyputils.is_tuple(el_type)
-    # Tuples and bytes might need underlying casts to be done
-    if is_tuple or irtyputils.is_bytes(el_type):
+    # Tuples/ranges/scalars with custom casts need underlying casts to be done
+    if (
+        is_tuple
+        or irtyputils.is_range(el_type)
+        or irtyputils.is_multirange(el_type)
+        or el_type.real_base_type.needs_custom_json_cast
+    ):
         coldeflist = []
 
         out_alias = env.aliases.get('q')
@@ -197,7 +203,6 @@ def array_as_json_object(
 
             needs_unnest = bool(el_type.subtypes)
         else:
-            assert not el_type.subtypes
             val = pgast.ColumnRef(name=[out_alias])
             agg_arg = serialize_expr_to_json(
                 val, styperef=el_type, nested=True, env=env)
@@ -262,11 +267,7 @@ def unnamed_tuple_as_json_object(
         for el_idx, el_type in enumerate(styperef.subtypes):
             val: pgast.BaseExpr = pgast.Indirection(
                 arg=expr,
-                indirection=[
-                    pgast.ColumnRef(
-                        name=[str(el_idx)],
-                    ),
-                ],
+                indirection=[pgast.RecordIndirectionOp(name=str(el_idx))],
             )
             val = serialize_expr_to_json(
                 val, styperef=el_type, nested=True, env=env)
@@ -355,8 +356,8 @@ def named_tuple_as_json_object(
             val: pgast.BaseExpr = pgast.Indirection(
                 arg=expr,
                 indirection=[
-                    pgast.ColumnRef(
-                        name=[el_type.element_name]
+                    pgast.RecordIndirectionOp(
+                        name=el_type.element_name
                     )
                 ]
             )
@@ -483,15 +484,197 @@ def in_serialization_ctx(ctx: context.CompilerContextLevel) -> bool:
     return ctx.expr_exposed is None or ctx.expr_exposed
 
 
+def serialize_custom_tuple(
+    expr: pgast.BaseExpr,
+    *,
+    styperef: irast.TypeRef,
+    env: context.Environment,
+) -> pgast.BaseExpr:
+    """Serialize a tuple that needs custom serialization for a component"""
+    vals: List[pgast.BaseExpr] = []
+
+    obj: pgast.BaseExpr
+
+    if irtyputils.is_persistent_tuple(styperef):
+        for el_idx, el_type in enumerate(styperef.subtypes):
+            val: pgast.BaseExpr = pgast.Indirection(
+                arg=expr,
+                indirection=[
+                    pgast.RecordIndirectionOp(name=str(el_idx)),
+                ],
+            )
+            val = output_as_value(
+                val, ser_typeref=el_type, env=env)
+            vals.append(val)
+
+        obj = _row(vals)
+
+    else:
+        coldeflist = []
+
+        for el_idx, el_type in enumerate(styperef.subtypes):
+
+            coldeflist.append(pgast.ColumnDef(
+                name=str(el_idx),
+                typename=pgast.TypeName(
+                    name=pgtypes.pg_type_from_ir_typeref(el_type),
+                ),
+            ))
+
+            val = pgast.ColumnRef(name=[str(el_idx)])
+
+            val = output_as_value(
+                val, ser_typeref=el_type, env=env)
+
+            vals.append(val)
+
+        obj = _row(vals)
+
+        obj = pgast.SelectStmt(
+            target_list=[
+                pgast.ResTarget(
+                    val=obj,
+                ),
+            ],
+            from_clause=[
+                pgast.RangeFunction(
+                    functions=[
+                        pgast.FuncCall(
+                            name=('unnest',),
+                            args=[
+                                pgast.ArrayExpr(
+                                    elements=[expr],
+                                )
+                            ],
+                            coldeflist=coldeflist,
+                        )
+                    ]
+                )
+            ] if styperef.subtypes else []
+        )
+
+    if expr.nullable:
+        obj = pgast.SelectStmt(
+            target_list=[pgast.ResTarget(val=obj)],
+            where_clause=pgast.NullTest(arg=expr, negated=True)
+        )
+    return obj
+
+
+def serialize_custom_array(
+    expr: pgast.BaseExpr,
+    *,
+    styperef: irast.TypeRef,
+    env: context.Environment,
+) -> pgast.BaseExpr:
+    """Serialize an array that needs custom serialization for a component"""
+    el_type = styperef.subtypes[0]
+    is_tuple = irtyputils.is_tuple(el_type)
+
+    if is_tuple:
+        coldeflist = []
+
+        out_alias = env.aliases.get('q')
+
+        val: pgast.BaseExpr
+        args: List[pgast.BaseExpr] = []
+        is_named = any(st.element_name for st in el_type.subtypes)
+        for i, st in enumerate(el_type.subtypes):
+            if is_named:
+                colname = st.element_name
+                assert colname
+                args.append(pgast.StringConstant(val=colname))
+            else:
+                colname = str(i)
+
+            val = pgast.ColumnRef(name=[colname])
+            val = output_as_value(val, ser_typeref=st, env=env)
+
+            args.append(val)
+
+            if not irtyputils.is_persistent_tuple(el_type):
+                # Column definition list is only allowed for functions
+                # returning "record", i.e. an anonymous tuple, which
+                # would not be the case for schema-persistent tuple types.
+                coldeflist.append(
+                    pgast.ColumnDef(
+                        name=colname,
+                        typename=pgast.TypeName(
+                            name=pgtypes.pg_type_from_ir_typeref(st)
+                        )
+                    )
+                )
+
+        agg_arg: pgast.BaseExpr = _row(args)
+
+        return pgast.SelectStmt(
+            target_list=[
+                pgast.ResTarget(
+                    val=pgast.CoalesceExpr(
+                        args=[
+                            pgast.FuncCall(
+                                name=('array_agg',),
+                                args=[agg_arg],
+                            ),
+                            pgast.TypeCast(
+                                arg=pgast.ArrayExpr(elements=[]),
+                                type_name=pgast.TypeName(name=('record[]',)),
+                            ),
+                        ]
+                    ),
+                    ser_safe=True,
+                )
+            ],
+            from_clause=[
+                pgast.RangeFunction(
+                    alias=pgast.Alias(aliasname=out_alias),
+                    is_rowsfrom=True,
+                    functions=[
+                        pgast.FuncCall(
+                            name=('unnest',),
+                            args=[expr],
+                            coldeflist=coldeflist,
+                        )
+                    ]
+                )
+            ]
+        )
+    else:
+        el_sql_type = el_type.real_base_type.custom_sql_serialization
+        return pgast.TypeCast(
+            arg=expr,
+            type_name=pgast.TypeName(name=(f'{el_sql_type}[]',)),
+        )
+
+
+def _row(
+    args: list[pgast.BaseExpr]
+) -> Union[pgast.ImplicitRowExpr, pgast.RowExpr]:
+    if len(args) > 1:
+        return pgast.ImplicitRowExpr(args=args)
+    else:
+        return pgast.RowExpr(args=args)
+
+
 def output_as_value(
         expr: pgast.BaseExpr, *,
+        ser_typeref: Optional[irast.TypeRef] = None,
         env: context.Environment) -> pgast.BaseExpr:
+    """Format an expression as a proper value.
+
+    Normally this just means packing TupleVars into real expressions,
+    but if ser_typeref is provided, we also will do binary serialization.
+
+    In particular, certain types actually need to be serialized as text or
+    or some other format, and we handle that here.
+    """
+
+    needs_custom_serialization = ser_typeref and (
+        irtyputils.needs_custom_serialization(ser_typeref))
 
     val = expr
-    if isinstance(expr, pgast.TupleVar):
-        RowCls: Union[Type[pgast.ImplicitRowExpr],
-                      Type[pgast.RowExpr]]
 
+    if isinstance(expr, pgast.TupleVar):
         if (
             env.output_format is context.OutputFormat.NATIVE_INTERNAL
             and len(expr.elements) == 1
@@ -502,16 +685,19 @@ def output_as_value(
             # This is is a special mode whereby bare refs to objects
             # are serialized to UUID values.
             return output_as_value(el0.val, env=env)
-        elif len(expr.elements) > 1:
-            RowCls = pgast.ImplicitRowExpr
-        else:
-            RowCls = pgast.RowExpr
 
-        val = RowCls(args=[
-            output_as_value(e.val, env=env) for e in expr.elements
+        ser_typerefs = [
+            ser_typeref.subtypes[i]
+            if ser_typeref and ser_typeref.subtypes else None
+            for i in range(len(expr.elements))
+        ]
+        val = _row([
+            output_as_value(e.val, ser_typeref=ser_typerefs[i], env=env)
+            for i, e in enumerate(expr.elements)
         ])
 
         if (expr.typeref is not None
+                and not needs_custom_serialization
                 and not env.singleton_mode
                 and irtyputils.is_persistent_tuple(expr.typeref)):
             pg_type = pgtypes.pg_type_from_ir_typeref(expr.typeref)
@@ -522,7 +708,34 @@ def output_as_value(
                 ),
             )
 
+    elif (needs_custom_serialization and not expr.ser_safe):
+        assert ser_typeref is not None
+        if irtyputils.is_array(ser_typeref):
+            return serialize_custom_array(expr, styperef=ser_typeref, env=env)
+        elif irtyputils.is_tuple(ser_typeref):
+            return serialize_custom_tuple(expr, styperef=ser_typeref, env=env)
+        else:
+            el_sql_type = ser_typeref.real_base_type.custom_sql_serialization
+            assert el_sql_type is not None
+            val = pgast.TypeCast(
+                arg=val,
+                type_name=pgast.TypeName(name=(el_sql_type,)),
+            )
+
     return val
+
+
+def add_null_test(expr: pgast.BaseExpr, query: pgast.SelectStmt) -> None:
+    if not expr.nullable:
+        return
+
+    while isinstance(expr, pgast.TupleVar) and expr.elements:
+        expr = expr.elements[0].val
+
+    query.where_clause = astutils.extend_binop(
+        query.where_clause,
+        pgast.NullTest(arg=expr, negated=True)
+    )
 
 
 def serialize_expr_if_needed(
@@ -560,23 +773,54 @@ def serialize_expr_to_json(
     elif irtyputils.is_range(styperef) and not expr.ser_safe:
         val = pgast.FuncCall(
             # Use the actual generic helper for converting anyrange to jsonb
-            name=('edgedb', 'range_to_jsonb'),
+            name=common.maybe_versioned_name(
+                ('edgedb', 'range_to_jsonb'),
+                versioned=env.versioned_stdlib,
+            ),
             args=[expr], null_safe=True, ser_safe=True)
+        if env.output_format in _JSON_FORMATS:
+            val = pgast.TypeCast(
+                arg=val,
+                type_name=pgast.TypeName(name=('json',))
+            )
+
+    elif irtyputils.is_multirange(styperef) and not expr.ser_safe:
+        val = pgast.FuncCall(
+            # Use the actual generic helper for converting anymultirange to
+            # jsonb
+            name=common.maybe_versioned_name(
+                ('edgedb', 'multirange_to_jsonb'),
+                versioned=env.versioned_stdlib,
+            ),
+            args=[expr], null_safe=True, ser_safe=True)
+        if env.output_format in _JSON_FORMATS:
+            val = pgast.TypeCast(
+                arg=val,
+                type_name=pgast.TypeName(name=('json',))
+            )
 
     elif irtyputils.is_collection(styperef) and not expr.ser_safe:
         val = coll_as_json_object(expr, styperef=styperef, env=env)
 
-    # TODO: We'll probably want to generalize this to other custom JSON
-    # casts once they exist.
     elif (
-        irtyputils.is_bytes(styperef)
+        styperef.real_base_type.needs_custom_json_cast
         and not expr.ser_safe
     ):
+        base = styperef.real_base_type
         cast_name = s_casts.get_cast_fullname_from_names(
-            'std', 'std::bytes', 'std::json')
+            base.orig_name_hint or base.name_hint,
+            sn.QualName('std', 'json'),
+        )
         val = pgast.FuncCall(
-            name=common.get_cast_backend_name(cast_name, aspect='function'),
+            name=common.get_cast_backend_name(
+                cast_name, aspect='function', versioned=env.versioned_stdlib
+            ),
             args=[expr], null_safe=True, ser_safe=True)
+        if env.output_format in _JSON_FORMATS:
+            val = pgast.TypeCast(
+                arg=val,
+                type_name=pgast.TypeName(name=('json',))
+            )
 
     elif not nested:
         val = pgast.FuncCall(
@@ -604,7 +848,7 @@ def serialize_expr(
     elif env.output_format in (context.OutputFormat.NATIVE,
                                context.OutputFormat.NATIVE_INTERNAL,
                                context.OutputFormat.NONE):
-        val = output_as_value(expr, env=env)
+        val = output_as_value(expr, ser_typeref=path_id.target, env=env)
 
     else:
         raise RuntimeError(f'unexpected output format: {env.output_format!r}')
@@ -674,7 +918,6 @@ def aggregate_json_output(
     )
 
     result.ctes = stmt.ctes
-    result.argnames = stmt.argnames
     stmt.ctes = []
 
     return result
@@ -742,7 +985,6 @@ def wrap_script_stmt(
         )
 
     result.ctes = stmt.ctes
-    result.argnames = stmt.argnames
     stmt.ctes = []
 
     return result

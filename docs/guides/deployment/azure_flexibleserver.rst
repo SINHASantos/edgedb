@@ -69,7 +69,7 @@ Then create a Postgres Flexible server.
        --admin-user edgedb \
        --admin-password $PASSWORD \
        --sku-name Standard_D2s_v3 \
-       --version 13 \
+       --version 14 \
        --yes
 
 .. note::
@@ -150,6 +150,7 @@ or reboots copy the certificate files and use their contents in the
        --dns-name-label edgedb \
        --ports 5656 \
        --secure-environment-variables \
+         "EDGEDB_SERVER_PASSWORD=$PASSWORD" \
          "EDGEDB_SERVER_BACKEND_DSN=$DSN" \
          "EDGEDB_SERVER_TLS_KEY=$key" \
        --environment-variables \
@@ -172,8 +173,20 @@ machine link the instance.
            --output tsv ) \
        azure
 
+.. note::
+
+   The command groups ``edgedb instance`` and ``edgedb project`` are not
+   intended to manage production instances.
+
 You can now connect to your instance.
 
 .. code-block:: bash
 
    $ edgedb -I azure
+
+Health Checks
+=============
+
+Using an HTTP client, you can perform health checks to monitor the status of
+your EdgeDB instance. Learn how to use them with our :ref:`health checks guide
+<ref_guide_deployment_health_checks>`.

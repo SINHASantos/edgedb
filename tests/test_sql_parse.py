@@ -3,7 +3,7 @@
 #
 # Copyright 2012-present MagicStack Inc. and the EdgeDB authors.
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
+# Licensed under the Apache License, Version 2.0 (the "License")
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
@@ -22,7 +22,7 @@ from edb.testbase import lang as tb
 from edb.tools import test
 
 
-class TestEdgeQLSelect(tb.BaseDocTest):
+class TestSQLParse(tb.BaseDocTest):
 
     def run_test(self, *, source, spec, expected):
         def inline(text):
@@ -41,7 +41,7 @@ class TestEdgeQLSelect(tb.BaseDocTest):
         else:
             expected = source
 
-        ast = parser.parse(source)
+        ast = parser.parse(source, propagate_spans=True)
         sql_stmts = [
             codegen.generate_source(stmt, pretty=False) for stmt in ast
         ]
@@ -115,7 +115,7 @@ class TestEdgeQLSelect(tb.BaseDocTest):
         """
         SELECT * FROM table_one UNION select * FROM table_two
 % OK %
-        SELECT * FROM table_one UNION (SELECT * FROM table_two)
+        (SELECT * FROM table_one) UNION (SELECT * FROM table_two)
         """
 
     def test_sql_parse_select_08(self):
@@ -252,7 +252,7 @@ class TestEdgeQLSelect(tb.BaseDocTest):
         """
         select * FROM table_one UNION select * FROM table_two
 % OK %
-        SELECT * FROM table_one UNION (SELECT * FROM table_two)
+        (SELECT * FROM table_one) UNION (SELECT * FROM table_two)
         """
 
     def test_sql_parse_select_28(self):
@@ -449,6 +449,28 @@ class TestEdgeQLSelect(tb.BaseDocTest):
         SELECT * FROM t_20210301_x
         """
 
+    def test_sql_parse_select_58(self):
+        """
+        SELECT (1.2 * 3.4)
+        """
+
+    def test_sql_parse_select_59(self):
+        """
+        SELECT TRUE; SELECT FALSE
+        """
+
+    def test_sql_parse_select_60(self):
+        """
+        SELECT -1; SELECT 0; SELECT 1
+        """
+
+    def test_sql_parse_select_61(self):
+        """
+        SELECT a[1:3], b.x
+% OK %
+        SELECT (a)[1:3], b.x
+        """
+
     def test_sql_parse_insert_00(self):
         """
         INSERT INTO my_table (id, name) VALUES (1, 'some')
@@ -526,6 +548,22 @@ class TestEdgeQLSelect(tb.BaseDocTest):
         INSERT INTO films (code, title, did) VALUES ($1, $2, $3)
         """
 
+    def test_sql_parse_insert_11(self):
+        """
+        INSERT INTO films DEFAULT VALUES
+        ON CONFLICT DO UPDATE
+        SET (a, b) = ('a', 'b'), c = 'c', (d, e) = ('d', 'e')
+        """
+
+    def test_sql_parse_insert_12(self):
+        """
+        INSERT INTO foo DEFAULT VALUES
+        RETURNING a[1:3] AS a, b.x AS b
+% OK %
+        INSERT INTO foo DEFAULT VALUES
+        RETURNING (a)[1:3] AS a, b.x AS b
+        """
+
     def test_sql_parse_update_00(self):
         """
         UPDATE my_table SET the_value = DEFAULT
@@ -565,8 +603,8 @@ class TestEdgeQLSelect(tb.BaseDocTest):
         OR age IN (select * from table_two)
 % OK %
         UPDATE dataset SET a = 5
-        WHERE (id IN ((SELECT * FROM table_one))
-        OR age IN ((SELECT * FROM table_two)))
+        WHERE (id = ANY ((SELECT * FROM table_one))
+        OR age = ANY ((SELECT * FROM table_two)))
         """
 
     def test_sql_parse_update_05(self):
@@ -613,13 +651,189 @@ class TestEdgeQLSelect(tb.BaseDocTest):
         UPDATE x SET z = now()
         """
 
+    def test_sql_parse_update_11(self):
+        """
+        UPDATE x SET (a, b) = ('a', 'b'), c = 'c', (d, e) = ('d', 'e')
+        """
+
+    @test.xerror('unsupported')
+    def test_sql_parse_update_12(self):
+        """
+        UPDATE tictactoe SET
+        (board[1:3][1:3], finished) = ('{{,,},{,,},{,,}}', FALSE)
+        """
+
+    def test_sql_parse_update_13(self):
+        """
+        UPDATE tictactoe SET a = a RETURNING *
+        """
+
     def test_sql_parse_delete(self):
         """
         DELETE FROM dataset USING table_one
         WHERE x = y OR x IN (SELECT * from table_two)
 % OK %
         DELETE FROM dataset USING table_one
-        WHERE ((x = y) OR x IN ((SELECT * FROM table_two)))
+        WHERE ((x = y) OR x = ANY ((SELECT * FROM table_two)))
+        """
+
+    def test_sql_parse_transaction_00(self):
+        """
+        BEGIN
+        """
+
+    def test_sql_parse_transaction_01(self):
+        """
+        BEGIN TRANSACTION
+% OK %
+        BEGIN
+        """
+
+    def test_sql_parse_transaction_02(self):
+        """
+        BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY DEFERRABLE
+        """
+
+    def test_sql_parse_transaction_03(self):
+        """
+        START TRANSACTION
+        """
+
+    def test_sql_parse_transaction_04(self):
+        """
+        START TRANSACTION ISOLATION LEVEL REPEATABLE READ
+        """
+
+    def test_sql_parse_transaction_05(self):
+        """
+        START TRANSACTION ISOLATION LEVEL READ COMMITTED
+        """
+
+    def test_sql_parse_transaction_06(self):
+        """
+        START TRANSACTION ISOLATION LEVEL READ UNCOMMITTED
+        """
+
+    def test_sql_parse_transaction_07(self):
+        """
+        START TRANSACTION READ WRITE
+        """
+
+    def test_sql_parse_transaction_08(self):
+        """
+        START TRANSACTION READ ONLY
+        """
+
+    def test_sql_parse_transaction_09(self):
+        """
+        START TRANSACTION NOT DEFERRABLE
+        """
+
+    def test_sql_parse_transaction_10(self):
+        """
+        START TRANSACTION DEFERRABLE
+        """
+
+    def test_sql_parse_transaction_11(self):
+        """
+        COMMIT
+        """
+
+    def test_sql_parse_transaction_12(self):
+        """
+        COMMIT TRANSACTION
+% OK %
+        COMMIT
+        """
+
+    def test_sql_parse_transaction_13(self):
+        """
+        COMMIT WORK
+% OK %
+        COMMIT
+        """
+
+    def test_sql_parse_transaction_14(self):
+        """
+        COMMIT AND NO CHAIN
+% OK %
+        COMMIT
+        """
+
+    def test_sql_parse_transaction_15(self):
+        """
+        COMMIT AND CHAIN
+        """
+
+    def test_sql_parse_transaction_16(self):
+        """
+        ROLLBACK
+        """
+
+    def test_sql_parse_transaction_17(self):
+        """
+        ROLLBACK TRANSACTION
+% OK %
+        ROLLBACK
+        """
+
+    def test_sql_parse_transaction_18(self):
+        """
+        ROLLBACK WORK
+% OK %
+        ROLLBACK
+        """
+
+    def test_sql_parse_transaction_19(self):
+        """
+        ROLLBACK AND NO CHAIN
+% OK %
+        ROLLBACK
+        """
+
+    def test_sql_parse_transaction_20(self):
+        """
+        ROLLBACK AND CHAIN
+        """
+
+    def test_sql_parse_transaction_21(self):
+        """
+        SAVEPOINT some_id
+        """
+
+    def test_sql_parse_transaction_22(self):
+        """
+        RELEASE some_id
+        """
+
+    def test_sql_parse_transaction_23(self):
+        """
+        ROLLBACK TO SAVEPOINT savepoint_name
+        """
+
+    def test_sql_parse_transaction_24(self):
+        """
+        PREPARE TRANSACTION 'transaction_id'
+        """
+
+    def test_sql_parse_transaction_25(self):
+        """
+        COMMIT PREPARED 'transaction_id'
+        """
+
+    def test_sql_parse_transaction_26(self):
+        """
+        ROLLBACK PREPARED 'transaction_id'
+        """
+
+    def test_sql_parse_transaction_27(self):
+        """
+        SET TRANSACTION ISOLATION LEVEL SERIALIZABLE READ ONLY DEFERRABLE
+        """
+
+    def test_sql_parse_transaction_28(self):
+        """
+        SET SESSION CHARACTERISTICS AS TRANSACTION ISOLATION LEVEL SERIALIZABLE
         """
 
     def test_sql_parse_query_00(self):
@@ -634,7 +848,6 @@ class TestEdgeQLSelect(tb.BaseDocTest):
         SELECT * FROM my_table ORDER BY field ASC NULLS LAST USING @>
         """
 
-    @test.xfail("unsupported")
     def test_sql_parse_query_02(self):
         """
         SELECT m.* FROM mytable AS m FOR UPDATE
@@ -663,25 +876,25 @@ class TestEdgeQLSelect(tb.BaseDocTest):
         SELECT * FROM x WHERE y = ?
         """
 
-    @test.xerror("unsupported")
     def test_sql_parse_query_08(self):
         """
         SELECT * FROM x WHERE y = ANY ($1)
         """
 
-    @test.xerror("unsupported")
     def test_sql_parse_query_09(self):
         """
-        PREPARE a123 AS SELECT a
+        PREPARE fooplan (int, text, bool, numeric) AS (SELECT $1, $2, $3, $4)
+% OK %
+        PREPARE fooplan(pg_catalog.int4, text, bool, pg_catalog.numeric) AS (
+            SELECT $1, $2, $3, $4
+        )
         """
 
-    @test.xerror("unsupported")
     def test_sql_parse_query_10(self):
         """
-        EXECUTE a123
+        EXECUTE fooplan(1, 'Hunter Valley', 't', 200.00)
         """
 
-    @test.xerror("unsupported")
     def test_sql_parse_query_11(self):
         """
         DEALLOCATE a123
@@ -705,28 +918,9 @@ class TestEdgeQLSelect(tb.BaseDocTest):
         VACUUM FULL my_table
         """
 
-    @test.xerror("unsupported")
     def test_sql_parse_query_15(self):
         """
-        SAVEPOINT some_id
-        """
-
-    @test.xerror("unsupported")
-    def test_sql_parse_query_16(self):
-        """
-        RELEASE some_id
-        """
-
-    @test.xerror("unsupported")
-    def test_sql_parse_query_17(self):
-        """
-        PREPARE TRANSACTION 'some_id'
-        """
-
-    @test.xerror("unsupported")
-    def test_sql_parse_query_18(self):
-        """
-        START TRANSACTION READ WRITE
+        SELECT (pg_column_size(ROW()))::text
         """
 
     @test.xerror("unsupported")
@@ -761,24 +955,373 @@ class TestEdgeQLSelect(tb.BaseDocTest):
         CREATE FOREIGN TABLE ft1 () SERVER no_server
         """
 
-    @test.xerror("unsupported")
     def test_sql_parse_query_24(self):
         """
-        CREATE TEMPORARY TABLE my_temp_table
-        (test_id integer NOT NULL) ON COMMIT DROP
+        CREATE TEMPORARY TABLE my_temp_table (
+            test_id integer NOT NULL
+        ) ON COMMIT DROP
+% OK %
+        CREATE TEMPORARY TABLE my_temp_table (
+            test_id pg_catalog.int4 NOT NULL
+        ) ON COMMIT DROP
         """
 
-    @test.xerror("unsupported")
     def test_sql_parse_query_25(self):
         """
-        CREATE TEMPORARY TABLE my_temp_table AS SELECT 1
+        CREATE TEMPORARY TABLE my_temp_table AS (SELECT 1) WITH NO DATA
         """
 
-    @test.xerror("unsupported")
     def test_sql_parse_query_26(self):
         """
         CREATE TABLE types (
         a float(2), b float(49),
         c NUMERIC(2, 3), d character(4), e char(5),
         f varchar(6), g character varying(7))
+% OK %
+        CREATE TABLE types (
+            a pg_catalog.float4,
+            b pg_catalog.float8,
+            c pg_catalog.numeric,
+            d pg_catalog.bpchar,
+            e pg_catalog.bpchar,
+            f pg_catalog.varchar,
+            g pg_catalog.varchar
+        )
+        """
+
+    def test_sql_parse_query_27(self):
+        """
+        SET LOCAL search_path TO 'my_schema', 'public'
+        """
+
+    def test_sql_parse_query_28(self):
+        """
+        SET SESSION datestyle TO postgres, dmy
+% OK %
+        SET datestyle TO 'postgres', 'dmy'
+        """
+        # SESSION is the default
+        # args are strings actually
+
+    def test_sql_parse_query_29(self):
+        """
+        SHOW search_path
+        """
+
+    def test_sql_parse_query_30(self):
+        """
+        SHOW TIME ZONE
+% OK %
+        SHOW timezone
+        """
+        # `SHOW TIME ZONE`` is a pg alias for `SHOW timezone`
+
+    def test_sql_parse_query_31(self):
+        """
+        SELECT ('asxasx')[2][3:4]
+        """
+
+    def test_sql_parse_query_32(self):
+        """
+        SELECT ((blah(4))[0])[2][3:4][2][5:5]
+        """
+
+    def test_sql_parse_query_33(self):
+        """
+        SELECT a <= ANY (ARRAY[1, 2, 3])
+        """
+
+    def test_sql_parse_query_34(self):
+        """
+        SELECT a <= ALL (ARRAY[1, 2, 3])
+        """
+
+    def test_sql_parse_query_35(self):
+        """
+        SELECT a <= some(array[1, 2, 3])
+% OK %
+        SELECT a <= ANY (ARRAY[1, 2, 3])
+        """
+
+    def test_sql_parse_query_36(self):
+        """
+        SELECT a NOT IN (1, 2, 3)
+% OK %
+        SELECT (a NOT IN (1, 2, 3))
+        """
+
+    def test_sql_parse_query_37(self):
+        """
+        SELECT a NOT LIKE 'a%'
+% OK %
+        SELECT (a NOT LIKE 'a%')
+        """
+
+    def test_sql_parse_query_38(self):
+        """
+        SELECT a NOT ILIKE 'a%'
+% OK %
+        SELECT (a NOT ILIKE 'a%')
+        """
+
+    def test_sql_parse_query_39(self):
+        """
+        SELECT a ILIKE 'a%'
+% OK %
+        SELECT (a ILIKE 'a%')
+        """
+
+    def test_sql_parse_query_40(self):
+        """
+        WITH RECURSIVE t(n) AS (((
+            VALUES (1)
+        ) UNION ALL (
+            SELECT (n + 1) FROM t WHERE (n < 100)
+        )))
+        SELECT sum(n) FROM t
+        """
+
+    def test_sql_parse_query_41(self):
+        """
+        SELECT 1 FROM t WHERE ia.attnum > 0 AND NOT ia.attisdropped
+% OK %
+        SELECT 1 FROM t WHERE ((ia.attnum > 0) AND (NOT ia.attisdropped))
+        """
+
+    def test_sql_parse_query_42(self):
+        """
+        SELECT ($1)::oid[]
+        """
+
+    def test_sql_parse_query_43(self):
+        """
+        SELECT ($1)::oid[5]
+        """
+
+    def test_sql_parse_query_44(self):
+        """
+        SELECT ($1)::oid[5][6]
+        """
+
+    def test_sql_parse_query_45(self):
+        """
+        SET LOCAL search_path TO DEFAULT
+        """
+
+    def test_sql_parse_query_46(self):
+        """
+        SET SESSION search_path TO DEFAULT
+% OK %
+        SET search_path TO DEFAULT
+        """
+
+    def test_sql_parse_query_47(self):
+        """
+        RESET search_path
+% OK %
+        SET search_path TO DEFAULT
+        """
+
+    def test_sql_parse_query_48(self):
+        """
+        RESET ALL
+        """
+
+    def test_sql_parse_query_49(self):
+        """
+        SELECT nullif(a, 3) FROM b
+        """
+
+    def test_sql_parse_query_50(self):
+        """
+        SELECT 'a'::char, 'a'::"char"
+% OK %
+        SELECT ('a')::pg_catalog.bpchar, ('a')::pg_catalog.char
+        """
+
+    def test_sql_parse_query_51(self):
+        """
+        SELECT ARRAY ((SELECT c FROM a)) FROM b
+        """
+
+    def test_sql_parse_query_52(self):
+        """
+        SELECT * FROM b WHERE (c ILIKE 'blah%' COLLATE collation_name)
+        """
+
+    def test_sql_parse_query_53(self):
+        """
+        SELECT GREATEST(x, y, 0), LEAST(x, y, 100) FROM b
+        """
+
+    def test_sql_parse_query_54(self):
+        """
+        SELECT (x IS DISTINCT FROM y) FROM b
+        """
+
+    def test_sql_parse_query_55(self):
+        """
+        SELECT (x IS NOT DISTINCT FROM y) FROM b
+        """
+
+    def test_sql_parse_lock_01(self):
+        '''
+        LOCK TABLE films IN ACCESS SHARE MODE
+        '''
+
+    def test_sql_parse_lock_02(self):
+        '''
+        LOCK TABLE films IN ACCESS SHARE MODE NOWAIT
+        '''
+
+    def test_sql_parse_lock_03(self):
+        '''
+        LOCK TABLE ONLY (films) IN ACCESS SHARE MODE
+        '''
+
+    def test_sql_parse_lock_04(self):
+        '''
+        LOCK TABLE ONLY (films) IN ACCESS SHARE MODE NOWAIT
+        '''
+
+    def test_sql_parse_lock_05(self):
+        '''
+        LOCK TABLE films IN ROW SHARE MODE
+        '''
+
+    def test_sql_parse_lock_06(self):
+        '''
+        LOCK TABLE films IN ROW EXCLUSIVE MODE
+        '''
+
+    def test_sql_parse_lock_07(self):
+        '''
+        LOCK TABLE films IN SHARE UPDATE EXCLUSIVE MODE
+        '''
+
+    def test_sql_parse_lock_08(self):
+        '''
+        LOCK TABLE films IN SHARE MODE
+        '''
+
+    def test_sql_parse_lock_09(self):
+        '''
+        LOCK TABLE films IN SHARE ROW EXCLUSIVE MODE
+        '''
+
+    def test_sql_parse_lock_10(self):
+        '''
+        LOCK TABLE films IN EXCLUSIVE MODE
+        '''
+
+    def test_sql_parse_lock_11(self):
+        '''
+        LOCK TABLE films IN ACCESS EXCLUSIVE MODE
+        '''
+
+    # The transaction_* settings are always on transaction level
+
+    def test_sql_parse_transaction_29(self):
+        """
+        SET SESSION transaction_isolation = serializable
+% OK %
+        SET LOCAL transaction_isolation TO 'serializable'
+        """
+
+    def test_sql_parse_transaction_30(self):
+        """
+        RESET transaction_deferrable
+% OK %
+        SET LOCAL transaction_deferrable TO DEFAULT
+        """
+
+    def test_sql_parse_transaction_31(self):
+        """
+        SET transaction_read_only TO DEFAULT
+% OK %
+        SET LOCAL transaction_read_only TO DEFAULT
+        """
+
+    def test_sql_parse_copy_01(self):
+        """
+        COPY "Movie" TO STDOUT (
+            FORMAT CSV,
+            FREEZE,
+            DELIMITER '|',
+            NULL 'this is a null',
+            HEADER FALSE,
+            QUOTE '''',
+            ESCAPE 'e',
+            FORCE_QUOTE (title, year_release),
+            FORCE_NOT_NULL (title),
+            FORCE_NULL (year_release),
+            ENCODING 'UTF-8'
+        )
+        """
+
+    def test_sql_parse_copy_02(self):
+        """
+        COPY ((SELECT * FROM "Movie")) TO STDOUT
+        """
+
+    def test_sql_parse_copy_03(self):
+        """
+        COPY "Movie" (title, release_year) FROM STDIN WHERE (id > 100)
+        """
+
+    def test_sql_parse_copy_04(self):
+        """
+        COPY country TO STDOUT (DELIMITER '|')
+        """
+
+    def test_sql_parse_copy_05(self):
+        """
+        COPY country FROM '/usr1/proj/bray/sql/country_data'
+        """
+
+    def test_sql_parse_copy_06(self):
+        """
+        COPY country TO PROGRAM 'gzip > /usr1/proj/bray/sql/country_data.gz'
+        """
+
+    def test_sql_parse_table(self):
+        """
+        TABLE hello_world
+% OK %
+        SELECT * FROM hello_world
+        """
+
+    def test_sql_parse_select_locking_00(self):
+        """
+        SELECT id FROM a FOR UPDATE
+        """
+
+    def test_sql_parse_select_locking_01(self):
+        """
+        SELECT id FROM a FOR NO KEY UPDATE
+        """
+
+    def test_sql_parse_select_locking_02(self):
+        """
+        SELECT id FROM a FOR SHARE
+        """
+
+    def test_sql_parse_select_locking_03(self):
+        """
+        SELECT id FROM a FOR KEY SHARE
+        """
+
+    def test_sql_parse_select_locking_04(self):
+        """
+        SELECT id FROM a FOR UPDATE NOWAIT
+        """
+
+    def test_sql_parse_select_locking_05(self):
+        """
+        SELECT id FROM a FOR UPDATE SKIP LOCKED
+        """
+
+    def test_sql_parse_select_locking_06(self):
+        """
+        SELECT id FROM a FOR UPDATE OF b
         """

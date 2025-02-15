@@ -17,25 +17,64 @@
 #
 
 
-from typing import *
-from edb.common.parsing import ParserContext
+import dataclasses
+from typing import (
+    Any,
+    Callable,
+    Optional,
+    Tuple,
+    Type,
+    TypeVar,
+    Union,
+    Sequence,
+    List,
+    cast,
+)
+
+from edb.common import span
+from edb.common.parsing import Span
 
 from edb.pgsql import ast as pgast
 from edb.edgeql import ast as qlast
-from edb.pgsql.parser.exceptions import PSqlUnsupportedError
+from edb.pgsql.parser.exceptions import PSqlUnsupportedError, get_node_name
+
+
+@dataclasses.dataclass(kw_only=True)
+class Context:
+    source_sql: str
+    has_fallback = False
+
 
 # Node = bool | str | int | float | List[Any] | dict[str, Any]
 Node = Any
-Context = Tuple[str]
 T = TypeVar("T")
 U = TypeVar("U")
 Builder = Callable[[Node, Context], T]
 
 
-def build_queries(node: Node, source_sql: str) -> List[pgast.Query]:
-    ctx = (source_sql,)
+def build_stmts(
+    node: Node, source_sql: str, propagate_spans: bool
+) -> List[pgast.Query | pgast.Statement]:
+    ctx = Context(source_sql=source_sql)
 
-    return [_build_query(node["stmt"], ctx) for node in node["stmts"]]
+    try:
+        res = [_build_stmt(node["stmt"], ctx) for node in node["stmts"]]
+    except IndexError:
+        raise PSqlUnsupportedError()
+    except PSqlUnsupportedError as e:
+        if e.node and "location" in e.node:
+            e.location = e.node["location"]
+            assert e.location
+            e.message += f" near location {e.location}:"
+            e.message += source_sql[e.location : (e.location + 50)]
+        raise
+
+    if propagate_spans:
+        # we need to do a full pass of span propagation, because some
+        # nodes (CommonTableExpr) have span, but their children don't (Insert).
+        span.SpanPropagator(full_pass=True).container_visit(res)
+
+    return res
 
 
 def _maybe(
@@ -56,8 +95,15 @@ def _list(
     name: str,
     builder: Builder,
     mapper: Callable[[T], U] = _ident,
+    *,
+    unwrap: Optional[str] = None,
 ) -> List[U]:
-    return [mapper(builder(n, ctx)) for n in node[name]]
+    if unwrap is not None:
+        return [
+            mapper(builder(_unwrap(n, unwrap), ctx)) for n in node.get(name, [])
+        ]
+    else:
+        return [mapper(builder(n, ctx)) for n in node.get(name, [])]
 
 
 def _maybe_list(
@@ -66,8 +112,14 @@ def _maybe_list(
     name: str,
     builder: Builder,
     mapper: Callable[[T], U] = _ident,
+    *,
+    unwrap: Optional[str] = None,
 ) -> Optional[List[U]]:
-    return _list(node, ctx, name, builder, mapper) if name in node else None
+    return (
+        _list(node, ctx, name, builder, mapper, unwrap=unwrap)
+        if name in node
+        else None
+    )
 
 
 def _enum(
@@ -77,25 +129,33 @@ def _enum(
     builders: dict[str, Builder],
     fallbacks: Sequence[Builder] = (),
 ) -> T:
-    for name in builders:
-        if name in node:
-            builder = builders[name]
-            return builder(node[name], ctx)
-    for fallback in fallbacks:
-        try:
-            return fallback(node, ctx)
-        except PSqlUnsupportedError:
-            pass
-    raise PSqlUnsupportedError(f"unknown enum: {node}")
+    outer_fallback = ctx.has_fallback
+    ctx.has_fallback = False
 
+    try:
+        for name in builders:
+            if name in node:
+                builder = builders[name]
+                return builder(node[name], ctx)
 
-def _build_any(node: Node, _: Context) -> Any:
-    return node
+        ctx.has_fallback = True
+        for fallback in fallbacks:
+            res = fallback(node, ctx)
+            if res:
+                return res
+
+        if outer_fallback:
+            return None  # type: ignore
+
+        raise PSqlUnsupportedError(
+            node, ", ".join(get_node_name(k) for k in node.keys())
+        )
+    finally:
+        ctx.has_fallback = outer_fallback
 
 
 def _build_str(node: Node, _: Context) -> str:
-    node = _unwrap(node, "String")
-    node = _unwrap(node, "str")
+    node = _unwrap_string(node)
     return str(node)
 
 
@@ -108,20 +168,46 @@ def _bool_or_false(node: Node, name: str) -> bool:
     return node[name] if name in node else False
 
 
-def _unwrap(node: Node, name: str) -> pgast.Query:
+def _unwrap(node: Node, name: str) -> Node:
     if isinstance(node, dict) and name in node:
         return node[name]
     return node
 
 
-def _probe(n: Node, keys: List[str | int]) -> bool:
-    for key in keys:
-        contained = key in n if isinstance(key, str) else key < len(n)
-        if contained:
-            n = n[key]
-        else:
-            return False
-    return True
+def _unwrap_boolean(n: Node) -> Node:
+    n = _unwrap(n, 'Boolean')
+    n = _unwrap(n, 'str')
+    n = _unwrap(n, 'boolval')
+    n = _unwrap(n, 'boolval')
+    if isinstance(n, dict) and len(n) == 0:
+        n = False
+    return n
+
+
+def _unwrap_int(n: Node) -> Node:
+    n = _unwrap(n, 'Integer')
+    n = _unwrap(n, 'str')
+    n = _unwrap(n, 'ival')
+    n = _unwrap(n, 'ival')
+    if isinstance(n, dict) and len(n) == 0:
+        n = 0
+    return n
+
+
+def _unwrap_float(n: Node) -> Node:
+    n = _unwrap(n, 'Float')
+    n = _unwrap(n, 'str')
+    n = _unwrap(n, 'fval')
+    n = _unwrap(n, 'fval')
+    return n
+
+
+def _unwrap_string(n: Node) -> Node:
+    n = _unwrap(n, 'String')
+    n = _unwrap(n, 'str')
+    n = _unwrap(n, 'sval')
+    n = _unwrap(n, 'sval')
+    return n
 
 
 def _as_column_ref(name: str) -> pgast.ColumnRef:
@@ -130,12 +216,36 @@ def _as_column_ref(name: str) -> pgast.ColumnRef:
     )
 
 
-def _build_context(n: Node, c: Context) -> Optional[ParserContext]:
+def _build_span(n: Node, c: Context) -> Optional[Span]:
     if 'location' not in n:
         return None
 
-    return ParserContext(
-        name='<string>', buffer=c[0], start=n['location'], end=n['location']
+    return Span(
+        name="<string>",
+        buffer=c.source_sql,
+        start=n["location"],
+        end=n["location"],
+    )
+
+
+def _build_stmt(node: Node, c: Context) -> pgast.Query | pgast.Statement:
+    return _enum(
+        pgast.Query | pgast.Statement,  # type: ignore
+        node,
+        c,
+        {
+            "VariableSetStmt": _build_variable_set_stmt,
+            "VariableShowStmt": _build_variable_show_stmt,
+            "TransactionStmt": _build_transaction_stmt,
+            "PrepareStmt": _build_prepare,
+            "ExecuteStmt": _build_execute,
+            "DeallocateStmt": _build_deallocate,
+            "CreateStmt": _build_create,
+            "CreateTableAsStmt": _build_create_table_as,
+            "LockStmt": _build_lock,
+            "CopyStmt": _build_copy,
+        },
+        [_build_query],
     )
 
 
@@ -166,13 +276,15 @@ def _build_select_stmt(n: Node, c: Context) -> pgast.SelectStmt:
         or [],
         where_clause=_maybe(n, c, "whereClause", _build_base_expr),
         group_clause=_maybe_list(n, c, "groupClause", _build_base),
-        having=_maybe(n, c, "having", _build_base_expr),
+        having_clause=_maybe(n, c, "havingClause", _build_base_expr),
         window_clause=_maybe_list(n, c, "windowClause", _build_base),
         values=_maybe_list(n, c, "valuesLists", _build_base_expr),
         sort_clause=_maybe_list(n, c, "sortClause", _build_sort_by),
         limit_offset=_maybe(n, c, "limitOffset", _build_base_expr),
         limit_count=_maybe(n, c, "limitCount", _build_base_expr),
-        locking_clause=_maybe_list(n, c, "sortClause", _build_any),
+        locking_clause=_maybe_list(
+            n, c, "lockingClause", _build_locking_clause
+        ),
         op=op,
         all=n["all"] if "all" in n else False,
         larg=_maybe(n, c, "larg", _build_select_stmt),
@@ -183,34 +295,277 @@ def _build_select_stmt(n: Node, c: Context) -> pgast.SelectStmt:
 
 def _build_insert_stmt(n: Node, c: Context) -> pgast.InsertStmt:
     return pgast.InsertStmt(
-        relation=_maybe(n, c, "relation", _build_rel_range_var),
-        returning_list=_maybe_list(n, c, "returningList", _build_res_target)
-        or [],
+        relation=_build_rel_range_var(n["relation"], c),
+        returning_list=(
+            _maybe_list(n, c, "returningList", _build_res_target) or []
+        ),
         cols=_maybe_list(n, c, "cols", _build_insert_target),
-        select_stmt=_maybe(n, c, "selectStmt", _build_query),
-        on_conflict=_maybe(n, c, "on_conflict", _build_on_conflict),
+        select_stmt=_maybe(n, c, "selectStmt", _build_stmt),
+        on_conflict=_maybe(n, c, "onConflictClause", _build_on_conflict),
         ctes=_maybe(n, c, "withClause", _build_ctes),
     )
 
 
 def _build_update_stmt(n: Node, c: Context) -> pgast.UpdateStmt:
     return pgast.UpdateStmt(
-        relation=_maybe(n, c, "relation", _build_rel_range_var),
-        targets=_build_targets(n, c, "targetList") or [],
+        relation=_build_rel_range_var(n["relation"], c),
+        targets=_maybe(n, c, "targetList", _build_update_targets) or [],
         where_clause=_maybe(n, c, "whereClause", _build_base_expr),
-        from_clause=_maybe_list(n, c, "fromClause", _build_base_range_var)
-        or [],
+        from_clause=(
+            _maybe_list(n, c, "fromClause", _build_base_range_var) or []
+        ),
+        returning_list=(
+            _maybe_list(n, c, "returningList", _build_res_target) or []
+        ),
+        ctes=_maybe(n, c, "withClause", _build_ctes),
     )
 
 
 def _build_delete_stmt(n: Node, c: Context) -> pgast.DeleteStmt:
     return pgast.DeleteStmt(
-        relation=_maybe(n, c, "relation", _build_rel_range_var),
-        returning_list=_maybe_list(n, c, "returningList", _build_res_target)
-        or [],
+        relation=_build_rel_range_var(n["relation"], c),
+        returning_list=(
+            _maybe_list(n, c, "returningList", _build_res_target) or []
+        ),
         where_clause=_maybe(n, c, "whereClause", _build_base_expr),
-        using_clause=_maybe_list(n, c, "usingClause", _build_base_range_var)
+        using_clause=(
+            _maybe_list(n, c, "usingClause", _build_base_range_var) or []
+        ),
+        ctes=_maybe(n, c, "withClause", _build_ctes),
+    )
+
+
+def _build_lock(n: Node, c: Context) -> pgast.LockStmt:
+    MODES = {
+        1: 'ACCESS SHARE',
+        2: 'ROW SHARE',
+        3: 'ROW EXCLUSIVE',
+        4: 'SHARE UPDATE EXCLUSIVE',
+        5: 'SHARE',
+        6: 'SHARE ROW EXCLUSIVE',
+        7: 'EXCLUSIVE',
+        8: 'ACCESS EXCLUSIVE',
+    }
+
+    return pgast.LockStmt(
+        relations=_list(n, c, "relations", _build_base_range_var),
+        mode=MODES[n['mode']],
+        no_wait=_bool_or_false(n, 'nowait'),
+    )
+
+
+def _build_variable_set_stmt(n: Node, c: Context) -> pgast.Statement:
+    tx_only_vars = {
+        "transaction_isolation",
+        "transaction_read_only",
+        "transaction_deferrable",
+    }
+    if n["kind"] == "VAR_RESET":
+        return pgast.VariableResetStmt(
+            name=n["name"],
+            scope=(
+                pgast.OptionsScope.TRANSACTION
+                if n["name"] in tx_only_vars
+                else pgast.OptionsScope.SESSION
+            ),
+            span=_build_span(n, c),
+        )
+
+    if n["kind"] == "VAR_RESET_ALL":
+        return pgast.VariableResetStmt(
+            name=None,
+            scope=pgast.OptionsScope.SESSION,
+            span=_build_span(n, c),
+        )
+
+    if n["kind"] == "VAR_SET_MULTI":
+        name = n["name"]
+        if name == "TRANSACTION" or name == "SESSION CHARACTERISTICS":
+            return pgast.SetTransactionStmt(
+                options=_build_transaction_options(n["args"], c),
+                scope=(
+                    pgast.OptionsScope.TRANSACTION
+                    if name == "TRANSACTION"
+                    else pgast.OptionsScope.SESSION
+                ),
+            )
+
+    if n["kind"] == "VAR_SET_VALUE":
+        return pgast.VariableSetStmt(
+            name=n["name"],
+            args=pgast.ArgsList(args=_list(n, c, "args", _build_base_expr)),
+            scope=(
+                pgast.OptionsScope.TRANSACTION
+                if n["name"] in tx_only_vars
+                or ("is_local" in n and n["is_local"])
+                else pgast.OptionsScope.SESSION
+            ),
+            span=_build_span(n, c),
+        )
+
+    if n["kind"] == "VAR_SET_DEFAULT":
+        return pgast.VariableResetStmt(
+            name=n["name"],
+            scope=(
+                pgast.OptionsScope.TRANSACTION
+                if n["name"] in tx_only_vars
+                or ("is_local" in n and n["is_local"])
+                else pgast.OptionsScope.SESSION
+            ),
+            span=_build_span(n, c),
+        )
+
+    raise PSqlUnsupportedError(n)
+
+
+def _build_variable_show_stmt(n: Node, c: Context) -> pgast.Statement:
+    return pgast.VariableShowStmt(
+        name=n["name"],
+        span=_build_span(n, c),
+    )
+
+
+def _build_transaction_stmt(n: Node, c: Context) -> pgast.TransactionStmt:
+    def begin(n: Node, c: Context) -> pgast.BeginStmt:
+        return pgast.BeginStmt(
+            options=_maybe(n, c, "options", _build_transaction_options)
+        )
+
+    def start(n: Node, c: Context) -> pgast.StartStmt:
+        return pgast.StartStmt(
+            options=_maybe(n, c, "options", _build_transaction_options)
+        )
+
+    def commit(n: Node, _: Context) -> pgast.CommitStmt:
+        return pgast.CommitStmt(chain=_bool_or_false(n, "chain"))
+
+    def rollback(n: Node, _: Context) -> pgast.RollbackStmt:
+        return pgast.RollbackStmt(chain=_bool_or_false(n, "chain"))
+
+    def savepoint(n: Node, _: Context) -> pgast.SavepointStmt:
+        return pgast.SavepointStmt(savepoint_name=n["savepoint_name"])
+
+    def release(n: Node, _: Context) -> pgast.ReleaseStmt:
+        return pgast.ReleaseStmt(savepoint_name=n["savepoint_name"])
+
+    def rollback_to(n: Node, _: Context) -> pgast.RollbackToStmt:
+        return pgast.RollbackToStmt(savepoint_name=n["savepoint_name"])
+
+    def prepare(n: Node, _: Context) -> pgast.PrepareTransaction:
+        return pgast.PrepareTransaction(gid=n["gid"])
+
+    def commit_prepared(n: Node, _: Context) -> pgast.CommitPreparedStmt:
+        return pgast.CommitPreparedStmt(gid=n["gid"])
+
+    def rollback_prepared(n: Node, _: Context) -> pgast.RollbackPreparedStmt:
+        return pgast.RollbackPreparedStmt(gid=n["gid"])
+
+    kinds = {
+        "BEGIN": begin,
+        "START": start,
+        "COMMIT": commit,
+        "ROLLBACK": rollback,
+        "SAVEPOINT": savepoint,
+        "RELEASE": release,
+        "ROLLBACK_TO": rollback_to,
+        "PREPARE": prepare,
+        "COMMIT_PREPARED": commit_prepared,
+        "ROLLBACK_PREPARED": rollback_prepared,
+    }
+
+    kind = cast(str, n["kind"]).removeprefix("TRANS_STMT_")
+    if kind not in kinds:
+        raise PSqlUnsupportedError(n)
+
+    return kinds[kind](n, c)
+
+
+def _build_transaction_options(
+    nodes: List[Node], c: Context
+) -> pgast.TransactionOptions:
+    options = {}
+    for n in nodes:
+        if "DefElem" not in n:
+            continue
+        def_e = n["DefElem"]
+        if not ("defname" in def_e and "arg" in def_e):
+            continue
+        options[def_e["defname"]] = _build_base_expr(def_e["arg"], c)
+    return pgast.TransactionOptions(options=options)
+
+
+def _build_prepare(n: Node, c: Context) -> pgast.PrepareStmt:
+    return pgast.PrepareStmt(
+        name=n["name"],
+        argtypes=_maybe_list(n, c, "argtypes", _build_type_name),
+        query=_build_base_relation(n["query"], c),
+    )
+
+
+def _build_execute(n: Node, c: Context) -> pgast.ExecuteStmt:
+    return pgast.ExecuteStmt(
+        name=n["name"], params=_maybe_list(n, c, "params", _build_base_expr)
+    )
+
+
+def _build_deallocate(n: Node, c: Context) -> pgast.DeallocateStmt:
+    return pgast.DeallocateStmt(name=n["name"])
+
+
+def _build_create_table_as(n: Node, c: Context) -> pgast.CreateTableAsStmt:
+    return pgast.CreateTableAsStmt(
+        into=_build_create(n['into'], c),
+        query=_build_query(n['query'], c),
+        with_no_data=_bool_or_false(n['into'], 'skipData'),
+    )
+
+
+def _build_create(n: Node, c: Context) -> pgast.CreateStmt:
+    def _build_on_commit(n: str, _c: Context) -> Optional[str]:
+        on_commit = n[9:]
+        return on_commit if on_commit != 'NOOP' else None
+
+    relation = n['relation'] if 'relation' in n else n['rel']
+
+    return pgast.CreateStmt(
+        relation=_build_relation(relation, c),
+        table_elements=_maybe_list(n, c, 'tableElts', _build_table_element)
         or [],
+        span=_build_span(n, c),
+        on_commit=_maybe(n, c, 'oncommit', _build_on_commit),
+    )
+
+
+def _build_table_element(n: Node, c: Context) -> pgast.TableElement:
+    return _enum(
+        pgast.TableElement,
+        n,
+        c,
+        {
+            "ColumnDef": _build_column_def,
+        },
+    )
+
+
+def _build_column_def(n: Node, c: Context) -> pgast.ColumnDef:
+    is_not_null = False
+    default_expr = None
+    if 'constraints' in n:
+        for constraint in n['constraints']:
+            constraint = _unwrap(constraint, 'Constraint')
+
+            if constraint['contype'] == 'CONSTR_NOTNULL':
+                is_not_null = True
+            if constraint['contype'] == 'CONSTR_DEFAULT':
+                is_not_null = True
+                default_expr = _maybe(n, c, 'raw_expr', _build_base_expr)
+
+    return pgast.ColumnDef(
+        name=n['colname'],
+        typename=_build_type_name(n['typeName'], c),
+        default_expr=default_expr,
+        is_not_null=is_not_null,
+        span=_build_span(n, c),
     )
 
 
@@ -239,6 +594,7 @@ def _build_base_expr(node: Node, c: Context) -> pgast.BaseExpr:
             "A_Expr": _build_a_expr,
             "A_ArrayExpr": _build_array_expr,
             "A_Const": _build_const,
+            "A_Indirection": _build_indirection,
             "BoolExpr": _build_bool_expr,
             "CaseExpr": _build_case_expr,
             "TypeCast": _build_type_cast,
@@ -248,6 +604,9 @@ def _build_base_expr(node: Node, c: Context) -> pgast.BaseExpr:
             "SubLink": _build_sub_link,
             "ParamRef": _build_param_ref,
             "SetToDefault": _build_keyword("DEFAULT"),
+            "SQLValueFunction": _build_sql_value_function,
+            "CollateClause": _build_collate_clause,
+            "MinMaxExpr": _build_min_max_expr,
         },
         [_build_base_range_var, _build_indirection_op],  # type: ignore
     )
@@ -261,6 +620,13 @@ def _build_distinct(nodes: List[Node], c: Context) -> List[pgast.Base]:
     return [_build_base_expr(n, c) for n in nodes]
 
 
+def _build_indirection(n: Node, c: Context) -> pgast.Indirection:
+    return pgast.Indirection(
+        arg=_build_base_expr(n['arg'], c),
+        indirection=_list(n, c, 'indirection', _build_indirection_op),
+    )
+
+
 def _build_indirection_op(n: Node, c: Context) -> pgast.IndirectionOp:
     return _enum(
         pgast.IndirectionOp,  # type: ignore
@@ -270,12 +636,24 @@ def _build_indirection_op(n: Node, c: Context) -> pgast.IndirectionOp:
             'A_Indices': _build_index_or_slice,
             'Star': _build_star,
             'ColumnRef': _build_column_ref,
+            'String': _build_record_indirection_op,
         },
     )
 
 
+def _build_record_indirection_op(
+    n: Node, c: Context
+) -> pgast.RecordIndirectionOp:
+    return pgast.RecordIndirectionOp(name=_build_str(n, c))
+
+
 def _build_ctes(n: Node, c: Context) -> List[pgast.CommonTableExpr]:
-    return _list(n, c, "ctes", _build_cte)
+    is_recursive = _maybe(n, c, 'recursive', lambda x, _: bool(x)) or False
+
+    ctes: List[pgast.CommonTableExpr] = _list(n, c, "ctes", _build_cte)
+    for cte in ctes:
+        cte.recursive = is_recursive
+    return ctes
 
 
 def _build_cte(n: Node, c: Context) -> pgast.CommonTableExpr:
@@ -290,49 +668,109 @@ def _build_cte(n: Node, c: Context) -> pgast.CommonTableExpr:
     return pgast.CommonTableExpr(
         name=n["ctename"],
         query=_build_query(n["ctequery"], c),
-        recursive=_bool_or_false(n, "cterecursive"),
+        recursive=False,
         aliascolnames=_maybe_list(n, c, "aliascolnames", _build_str),
         materialized=materialized,
-        context=_build_context(n, c),
+        span=_build_span(n, c),
     )
 
 
 def _build_keyword(name: str) -> Builder[pgast.Keyword]:
-    return lambda n, c: pgast.Keyword(name=name, context=_build_context(n, c))
+    return lambda n, c: pgast.Keyword(name=name, span=_build_span(n, c))
 
 
 def _build_param_ref(n: Node, c: Context) -> pgast.ParamRef:
-    return pgast.ParamRef(number=n["number"], context=_build_context(n, c))
+    return pgast.ParamRef(number=n.get("number", 0), span=_build_span(n, c))
+
+
+def _build_collate_clause(n: Node, c: Context) -> pgast.CollateClause:
+    return pgast.CollateClause(
+        arg=_build_base_expr(n['arg'], c),
+        collname='.'.join(_list(n, c, 'collname', _build_str)),
+        span=_build_span(n, c),
+    )
+
+
+def _build_min_max_expr(n: Node, c: Context) -> pgast.MinMaxExpr:
+
+    if n['op'] == 'IS_GREATEST':
+        op = 'GREATEST'
+    elif n['op'] == 'IS_LEAST':
+        op = 'LEAST'
+    else:
+        raise PSqlUnsupportedError(n)
+
+    return pgast.MinMaxExpr(
+        op=op,
+        args=_list(n, c, 'args', _build_base_expr),
+        span=_build_span(n, c),
+    )
+
+
+def _build_sql_value_function(n: Node, c: Context) -> pgast.SQLValueFunction:
+    op = n["op"].removeprefix("SVFOP_")
+
+    op_mapping = {
+        "CURRENT_DATE": pgast.SQLValueFunctionOP.CURRENT_DATE,
+        "CURRENT_TIME": pgast.SQLValueFunctionOP.CURRENT_TIME,
+        "CURRENT_TIME_N": pgast.SQLValueFunctionOP.CURRENT_TIME_N,
+        "CURRENT_TIMESTAMP": pgast.SQLValueFunctionOP.CURRENT_TIMESTAMP,
+        "CURRENT_TIMESTAMP_N": pgast.SQLValueFunctionOP.CURRENT_TIMESTAMP_N,
+        "LOCALTIME": pgast.SQLValueFunctionOP.LOCALTIME,
+        "LOCALTIME_N": pgast.SQLValueFunctionOP.LOCALTIME_N,
+        "LOCALTIMESTAMP": pgast.SQLValueFunctionOP.LOCALTIMESTAMP,
+        "LOCALTIMESTAMP_N": pgast.SQLValueFunctionOP.LOCALTIMESTAMP_N,
+        "CURRENT_ROLE": pgast.SQLValueFunctionOP.CURRENT_ROLE,
+        "CURRENT_USER": pgast.SQLValueFunctionOP.CURRENT_USER,
+        "USER": pgast.SQLValueFunctionOP.USER,
+        "SESSION_USER": pgast.SQLValueFunctionOP.SESSION_USER,
+        "CURRENT_CATALOG": pgast.SQLValueFunctionOP.CURRENT_CATALOG,
+        "CURRENT_SCHEMA": pgast.SQLValueFunctionOP.CURRENT_SCHEMA,
+    }
+
+    if op not in op_mapping:
+        raise PSqlUnsupportedError(n)
+
+    return pgast.SQLValueFunction(
+        op=op_mapping[op], arg=_maybe(n, c, "xpr", _build_base_expr)
+    )
 
 
 def _build_sub_link(n: Node, c: Context) -> pgast.SubLink:
     typ = n["subLinkType"]
     if typ == "EXISTS_SUBLINK":
-        type = pgast.SubLinkType.EXISTS
+        operator = "EXISTS"
     elif typ == "NOT_EXISTS_SUBLINK":
-        type = pgast.SubLinkType.NOT_EXISTS
+        operator = "NOT_EXISTS"
     elif typ == "ALL_SUBLINK":
-        type = pgast.SubLinkType.ALL
+        operator = "ALL"
     elif typ == "ANY_SUBLINK":
-        type = pgast.SubLinkType.ANY
+        operator = "= ANY"
     elif typ == "EXPR_SUBLINK":
-        type = pgast.SubLinkType.EXPR
+        operator = None
+    elif typ == "ARRAY_SUBLINK":
+        operator = "ARRAY"
     else:
-        raise PSqlUnsupportedError(f"unknown SubLink type: `{typ}`")
+        raise PSqlUnsupportedError(n)
 
     return pgast.SubLink(
-        type=type,
+        operator=operator,
         expr=_build_query(n["subselect"], c),
         test_expr=_maybe(n, c, 'testexpr', _build_base_expr),
-        context=_build_context(n, c),
+        span=_build_span(n, c),
     )
 
 
-def _build_row_expr(n: Node, c: Context) -> pgast.ImplicitRowExpr:
-    return pgast.ImplicitRowExpr(
-        args=_list(n, c, "args", _build_base_expr),
-        context=_build_context(n, c),
+def _build_row_expr(n: Node, c: Context) -> pgast.BaseExpr:
+    args: List[pgast.BaseExpr] = (
+        _maybe_list(n, c, "args", _build_base_expr) or []
     )
+
+    format = n.get('row_format', None)
+    if format in {'COERCE_EXPLICIT_CALL', 'COERCE_EXPLICIT_CAST'}:
+        return pgast.RowExpr(args=args, span=_build_span(n, c))
+    else:
+        return pgast.ImplicitRowExpr(args=args, span=_build_span(n, c))
 
 
 def _build_boolean_test(n: Node, c: Context) -> pgast.BooleanTest:
@@ -340,7 +778,7 @@ def _build_boolean_test(n: Node, c: Context) -> pgast.BooleanTest:
         arg=_build_base_expr(n["arg"], c),
         negated=n["booltesttype"].startswith("IS_NOT"),
         is_true=n["booltesttype"].endswith("TRUE"),
-        context=_build_context(n, c),
+        span=_build_span(n, c),
     )
 
 
@@ -348,7 +786,7 @@ def _build_null_test(n: Node, c: Context) -> pgast.NullTest:
     return pgast.NullTest(
         arg=_build_base_expr(n["arg"], c),
         negated=n["nulltesttype"] == "IS_NOT_NULL",
-        context=_build_context(n, c),
+        span=_build_span(n, c),
     )
 
 
@@ -356,17 +794,28 @@ def _build_type_cast(n: Node, c: Context) -> pgast.TypeCast:
     return pgast.TypeCast(
         arg=_build_base_expr(n["arg"], c),
         type_name=_build_type_name(n["typeName"], c),
-        context=_build_context(n, c),
+        span=_build_span(n, c),
     )
 
 
 def _build_type_name(n: Node, c: Context) -> pgast.TypeName:
+    n = _unwrap(n, "TypeName")
+
+    name: Tuple[str, ...] = tuple(_list(n, c, "names", _build_str))
+
+    # we don't escape char properly, so let's just resolve it during parsing
+    if name == ("char",):
+        name = ("pg_catalog", "char")
+
+    def unwrap_int_builder(n: Node, _c: Context) -> Node:
+        return _unwrap_int(n)
+
     return pgast.TypeName(
-        name=tuple(_list(n, c, "names", _build_str)),
+        name=name,
         setof=_bool_or_false(n, "setof"),
         typmods=None,
-        array_bounds=None,
-        context=_build_context(n, c),
+        array_bounds=_maybe_list(n, c, "arrayBounds", unwrap_int_builder),
+        span=_build_span(n, c),
     )
 
 
@@ -375,7 +824,7 @@ def _build_case_expr(n: Node, c: Context) -> pgast.CaseExpr:
         arg=_maybe(n, c, "arg", _build_base_expr),
         args=_list(n, c, "args", _build_case_when),
         defresult=_maybe(n, c, "defresult", _build_base_expr),
-        context=_build_context(n, c),
+        span=_build_span(n, c),
     )
 
 
@@ -384,26 +833,25 @@ def _build_case_when(n: Node, c: Context) -> pgast.CaseWhen:
     return pgast.CaseWhen(
         expr=_build_base_expr(n["expr"], c),
         result=_build_base_expr(n["result"], c),
-        context=_build_context(n, c),
+        span=_build_span(n, c),
     )
 
 
 def _build_bool_expr(n: Node, c: Context) -> pgast.Expr:
     name = _build_str(n["boolop"], c)[0:-5]
+    args = list(n["args"])
     res = pgast.Expr(
-        kind=pgast.ExprKind.OP,
         name=name,
-        lexpr=_build_base_expr(n["args"].pop(0), c),
-        rexpr=_build_base_expr(n["args"].pop(0), c),
-        context=_build_context(n, c),
+        lexpr=_build_base_expr(args.pop(0), c) if len(args) > 1 else None,
+        rexpr=_build_base_expr(args.pop(0), c) if len(args) > 0 else None,
+        span=_build_span(n, c),
     )
-    while len(n["args"]) > 0:
+    while len(args) > 0:
         res = pgast.Expr(
-            kind=pgast.ExprKind.OP,
             name=_build_str(n["boolop"], c)[0:-5],
             lexpr=res,
-            rexpr=_build_base_expr(n["args"].pop(0), c),
-            context=_build_context(n, c),
+            rexpr=_build_base_expr(args.pop(0), c) if len(args) > 0 else None,
+            span=_build_span(n, c),
         )
     return res
 
@@ -423,24 +871,30 @@ def _build_base_range_var(n: Node, c: Context) -> pgast.BaseRangeVar:
 
 
 def _build_const(n: Node, c: Context) -> pgast.BaseConstant:
-    val = n["val"]
-    context = _build_context(n, c)
+    n = _unwrap(n, "val")
+    span = _build_span(n, c)
 
-    if "Integer" in val:
-        return pgast.NumericConstant(
-            val=str(val["Integer"]["ival"]), context=context
-        )
+    if "Null" in n or "isnull" in n:
+        return pgast.NullConstant(span=span)
 
-    if "Float" in val:
-        return pgast.NumericConstant(val=val["Float"]["str"], context=context)
+    if "Boolean" in n or "boolval" in n:
+        return pgast.BooleanConstant(val=_unwrap_boolean(n), span=span)
 
-    if "Null" in val:
-        return pgast.NullConstant(context=context)
+    if "Integer" in n or "ival" in n:
+        return pgast.NumericConstant(val=str(_unwrap_int(n)), span=span)
 
-    if "String" in val:
-        return pgast.StringConstant(val=_build_str(val, c), context=context)
+    if "Float" in n or "fval" in n:
+        return pgast.NumericConstant(val=_unwrap_float(n), span=span)
 
-    raise PSqlUnsupportedError(f'unknown Const: {val}')
+    if "String" in n or "sval" in n:
+        return pgast.StringConstant(val=_unwrap_string(n), span=span)
+    if "BitString" in n or "bsval" in n:
+        n = _unwrap(n, 'BitString')
+        n = _unwrap(n, 'str')
+        n = _unwrap(n, 'bsval')
+        n = _unwrap(n, 'bsval')
+        return pgast.BitStringConstant(kind=n[0], val=n[1:], span=span)
+    raise PSqlUnsupportedError(n)
 
 
 def _build_range_subselect(n: Node, c: Context) -> pgast.RangeSubselect:
@@ -455,10 +909,10 @@ def _build_range_function(n: Node, c: Context) -> pgast.RangeFunction:
     return pgast.RangeFunction(
         alias=_maybe(n, c, "alias", _build_alias) or pgast.Alias(aliasname=""),
         lateral=_bool_or_false(n, "lateral"),
-        with_ordinality=_bool_or_false(n, "with_ordinality"),
+        with_ordinality=_bool_or_false(n, "ordinality"),
         is_rowsfrom=_bool_or_false(n, "is_rowsfrom"),
         functions=[
-            _build_func_call(fn, c)
+            _build_base_expr(fn, c)
             for fn in n["functions"][0]["List"]["items"]
             if len(fn) > 0
         ],
@@ -468,22 +922,26 @@ def _build_range_function(n: Node, c: Context) -> pgast.RangeFunction:
 def _build_join_expr(n: Node, c: Context) -> pgast.JoinExpr:
     return pgast.JoinExpr(
         alias=_maybe(n, c, "alias", _build_alias) or pgast.Alias(aliasname=""),
-        type=n["jointype"][5:],
         larg=_build_base_range_var(n["larg"], c),
-        rarg=_build_base_range_var(n["rarg"], c),
-        using_clause=_maybe_list(
-            n, c, "usingClause", _build_str, _as_column_ref
-        ),
-        quals=_maybe(n, c, "quals", _build_base_expr),
+        joins=[
+            pgast.JoinClause(
+                type=n["jointype"][5:],
+                rarg=_build_base_range_var(n["rarg"], c),
+                using_clause=_maybe_list(
+                    n, c, "usingClause", _build_str, _as_column_ref
+                ),
+                quals=_maybe(n, c, "quals", _build_base_expr),
+            )
+        ],
     )
 
 
 def _build_rel_range_var(n: Node, c: Context) -> pgast.RelRangeVar:
     return pgast.RelRangeVar(
         alias=_maybe(n, c, "alias", _build_alias) or pgast.Alias(aliasname=""),
-        relation=_build_base_relation(n, c),
+        relation=_build_relation(n, c),
         include_inherited=_bool_or_false(n, "inh"),
-        context=_build_context(n, c),
+        span=_build_span(n, c),
     )
 
 
@@ -495,11 +953,24 @@ def _build_alias(n: Node, c: Context) -> pgast.Alias:
 
 
 def _build_base_relation(n: Node, c: Context) -> pgast.BaseRelation:
+    return _enum(
+        pgast.BaseRelation,
+        n,
+        c,
+        {
+            "SelectStmt": _build_select_stmt,
+            "Relation": _build_relation,
+        },
+    )
+
+
+def _build_relation(n: Node, c: Context) -> pgast.Relation:
     return pgast.Relation(
         name=_maybe(n, c, "relname", _build_str),
         catalogname=_maybe(n, c, "catalogname", _build_str),
         schemaname=_maybe(n, c, "schemaname", _build_str),
-        context=_build_context(n, c),
+        is_temporary=_maybe(n, c, "relpersistence", lambda n, _c: n == 't'),
+        span=_build_span(n, c),
     )
 
 
@@ -517,37 +988,62 @@ def _build_array_expr(n: Node, c: Context) -> pgast.ArrayExpr:
     return pgast.ArrayExpr(elements=_list(n, c, "elements", _build_base_expr))
 
 
-def _build_a_expr(n: Node, c: Context) -> pgast.Expr:
+def _build_a_expr(n: Node, c: Context) -> pgast.BaseExpr:
+    names: List[str] = _list(n, c, 'name', _build_str)
+    if names[0] == 'pg_catalog':
+        names.pop(0)
+    name = names.pop(0)
+
     if n["kind"] == "AEXPR_OP":
-        return pgast.Expr(
-            kind=pgast.ExprKind.OP,
-            name=_build_str(n["name"][0], c),
-            lexpr=_maybe(n, c, "lexpr", _build_base_expr),
-            rexpr=_maybe(n, c, "rexpr", _build_base_expr),
-            context=_build_context(n, c),
-        )
-    elif n["kind"] == "AEXPR_LIKE":
-        return pgast.Expr(
-            kind=pgast.ExprKind.OP,
-            name="LIKE",
-            lexpr=_maybe(n, c, "lexpr", _build_base_expr),
-            rexpr=_maybe(n, c, "rexpr", _build_base_expr),
-            context=_build_context(n, c),
-        )
+        pass
+    elif n["kind"] in ("AEXPR_LIKE", "AEXPR_ILIKE"):
+        op = name
+        if op.endswith("*"):
+            name = "ILIKE"
+        else:
+            name = "LIKE"
+        if op.startswith("!"):
+            name = "NOT " + name
     elif n["kind"] == "AEXPR_IN":
-        return pgast.Expr(
-            kind=pgast.ExprKind.OP,
-            name="IN",
-            lexpr=_maybe(n, c, "lexpr", _build_base_expr),
-            rexpr=_maybe(n, c, "rexpr", _build_base_expr),
-            context=_build_context(n, c),
+        if name == "<>":
+            name = "NOT IN"
+        else:
+            name = "IN"
+    elif n["kind"] in ("AEXPR_OP_ANY", "AEXPR_OP_ALL"):
+        operator = "ANY" if n["kind"] == "AEXPR_OP_ANY" else "ALL"
+
+        return pgast.SubLink(
+            operator=name + " " + operator,
+            test_expr=_maybe(n, c, "lexpr", _build_base_expr),
+            expr=_build_base_expr(n["rexpr"], c),
+            span=_build_span(n, c),
         )
+    elif n['kind'] == 'AEXPR_NULLIF':
+        return pgast.FuncCall(
+            name=('nullif',),
+            args=[
+                _build_base_expr(n['lexpr'], c),
+                _build_base_expr(n['rexpr'], c),
+            ],
+        )
+    elif n['kind'] == 'AEXPR_DISTINCT':
+        name = 'IS DISTINCT FROM'
+    elif n['kind'] == 'AEXPR_NOT_DISTINCT':
+        name = 'IS NOT DISTINCT FROM'
     else:
-        raise PSqlUnsupportedError(f'unknown ExprKind: {n["kind"]}')
+        raise PSqlUnsupportedError(n)
+
+    return pgast.Expr(
+        name=name,
+        lexpr=_maybe(n, c, "lexpr", _build_base_expr),
+        rexpr=_maybe(n, c, "rexpr", _build_base_expr),
+        span=_build_span(n, c),
+    )
 
 
 def _build_func_call(n: Node, c: Context) -> pgast.FuncCall:
     n = _unwrap(n, "FuncCall")
+
     return pgast.FuncCall(
         name=tuple(_list(n, c, "funcname", _build_str)),
         args=_maybe_list(n, c, "args", _build_base_expr) or [],
@@ -557,7 +1053,7 @@ def _build_func_call(n: Node, c: Context) -> pgast.FuncCall:
         agg_distinct=_bool_or_false(n, "agg_distinct"),
         over=_maybe(n, c, "over", _build_window_def),
         with_ordinality=_bool_or_false(n, "withOrdinality"),
-        context=_build_context(n, c),
+        span=_build_span(n, c),
     )
 
 
@@ -568,14 +1064,15 @@ def _build_coalesce(n: Node, c: Context) -> pgast.CoalesceExpr:
 
 
 def _build_index_or_slice(n: Node, c: Context) -> pgast.Slice | pgast.Index:
-    if n['is_slice']:
+    if 'is_slice' in n and n['is_slice']:
         return pgast.Slice(
             lidx=_build_base_expr(n['lidx'], c),
             ridx=_build_base_expr(n['uidx'], c),
         )
     else:
+        idx = n['lidx'] if 'lidx' in n else n['uidx']
         return pgast.Index(
-            idx=_build_base_expr(n['lidx'], c),
+            idx=_build_base_expr(idx, c),
         )
 
 
@@ -583,9 +1080,8 @@ def _build_res_target(n: Node, c: Context) -> pgast.ResTarget:
     n = _unwrap(n, "ResTarget")
     return pgast.ResTarget(
         name=_maybe(n, c, "name", _build_str),
-        indirection=_maybe_list(n, c, "indirection", _build_indirection_op),
         val=_build_base_expr(n["val"], c),
-        context=_build_context(n, c),
+        span=_build_span(n, c),
     )
 
 
@@ -593,17 +1089,58 @@ def _build_insert_target(n: Node, c: Context) -> pgast.InsertTarget:
     n = _unwrap(n, "ResTarget")
     return pgast.InsertTarget(
         name=_build_str(n['name'], c),
-        context=_build_context(n, c),
+        span=_build_span(n, c),
     )
 
 
-def _build_update_target(n: Node, c: Context) -> pgast.UpdateTarget:
+def _build_update_targets(
+    target_list: List[Node], c: Context
+) -> List[pgast.UpdateTarget | pgast.MultiAssignRef]:
+    targets: List[pgast.UpdateTarget | pgast.MultiAssignRef] = []
+    while len(target_list) > 0:
+        val: dict = target_list[0]["ResTarget"]["val"]
+        if first_mar := val.get("MultiAssignRef", None):
+            ncolumns = first_mar['ncolumns']
+
+            columns: List[str] = []
+            for _ in range(ncolumns):
+                target = target_list.pop(0)
+                mar = target['ResTarget']
+
+                if 'indirection' in mar:
+                    raise PSqlUnsupportedError(
+                        val, f"multi-assign SET with indirection"
+                    )
+
+                columns.append(mar['name'])
+
+            targets.append(_build_multi_assign_ref(first_mar, columns, c))
+        else:
+            target = target_list.pop(0)
+            targets.append(_build_update_target(target, c))
+
+    return targets
+
+
+def _build_multi_assign_ref(
+    n: Node, columns: List[str], c: Context
+) -> pgast.MultiAssignRef:
+    return pgast.MultiAssignRef(
+        source=_build_base_expr(n['source'], c),
+        columns=columns,
+        span=_build_span(n, c),
+    )
+
+
+def _build_update_target(
+    n: Node, c: Context
+) -> pgast.UpdateTarget | pgast.MultiAssignRef:
     n = _unwrap(n, "ResTarget")
     return pgast.UpdateTarget(
         name=_build_str(n['name'], c),
         val=_build_base_expr(n['val'], c),
         indirection=_maybe_list(n, c, "indirection", _build_indirection_op),
-        context=_build_context(n, c),
+        span=_build_span(n, c),
     )
 
 
@@ -611,14 +1148,12 @@ def _build_window_def(n: Node, c: Context) -> pgast.WindowDef:
     return pgast.WindowDef(
         name=_maybe(n, c, "name", _build_str),
         refname=_maybe(n, c, "refname", _build_str),
-        partition_clause=_maybe_list(
-            n, c, "partitionClause", _build_base_expr
-        ),
+        partition_clause=_maybe_list(n, c, "partitionClause", _build_base_expr),
         order_clause=_maybe_list(n, c, "orderClause", _build_sort_by),
         frame_options=None,
         start_offset=_maybe(n, c, "startOffset", _build_base_expr),
         end_offset=_maybe(n, c, "endOffset", _build_base_expr),
-        context=_build_context(n, c),
+        span=_build_span(n, c),
     )
 
 
@@ -628,7 +1163,38 @@ def _build_sort_by(n: Node, c: Context) -> pgast.SortBy:
         node=_build_base_expr(n["node"], c),
         dir=_maybe(n, c, "sortby_dir", _build_sort_order),
         nulls=_maybe(n, c, "sortby_nulls", _build_nones_order),
-        context=_build_context(n, c),
+        span=_build_span(n, c),
+    )
+
+
+def _build_locking_clause(n: Node, c: Context) -> pgast.LockingClause:
+    n = _unwrap(n, "LockingClause")
+
+    match n["strength"]:
+        case "LCS_FORUPDATE":
+            strength = pgast.LockClauseStrength.UPDATE
+        case "LCS_FORNOKEYUPDATE":
+            strength = pgast.LockClauseStrength.NO_KEY_UPDATE
+        case "LCS_FORSHARE":
+            strength = pgast.LockClauseStrength.SHARE
+        case "LCS_FORKEYSHARE":
+            strength = pgast.LockClauseStrength.KEY_SHARE
+        case lcs:
+            raise PSqlUnsupportedError(n, f"FOR lock strength: {lcs}")
+
+    if pol := n.get("waitPolicy"):
+        wait_policy = getattr(pgast.LockWaitPolicy, pol, None)
+        if wait_policy is None:
+            raise PSqlUnsupportedError(n, f"FOR wait policy: {pol}")
+    else:
+        wait_policy = None
+
+    return pgast.LockingClause(
+        strength=strength,
+        locked_rels=_maybe_list(
+            n, c, "lockedRels", _build_rel_range_var, unwrap="RangeVar"
+        ),
+        wait_policy=wait_policy,
     )
 
 
@@ -644,34 +1210,11 @@ def _build_sort_order(n: Node, _c: Context) -> qlast.SortOrder:
     return qlast.SortOrder.Asc
 
 
-def _build_targets(
-    n: Node, c: Context, key: str
-) -> Optional[List[pgast.UpdateTarget | pgast.MultiAssignRef]]:
-    if _probe(n, [key, 0, "ResTarget", "val", "MultiAssignRef"]):
-        return [_build_multi_assign_ref(n[key], c)]
-    else:
-        return _maybe_list(n, c, key, _build_update_target)
-
-
-def _build_multi_assign_ref(
-    targets: List[Node], c: Context
-) -> pgast.MultiAssignRef:
-    mar = targets[0]['ResTarget']['val']['MultiAssignRef']
-
-    return pgast.MultiAssignRef(
-        source=_build_base_expr(mar['source'], c),
-        columns=[
-            _as_column_ref(target['ResTarget']['name']) for target in targets
-        ],
-        context=_build_context(targets[0]['ResTarget'], c),
-    )
-
-
 def _build_column_ref(n: Node, c: Context) -> pgast.ColumnRef:
     return pgast.ColumnRef(
         name=_list(n, c, "fields", _build_string_or_star),
         optional=_maybe(n, c, "optional", _build_bool),
-        context=_build_context(n, c),
+        span=_build_span(n, c),
     )
 
 
@@ -680,17 +1223,17 @@ def _build_infer_clause(n: Node, c: Context) -> pgast.InferClause:
         index_elems=_maybe_list(n, c, "indexElems", _build_str),
         where_clause=_maybe(n, c, "whereClause", _build_base_expr),
         conname=_maybe(n, c, "conname", _build_str),
-        context=_build_context(n, c),
+        span=_build_span(n, c),
     )
 
 
 def _build_on_conflict(n: Node, c: Context) -> pgast.OnConflictClause:
     return pgast.OnConflictClause(
-        action=_build_str(n["action"], c),
+        action=_build_str(n["action"], c).removeprefix('ONCONFLICT_'),
         infer=_maybe(n, c, "infer", _build_infer_clause),
-        target_list=_build_targets(n, c, "targetList"),
+        target_list=_maybe(n, c, "targetList", _build_update_targets) or [],
         where=_maybe(n, c, "where", _build_base_expr),
-        context=_build_context(n, c),
+        span=_build_span(n, c),
     )
 
 
@@ -704,4 +1247,78 @@ def _build_string_or_star(node: Node, c: Context) -> pgast.Star | str:
         node,
         c,
         {"String": _build_str, "A_Star": _build_star},
+    )
+
+
+def _build_copy_format(n: Node, c: Context) -> pgast.CopyFormat:
+    val = _build_str(n, c)
+    if val == 'text':
+        return pgast.CopyFormat.TEXT
+    if val == 'csv':
+        return pgast.CopyFormat.CSV
+    if val == 'binary':
+        return pgast.CopyFormat.BINARY
+    raise PSqlUnsupportedError(val, f"{val} format")
+
+
+def _build_copy_options(nodes: List[Node], c: Context) -> pgast.CopyOptions:
+    opt = pgast.CopyOptions()
+    for n in nodes:
+        if 'DefElem' not in n or 'defname' not in n['DefElem']:
+            continue
+        n = n['DefElem']
+        def_name = n['defname']
+        arg = n['arg'] if 'arg' in n else None
+
+        if def_name == 'format' and arg:
+            opt.format = _build_copy_format(arg, c)
+
+        elif def_name == 'freeze':
+            opt.freeze = _build_str(arg, c) == 'true' if arg else True
+
+        elif def_name == 'delimiter' and arg:
+            opt.delimiter = _build_str(arg, c)
+
+        elif def_name == 'null' and arg:
+            opt.null = _build_str(arg, c)
+
+        elif def_name == 'header' and arg:
+            opt.header = _build_str(arg, c) == 'true' if arg else True
+
+        elif def_name == 'quote' and arg:
+            opt.quote = _build_str(arg, c)
+
+        elif def_name == 'escape' and arg:
+            opt.escape = _build_str(arg, c)
+
+        elif def_name == 'force_quote':
+            arg = _unwrap(arg, 'List')
+            opt.force_quote = _list(arg, c, 'items', _build_str)
+
+        elif def_name == 'force_not_null':
+            arg = _unwrap(arg, 'List')
+            opt.force_not_null = _list(arg, c, 'items', _build_str)
+
+        elif def_name == 'force_null':
+            arg = _unwrap(arg, 'List')
+            opt.force_null = _list(arg, c, 'items', _build_str)
+
+        elif def_name == 'encoding':
+            opt.encoding = _build_str(arg, c)
+    return opt
+
+
+def _build_copy(n: Node, c: Context) -> pgast.CopyStmt:
+    return pgast.CopyStmt(
+        relation=_maybe(n, c, 'relation', _build_relation),
+        colnames=_maybe_list(n, c, 'attlist', _build_str),
+        query=_maybe(n, c, 'query', _build_query),
+        is_from=_bool_or_false(n, 'is_from'),
+        is_program=_bool_or_false(n, 'is_program'),
+        filename=_maybe(n, c, 'filename', _build_str),
+        options=(
+            _maybe(n, c, 'options', _build_copy_options) or pgast.CopyOptions()
+        ),
+        where_clause=_maybe(n, c, "whereClause", _build_base_expr),
+        span=_build_span(n, c),
     )

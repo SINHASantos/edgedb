@@ -22,11 +22,12 @@
 
 from __future__ import annotations
 
-from typing import *
+from typing import Optional, Union, Iterator, Sequence, List, TYPE_CHECKING
 
 from edb.ir import typeutils as irtyputils
 
 from edb.pgsql import ast as pgast
+from edb.pgsql import common
 from edb.pgsql import types as pg_types
 
 if TYPE_CHECKING:
@@ -41,12 +42,14 @@ def tuple_element_for_shape_el(
     *,
     ctx: context.CompilerContextLevel
 ) -> pgast.TupleElementBase:
+    from edb.ir import ast as irast
+
     if shape_el.path_id.is_type_intersection_path():
-        assert shape_el.rptr is not None
-        rptr = shape_el.rptr.source.rptr
+        assert isinstance(shape_el.expr, irast.Pointer)
+        rptr = shape_el.expr.source.expr
     else:
-        rptr = shape_el.rptr
-    assert rptr is not None
+        rptr = shape_el.expr
+    assert isinstance(rptr, irast.Pointer)
     ptrref = rptr.ptrref
     ptrname = ptrref.shortname
 
@@ -87,11 +90,7 @@ def tuple_getattr(
     if irtyputils.is_persistent_tuple(tuple_typeref):
         set_expr = pgast.Indirection(
             arg=tuple_val,
-            indirection=[
-                pgast.ColumnRef(
-                    name=[attr],
-                ),
-            ],
+            indirection=[pgast.RecordIndirectionOp(name=attr)],
         )
     else:
         set_expr = pgast.SelectStmt(
@@ -151,18 +150,32 @@ def get_leftmost_query(query: pgast.Query) -> pgast.Query:
     return result
 
 
-def for_each_query_in_set(
-    qry: pgast.Query,
-    cb: Callable[[pgast.Query], Any],
-) -> List[Any]:
-    if is_set_op_query(qry):
-        assert qry.larg and qry.rarg
-        result = for_each_query_in_set(qry.larg, cb)
-        result.extend(for_each_query_in_set(qry.rarg, cb))
-    else:
-        result = [cb(qry)]
+def each_query_in_set(qry: pgast.Query) -> Iterator[pgast.Query]:
+    # We do this iteratively instead of recursively (with yield from)
+    # to avoid being pointlessly quadratic.
+    stack = [qry]
+    while stack:
+        qry = stack.pop()
+        if is_set_op_query(qry):
+            assert qry.larg and qry.rarg
+            stack.append(qry.rarg)
+            stack.append(qry.larg)
+        else:
+            yield qry
 
-    return result
+
+def each_base_rvar(rvar: pgast.BaseRangeVar) -> Iterator[pgast.BaseRangeVar]:
+    # We do this iteratively instead of recursively (with yield from)
+    # to avoid being pointlessly quadratic.
+    stack = [rvar]
+    while stack:
+        rvar = stack.pop()
+        if isinstance(rvar, pgast.JoinExpr):
+            for clause in reversed(rvar.joins):
+                stack.append(clause.rarg)
+            stack.append(rvar.larg)
+        else:
+            yield rvar
 
 
 def new_binop(
@@ -171,7 +184,6 @@ def new_binop(
     op: str,
 ) -> pgast.Expr:
     return pgast.Expr(
-        kind=pgast.ExprKind.OP,
         name=op,
         lexpr=lexpr,
         rexpr=rexpr
@@ -240,11 +252,7 @@ def extend_select_op(
 
 
 def new_unop(op: str, expr: pgast.BaseExpr) -> pgast.Expr:
-    return pgast.Expr(
-        kind=pgast.ExprKind.OP,
-        name=op,
-        rexpr=expr
-    )
+    return pgast.Expr(name=op, rexpr=expr)
 
 
 def join_condition(
@@ -268,6 +276,7 @@ def safe_array_expr(
     elements: List[pgast.BaseExpr],
     *,
     ser_safe: bool = False,
+    ctx: context.CompilerContextLevel,
 ) -> pgast.BaseExpr:
     result: pgast.BaseExpr = pgast.ArrayExpr(
         elements=elements,
@@ -275,7 +284,7 @@ def safe_array_expr(
     )
     if any(el.nullable for el in elements):
         result = pgast.FuncCall(
-            name=('edgedb', '_nullif_array_nulls'),
+            name=edgedb_func('_nullif_array_nulls', ctx=ctx),
             args=[result],
             ser_safe=ser_safe,
         )
@@ -298,10 +307,12 @@ def find_column_in_subselect_rvar(
 
 
 def get_column(
-        rvar: pgast.BaseRangeVar,
-        colspec: Union[str, pgast.ColumnRef], *,
-        is_packed_multi: bool=True,
-        nullable: Optional[bool]=None) -> pgast.ColumnRef:
+    rvar: pgast.BaseRangeVar,
+    colspec: Union[str, pgast.ColumnRef],
+    *,
+    is_packed_multi: bool = True,
+    nullable: Optional[bool] = None,
+) -> pgast.ColumnRef:
 
     if isinstance(colspec, pgast.ColumnRef):
         colname = colspec.name[-1]
@@ -328,11 +339,10 @@ def get_column(
                 nullables = []
                 ser_safes = []
 
-                def _cb(q: pgast.Query) -> None:
+                for q in each_query_in_set(rvar.subquery):
                     nullables.append(q.target_list[col_idx].nullable)
                     ser_safes.append(q.target_list[col_idx].ser_safe)
 
-                for_each_query_in_set(rvar.subquery, _cb)
                 nullable = any(nullables)
                 ser_safe = all(ser_safes)
             else:
@@ -357,8 +367,8 @@ def get_column(
 
 
 def get_rvar_var(
-        rvar: pgast.BaseRangeVar,
-        var: pgast.OutputVar) -> pgast.OutputVar:
+    rvar: pgast.BaseRangeVar, var: pgast.OutputVar
+) -> pgast.OutputVar:
 
     fieldref: pgast.OutputVar
 
@@ -382,6 +392,9 @@ def get_rvar_var(
     elif isinstance(var, pgast.ColumnRef):
         fieldref = get_column(rvar, var, is_packed_multi=var.is_packed_multi)
 
+    elif isinstance(var, pgast.ExprOutputVar):
+        fieldref = var
+
     else:
         raise AssertionError(f'unexpected OutputVar subclass: {var!r}')
 
@@ -389,9 +402,11 @@ def get_rvar_var(
 
 
 def strip_output_var(
-        var: pgast.OutputVar, *,
-        optional: Optional[bool]=None,
-        nullable: Optional[bool]=None) -> pgast.OutputVar:
+    var: pgast.OutputVar,
+    *,
+    optional: Optional[bool] = None,
+    nullable: Optional[bool] = None,
+) -> pgast.OutputVar:
 
     result: pgast.OutputVar
 
@@ -438,7 +453,7 @@ def select_is_simple(stmt: pgast.SelectStmt) -> bool:
         not stmt.distinct_clause
         and not stmt.where_clause
         and not stmt.group_clause
-        and not stmt.having
+        and not stmt.having_clause
         and not stmt.window_clause
         and not stmt.values
         and not stmt.sort_clause
@@ -509,6 +524,14 @@ def collapse_query(query: pgast.Query) -> pgast.BaseExpr:
         return query
 
     if (
+        isinstance(query, pgast.SelectStmt)
+        and len(query.target_list) == 1
+        and len(query.from_clause) == 0
+        and select_is_simple(query)
+    ):
+        return query.target_list[0].val
+
+    if (
         not isinstance(query, pgast.SelectStmt)
         or len(query.target_list) != 1
         or len(query.from_clause) != 1
@@ -535,3 +558,24 @@ def compile_typeref(expr: irast.TypeRef) -> pgast.BaseExpr:
         )
 
     return result
+
+
+def maybe_unpack_row(expr: pgast.Base) -> Sequence[pgast.BaseExpr]:
+    assert isinstance(expr, pgast.BaseExpr)
+    match expr:
+        case pgast.ImplicitRowExpr():
+            return expr.args
+        case pgast.RowExpr():
+            return expr.args
+    return (expr,)
+
+
+def edgedb_func(
+    name: str,
+    *,
+    ctx: context.CompilerContextLevel
+) -> tuple[str, ...]:
+    return common.maybe_versioned_name(
+        ('edgedb', name),
+        versioned=ctx.env.versioned_stdlib,
+    )

@@ -41,7 +41,7 @@ following parameters:
   <https://hub.docker.com/r/edgedb/edgedb/tags>`_.
 - ``InstanceName``: ⚠️ Due to limitations with AWS, this must be 22 characters
   or less!
-- ``SuperUserPassword``: this will used as the password for the new EdgeDB
+- ``SuperUserPassword``: this will be used as the password for the new EdgeDB
   instance. Keep track of the value you provide.
 
 Once the deployment is complete, follow these steps to find the host name that
@@ -62,7 +62,7 @@ has been assigned to your EdgeDB instance:
    .. code-block:: bash
 
      $ edgedb --dsn edgedb://edgedb:<password>@<hostname> --tls-security insecure
-     EdgeDB 2.x
+     EdgeDB 3.x
      Type \help for help, \quit to quit.
      edgedb>
 
@@ -82,12 +82,26 @@ This aliases the remote instance to ``my_aws_instance`` (this name can be
 anything). You can now use the ``-I my_aws_instance`` flag to run CLI commands
 against this instance, as with local instances.
 
+.. note::
+
+   The command groups ``edgedb instance`` and ``edgedb project`` are not
+   intended to manage production instances.
+
 .. code-block:: bash
 
   $ edgedb -I my_aws_instance
-  EdgeDB 2.x
+  EdgeDB 3.x
   Type \help for help, \quit to quit.
   edgedb>
+
+To make changes to your EdgeDB deployment like upgrading the EdgeDB version or
+enabling the UI you can follow the CloudFormation
+`Updating a stack <stack-update_>`_ instructions. Search for
+``ContainerDefinitions`` in the template and you will find where EdgeDB's
+:ref:`environment variables <ref_guides_deployment_docker_customization>` are
+defined. To upgrade the EdgeDB version specify a
+`docker image tag <docker-tags_>`_ with the image name ``edgedb/edgedb`` in the
+second step of the update workflow.
 
 CloudFormation CLI
 ------------------
@@ -113,6 +127,10 @@ your terminal:
 .. _aws_console:
    https://console.aws.amazon.com
    /ec2/v2/home#NIC:search=ec2-security-group
+.. _stack-update:
+   https://docs.aws.amazon.com
+   /AWSCloudFormation/latest/UserGuide/cfn-whatis-howdoesitwork.html
+.. _docker-tags: https://hub.docker.com/r/edgedb/edgedb/tags
 
 
 Manual Install with CLI
@@ -833,4 +851,16 @@ link``:
         )" \
         aws
 
+.. note::
+
+   The command groups ``edgedb instance`` and ``edgedb project`` are not
+   intended to manage production instances.
+
 You can now open a REPL to this instance
+
+Health Checks
+=============
+
+Using an HTTP client, you can perform health checks to monitor the status of
+your EdgeDB instance. Learn how to use them with our :ref:`health checks guide
+<ref_guide_deployment_health_checks>`.

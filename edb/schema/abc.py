@@ -48,7 +48,7 @@ class Object:
     pass
 
 
-class Database(Object):
+class Branch(Object):
     pass
 
 
@@ -105,6 +105,10 @@ class Array(Collection):
 
 
 class Range(Collection):
+    pass
+
+
+class MultiRange(Collection):
     pass
 
 

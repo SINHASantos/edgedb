@@ -19,7 +19,7 @@
 
 from __future__ import annotations
 
-from typing import *
+from typing import Any, Optional, Tuple, Type, Dict, List, TYPE_CHECKING
 
 from edb.edgeql import ast as qlast
 from edb.edgeql import qltypes
@@ -35,12 +35,15 @@ from . import name as sn
 from . import objects as so
 from . import pointers
 from . import referencing
+from . import rewrites as s_rewrites
 from . import sources
+from . import types as s_types
+from . import unknown_pointers
 from . import utils
+from . import expr as s_expr
 
 if TYPE_CHECKING:
     from . import objtypes as s_objtypes
-    from . import types as s_types
     from . import schema as s_schema
 
 
@@ -138,19 +141,16 @@ class Link(
 
     def has_user_defined_properties(self, schema: s_schema.Schema) -> bool:
         return bool([p for p in self.get_pointers(schema).objects(schema)
-                     if not p.is_special_pointer(schema)])
+                     if not p.is_special_pointer(schema)
+                     and not p.is_pure_computable(schema)])
 
     def get_source(
-        self,
-        schema: s_schema.Schema
+        self, schema: s_schema.Schema
     ) -> Optional[s_objtypes.ObjectType]:
         return self.get_field_value(  # type: ignore[no-any-return]
             schema, 'source')
 
-    def get_source_type(
-        self,
-        schema: s_schema.Schema
-    ) -> s_objtypes.ObjectType:
+    def get_source_type(self, schema: s_schema.Schema) -> s_objtypes.ObjectType:
         source = self.get_source(schema)
         assert source
         return source
@@ -179,8 +179,9 @@ class Link(
         target: s_types.Type,
     ) -> s_schema.Schema:
         schema = super().set_target(schema, target)
-        tgt_prop = self.getptr(schema, sn.UnqualName('target'))
-        schema = tgt_prop.set_target(schema, target)
+        tgt_prop = self.maybe_get_ptr(schema, sn.UnqualName('target'))
+        if tgt_prop:
+            schema = tgt_prop.set_target(schema, target)
         return schema
 
     @classmethod
@@ -203,10 +204,14 @@ class LinkSourceCommand(inheriting.InheritingObjectCommand[sources.Source_T]):
     pass
 
 
-class LinkCommandContext(pointers.PointerCommandContext[Link],
-                         constraints.ConsistencySubjectCommandContext,
-                         properties.PropertySourceContext[Link],
-                         sources.SourceCommandContext[Link]):
+class LinkCommandContext(
+    pointers.PointerCommandContext[Link],
+    constraints.ConsistencySubjectCommandContext,
+    properties.PropertySourceContext[Link],
+    unknown_pointers.UnknownPointerSourceContext[Link],
+    sources.SourceCommandContext[Link],
+    s_rewrites.RewriteSubjectCommandContext,
+):
     pass
 
 
@@ -253,18 +258,27 @@ class LinkCommand(
         assert target is not None
 
         if not target.is_object_type():
-            srcctx = self.get_attribute_source_context('target')
+            span = self.get_attribute_span('target')
+            if isinstance(target, s_types.Array):
+                # Custom error message for link -> array<...>
+                link_dn = scls.get_displayname(schema)
+                el_dn = target.get_subtypes(schema)[0].get_displayname(schema)
+                hint = f"did you mean 'multi link {link_dn} -> {el_dn}'?"
+            else:
+                hint = None
+
             raise errors.InvalidLinkTargetError(
                 f'invalid link target type, expected object type, got '
                 f'{target.get_verbosename(schema)}',
-                context=srcctx,
+                span=span,
+                hint=hint,
             )
 
         if target.is_free_object_type(schema):
-            srcctx = self.get_attribute_source_context('target')
+            span = self.get_attribute_span('target')
             raise errors.InvalidLinkTargetError(
                 f'{target.get_verbosename(schema)} is not a valid link target',
-                context=srcctx,
+                span=span,
             )
 
         if (
@@ -272,11 +286,22 @@ class LinkCommand(
             and not scls.get_from_alias(schema)
             and target.is_view(schema)
         ):
-            srcctx = self.get_attribute_source_context('target')
+            span = self.get_attribute_span('target')
             raise errors.InvalidLinkTargetError(
                 f'invalid link type: {target.get_displayname(schema)!r}'
                 f' is an expression alias, not a proper object type',
-                context=srcctx,
+                span=span,
+            )
+
+        if (
+            scls.get_required(schema) and
+            scls.get_on_target_delete(schema) ==
+                qltypes.LinkTargetDeleteAction.DeferredRestrict
+        ):
+            raise errors.InvalidLinkTargetError(
+                'required links may not use `on target delete '
+                'deferred restrict`',
+                span=self.span,
             )
 
     def _get_ast(
@@ -333,12 +358,6 @@ class CreateLink(
         if isinstance(astnode, qlast.CreateConcreteLink):
             assert isinstance(cmd, pointers.PointerCommand)
             cmd._process_create_or_alter_ast(schema, astnode, context)
-        else:
-            # this is an abstract property then
-            if cmd.get_attribute_value('default') is not None:
-                raise errors.SchemaDefinitionError(
-                    f"'default' is not a valid field for an abstract link",
-                    context=astnode.context)
         assert isinstance(cmd, sd.Command)
         return cmd
 
@@ -374,9 +393,11 @@ class CreateLink(
             # AlterConcreteLink, which requires different handling.
             if isinstance(node, qlast.CreateConcreteLink):
                 if not node.target:
-                    expr = self.get_attribute_value('expr')
+                    expr: Optional[s_expr.Expression] = (
+                        self.get_attribute_value('expr')
+                    )
                     if expr is not None:
-                        node.target = expr.qlast
+                        node.target = expr.parse()
                     else:
                         t = op.new_value
                         assert isinstance(t, (so.Object, so.ObjectShell))
@@ -394,7 +415,7 @@ class CreateLink(
                     op.new_value.resolve(schema)
                     if isinstance(op.new_value, so.ObjectShell)
                     else op.new_value)
-
+                assert isinstance(new_type, s_types.Type)
                 new_type_ast = utils.typeref_to_ast(schema, op.new_value)
                 cast_expr = None
                 # If the type isn't assignment castable, generate a
@@ -440,6 +461,11 @@ class CreateLink(
 
         parent_ctx = self.get_referrer_context(context)
         if parent_ctx is None:
+            return cmd
+
+        # Skip source and target when compiling stuff that won't ever
+        # go into a real schema.
+        if context.slim_links:
             return cmd
 
         base_prop_name = sn.QualName('std', 'source')
@@ -544,11 +570,12 @@ class SetLinkType(
 
         if not context.canonical:
             # We need to update the target link prop as well
-            tgt_prop = scls.getptr(schema, sn.UnqualName('target'))
-            tgt_prop_alter = tgt_prop.init_delta_command(
-                schema, sd.AlterObject)
-            tgt_prop_alter.set_attribute_value('target', new_target)
-            self.add(tgt_prop_alter)
+            tgt_prop = scls.maybe_get_ptr(schema, sn.UnqualName('target'))
+            if tgt_prop:
+                tgt_prop_alter = tgt_prop.init_delta_command(
+                    schema, sd.AlterObject)
+                tgt_prop_alter.set_attribute_value('target', new_target)
+                self.add(tgt_prop_alter)
 
         return schema
 
@@ -694,26 +721,6 @@ class DeleteLink(
 ):
     astnode = [qlast.DropConcreteLink, qlast.DropLink]
     referenced_astnode = qlast.DropConcreteLink
-
-    # NB: target type cleanup (e.g. target compound type) is done by
-    #     the DeleteProperty handler for the @target property.
-
-    def _delete_begin(
-        self,
-        schema: s_schema.Schema,
-        context: sd.CommandContext,
-    ) -> s_schema.Schema:
-        schema = super()._delete_begin(schema, context)
-        if not context.canonical:
-            # We need to do a propagate here, too, since there could
-            # be backrefs to this link that technically reference
-            # us but will be fine if it is deleted.
-            schema = self._propagate_if_expr_refs(
-                schema,
-                context,
-                action=self.get_friendly_description(schema=schema),
-            )
-        return schema
 
     def _get_ast(
         self,

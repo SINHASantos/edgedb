@@ -20,7 +20,26 @@
 """EdgeQL to IR compiler context."""
 
 from __future__ import annotations
-from typing import *
+from typing import (
+    Callable,
+    Literal,
+    Optional,
+    Tuple,
+    Type,
+    Union,
+    Mapping,
+    MutableMapping,
+    Sequence,
+    ChainMap,
+    Dict,
+    List,
+    Set,
+    FrozenSet,
+    NamedTuple,
+    cast,
+    overload,
+    TYPE_CHECKING,
+)
 
 import collections
 import dataclasses
@@ -32,14 +51,17 @@ from edb.common import compiler
 from edb.common import ordered
 from edb.common import parsing
 
+from edb import errors
+
 from edb.edgeql import ast as qlast
 from edb.edgeql import qltypes
 
 from edb.ir import ast as irast
+from edb.ir import utils as irutils
 from edb.ir import typeutils as irtyputils
 
 from edb.schema import expraliases as s_aliases
-from edb.schema import functions as s_func
+from edb.schema import futures as s_futures
 from edb.schema import name as s_name
 from edb.schema import objects as s_obj
 from edb.schema import pointers as s_pointers
@@ -133,7 +155,10 @@ class Environment:
     path_scope: irast.ScopeTreeNode
     """Overrall expression path scope tree."""
 
-    schema_view_cache: Dict[s_types.Type, tuple[s_types.Type, irast.Set]]
+    schema_view_cache: Dict[
+        tuple[s_types.Type, object],
+        tuple[s_types.Type, irast.Set],
+    ]
     """Type cache used by schema-level views."""
 
     query_parameters: Dict[str, irast.Param]
@@ -147,15 +172,12 @@ class Environment:
     set_types: Dict[irast.Set, s_types.Type]
     """A dictionary of all Set instances and their schema types."""
 
-    type_origins: Dict[s_types.Type, Optional[parsing.ParserContext]]
+    type_origins: Dict[s_types.Type, Optional[parsing.Span]]
     """A dictionary of notable types and their source origins.
 
     This is used to trace where a particular type instance originated in
     order to provide useful diagnostics for type errors.
     """
-
-    inferred_types: Dict[irast.Base, s_types.Type]
-    """A dictionary of all expressions and their inferred schema types."""
 
     inferred_volatility: Dict[
         irast.Base,
@@ -179,22 +201,12 @@ class Environment:
         Tuple[
             Optional[qltypes.SchemaCardinality],
             Optional[bool],
-            Optional[parsing.ParserContext],
+            Optional[parsing.Span],
         ],
     ]
     """Cardinality/source context for pointers with unclear cardinality."""
 
     view_shapes_metadata: Dict[s_types.Type, irast.ViewShapeMetadata]
-
-    must_use_views: Dict[
-        s_types.Type,
-        Optional[Tuple[s_name.Name, Optional[parsing.ParserContext]]],
-    ]
-    """A set of views that *must* be used in an expression.
-
-    Once a view is used, we set it to None rather than removing it so
-    that we can avoid adding it again if it is defined inside a
-    computable."""
 
     schema_refs: Set[s_obj.Object]
     """A set of all schema objects referenced by an expression."""
@@ -203,9 +215,6 @@ class Environment:
     """Map from all schema objects referenced to the ast referants.
 
     This is used for rewriting expressions in the schema after a rename. """
-
-    created_schema_objects: Set[s_obj.Object]
-    """A set of all schema objects derived by this compilation."""
 
     # Caches for costly operations in edb.ir.typeutils
     ptr_ref_cache: PointerRefCache
@@ -216,10 +225,8 @@ class Environment:
     functions) that appear in a function body.
     """
 
-    dml_stmts: Set[irast.MutatingStmt]
-    """A list of DML expressions (statements and DML-containing
-    functions) that appear in a function body.
-    """
+    dml_stmts: list[irast.MutatingStmt]
+    """A list of DML statements in the query"""
 
     #: A list of bindings that should be assumed to be singletons.
     singletons: List[irast.PathId]
@@ -271,6 +278,12 @@ class Environment:
     path_scope_map: Dict[irast.Set, ScopeInfo]
     """A dictionary of scope info that are appropriate for a given view."""
 
+    dml_rewrites: Dict[irast.Set, irast.Rewrites]
+    """Compiled rewrites that should be attached to InsertStmt or UpdateStmt"""
+
+    warnings: list[errors.EdgeDBError]
+    """List of warnings to emit"""
+
     def __init__(
         self,
         *,
@@ -294,19 +307,16 @@ class Environment:
         self.query_globals = {}
         self.set_types = {}
         self.type_origins = {}
-        self.inferred_types = {}
         self.inferred_volatility = {}
         self.view_shapes = collections.defaultdict(list)
         self.view_shapes_metadata = collections.defaultdict(
             irast.ViewShapeMetadata)
-        self.must_use_views = {}
         self.schema_refs = set()
         self.schema_ref_exprs = {} if options.track_schema_ref_exprs else None
-        self.created_schema_objects = set()
         self.ptr_ref_cache = PointerRefCache()
         self.type_ref_cache = {}
         self.dml_exprs = []
-        self.dml_stmts = set()
+        self.dml_stmts = []
         self.pointer_derivation_map = collections.defaultdict(list)
         self.pointer_specified_info = {}
         self.singletons = []
@@ -320,15 +330,18 @@ class Environment:
         self.shape_type_cache = {}
         self.expr_view_cache = {}
         self.path_scope_map = {}
+        self.dml_rewrites = {}
+        self.warnings = []
 
     def add_schema_ref(
-            self, sobj: s_obj.Object, expr: Optional[qlast.Base]) -> None:
+        self, sobj: s_obj.Object, expr: Optional[qlast.Base]
+    ) -> None:
         self.schema_refs.add(sobj)
         if self.schema_ref_exprs is not None and expr:
             self.schema_ref_exprs.setdefault(sobj, set()).add(expr)
 
     @overload
-    def get_track_schema_object(  # NoQA: F811
+    def get_schema_object_and_track(
         self,
         name: s_name.Name,
         expr: Optional[qlast.Base],
@@ -342,7 +355,7 @@ class Environment:
         ...
 
     @overload
-    def get_track_schema_object(  # NoQA: F811
+    def get_schema_object_and_track(
         self,
         name: s_name.Name,
         expr: Optional[qlast.Base],
@@ -355,7 +368,7 @@ class Environment:
     ) -> Optional[s_obj.Object]:
         ...
 
-    def get_track_schema_object(  # NoQA: F811
+    def get_schema_object_and_track(
         self,
         name: s_name.Name,
         expr: Optional[qlast.Base],
@@ -390,7 +403,7 @@ class Environment:
 
         return sobj
 
-    def get_track_schema_type(
+    def get_schema_type_and_track(
         self,
         name: s_name.Name,
         expr: Optional[qlast.Base]=None,
@@ -401,7 +414,7 @@ class Environment:
         condition: Optional[Callable[[s_obj.Object], bool]]=None,
     ) -> s_types.Type:
 
-        stype = self.get_track_schema_object(
+        stype = self.get_schema_object_and_track(
             name, expr, modaliases=modaliases, default=default, label=label,
             condition=condition, type=s_types.Type,
         )
@@ -430,19 +443,16 @@ class ContextLevel(compiler.ContextLevel):
     or passed to the compiler programmatically.
     """
 
-    func: Optional[s_func.Function]
-    """Schema function object required when compiling functions bodies."""
-
     view_nodes: Dict[s_name.Name, s_types.Type]
     """A dictionary of newly derived Node classes representing views."""
 
-    view_sets: Dict[s_types.Type, irast.Set]
+    view_sets: Dict[s_obj.Object, irast.Set]
     """A dictionary of IR expressions for views declared in the query."""
 
     suppress_rewrites: FrozenSet[s_types.Type]
     """Types to suppress using rewrites on"""
 
-    aliased_views: ChainMap[s_name.Name, s_types.Type]
+    aliased_views: ChainMap[s_name.Name, irast.Set]
     """A dictionary of views aliased in a statement body."""
 
     class_view_overrides: Dict[uuid.UUID, s_types.Type]
@@ -526,9 +536,6 @@ class ContextLevel(compiler.ContextLevel):
     implicit_limit: int
     """Implicit LIMIT clause in SELECT statements."""
 
-    inhibit_implicit_limit: bool
-    """Whether implicit limit injection should be inhibited."""
-
     special_computables_in_mutation_shape: FrozenSet[str]
     """A set of "special" computable pointers allowed in mutation shape."""
 
@@ -538,17 +545,43 @@ class ContextLevel(compiler.ContextLevel):
     defining_view: Optional[s_objtypes.ObjectType]
     """Whether a view is currently being defined (as opposed to be compiled)"""
 
+    current_schema_views: tuple[s_types.Type, ...]
+    """Which schema views are currently being compiled"""
+
     recompiling_schema_alias: bool
     """Whether we are currently recompiling a schema-level expression alias."""
 
     compiling_update_shape: bool
     """Whether an UPDATE shape is currently being compiled."""
 
-    in_conditional: Optional[parsing.ParserContext]
-    """Whether currently in a conditional branch."""
-
     active_computeds: ordered.OrderedSet[s_pointers.Pointer]
     """A ordered set of currently compiling computeds"""
+
+    allow_endpoint_linkprops: bool
+    """Whether to allow references to endpoint linkpoints (@source, @target)."""
+
+    disallow_dml: Optional[str]
+    """Whether we are currently in a place where no dml is allowed,
+        if not None, then it is of the form `in a FILTER clause`  """
+
+    active_rewrites: FrozenSet[s_objtypes.ObjectType]
+    """For detecting cycles in rewrite rules"""
+
+    active_defaults: FrozenSet[s_objtypes.ObjectType]
+    """For detecting cycles in defaults"""
+
+    collection_cast_info: Optional[CollectionCastInfo]
+    """For generating errors messages when casting to collections.
+
+    This will be set by the outermost cast and then shared between all
+    sub-casts.
+
+    Some casts (eg. arrays) will generate select statements containing other
+    type casts. These will also share the outermost cast info.
+    """
+
+    no_factoring: bool
+    warn_factoring: bool
 
     def __init__(
         self,
@@ -596,14 +629,22 @@ class ContextLevel(compiler.ContextLevel):
             self.implicit_tid_in_shapes = False
             self.implicit_tname_in_shapes = False
             self.implicit_limit = 0
-            self.inhibit_implicit_limit = False
             self.special_computables_in_mutation_shape = frozenset()
             self.empty_result_type_hint = None
             self.defining_view = None
+            self.current_schema_views = ()
             self.compiling_update_shape = False
-            self.in_conditional = None
             self.active_computeds = ordered.OrderedSet()
             self.recompiling_schema_alias = False
+            self.active_rewrites = frozenset()
+            self.active_defaults = frozenset()
+
+            self.allow_endpoint_linkprops = False
+            self.disallow_dml = None
+            self.no_factoring = False
+            self.warn_factoring = False
+
+            self.collection_cast_info = None
 
         else:
             self.env = prevlevel.env
@@ -634,15 +675,23 @@ class ContextLevel(compiler.ContextLevel):
             self.implicit_tid_in_shapes = prevlevel.implicit_tid_in_shapes
             self.implicit_tname_in_shapes = prevlevel.implicit_tname_in_shapes
             self.implicit_limit = prevlevel.implicit_limit
-            self.inhibit_implicit_limit = prevlevel.inhibit_implicit_limit
             self.special_computables_in_mutation_shape = \
                 prevlevel.special_computables_in_mutation_shape
             self.empty_result_type_hint = prevlevel.empty_result_type_hint
             self.defining_view = prevlevel.defining_view
+            self.current_schema_views = prevlevel.current_schema_views
             self.compiling_update_shape = prevlevel.compiling_update_shape
-            self.in_conditional = prevlevel.in_conditional
             self.active_computeds = prevlevel.active_computeds
             self.recompiling_schema_alias = prevlevel.recompiling_schema_alias
+            self.active_rewrites = prevlevel.active_rewrites
+            self.active_defaults = prevlevel.active_defaults
+
+            self.allow_endpoint_linkprops = prevlevel.allow_endpoint_linkprops
+            self.disallow_dml = prevlevel.disallow_dml
+            self.no_factoring = prevlevel.no_factoring
+            self.warn_factoring = prevlevel.warn_factoring
+
+            self.collection_cast_info = prevlevel.collection_cast_info
 
             if mode == ContextSwitchMode.SUBQUERY:
                 self.anchors = prevlevel.anchors.copy()
@@ -677,8 +726,6 @@ class ContextLevel(compiler.ContextLevel):
                 self.pending_stmt_own_path_id_namespace = frozenset()
                 self.pending_stmt_full_path_id_namespace = frozenset()
                 self.inserting_paths = {}
-
-                self.iterator_path_ids = frozenset()
 
                 self.view_rptr = None
                 self.view_scls = None
@@ -726,22 +773,75 @@ class ContextLevel(compiler.ContextLevel):
     def detached(self) -> compiler.CompilerContextManager[ContextLevel]:
         return self.new(ContextSwitchMode.DETACHED)
 
-    def create_anchor(self, ir: irast.Set, name: str='v') -> qlast.Path:
+    def create_anchor(
+        self, ir: irast.Set, name: str = 'v', *, check_dml: bool = False
+    ) -> qlast.Path:
         alias = self.aliases.get(name)
+        # TODO: We should probably always check for DML, but I'm
+        # concerned about perf, since we don't cache it at all.
+        has_dml = check_dml and irutils.contains_dml(ir)
         self.anchors[alias] = ir
         return qlast.Path(
-            steps=[qlast.ObjectRef(name=alias)],
+            steps=[qlast.IRAnchor(name=alias, has_dml=has_dml)],
         )
 
     def maybe_create_anchor(
-        self, ir: Union[irast.Set, qlast.Expr], name: str='v',
+        self,
+        ir: Union[irast.Set, qlast.Expr],
+        name: str = 'v',
     ) -> qlast.Expr:
         if isinstance(ir, irast.Set):
             return self.create_anchor(ir, name)
         else:
             return ir
 
+    def get_security_context(self) -> object:
+        '''Compute an additional compilation cache key.
+
+        Return an additional key for any compilation caches that may
+        vary based on "security contexts" such as whether we are in an
+        access policy.
+        '''
+        # N.B: Whether we are compiling a trigger is not included here
+        # since we clear cached rewrites when compiling them in the
+        # *pgsql* compiler.
+        return bool(self.suppress_rewrites)
+
+    def log_warning(self, warning: errors.EdgeDBError) -> None:
+        self.env.warnings.append(warning)
+
+    def allow_factoring(self) -> None:
+        self.no_factoring = self.warn_factoring = False
+
+    def schema_factoring(self) -> None:
+        self.no_factoring = s_futures.future_enabled(
+            self.env.schema, 'simple_scoping'
+        )
+        self.warn_factoring = s_futures.future_enabled(
+            self.env.schema, 'warn_old_scoping'
+        )
+
 
 class CompilerContext(compiler.CompilerContext[ContextLevel]):
     ContextLevelClass = ContextLevel
     default_mode = ContextSwitchMode.NEW
+
+
+class CollectionCastInfo(NamedTuple):
+    """For generating errors messages when casting to collections."""
+
+    from_type: s_types.Type
+    to_type: s_types.Type
+
+    path_elements: list[Tuple[str, Optional[str]]]
+    """Represents a path to the current collection element being cast.
+
+    A path element is a tuple of the collection type and an optional
+    element name. eg. ('tuple', 'a') or ('array', None)
+
+    The list is shared between the outermost context and all its sub contexts.
+    When casting a collection, each element's path should be pushed before
+    entering the "sub-cast" and popped immediately after.
+
+    In the event of a cast error, the list is preserved at the outermost cast.
+    """

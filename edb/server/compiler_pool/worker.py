@@ -18,7 +18,7 @@
 
 
 from __future__ import annotations
-from typing import *  # NoQA
+from typing import Any, Optional
 
 import pickle
 
@@ -26,6 +26,7 @@ import immutables
 
 from edb import edgeql
 from edb import graphql
+from edb.common import uuidgen
 from edb.pgsql import params as pgparams
 from edb.schema import schema as s_schema
 from edb.server import compiler
@@ -64,15 +65,32 @@ def __init_worker__(
         std_schema,
         refl_schema,
         schema_class_layout,
-        global_schema,
+        global_schema_pickle,
         system_config,
     ) = pickle.loads(init_args_pickled)
 
     INITED = True
-    DBS = dbs
+    DBS = immutables.Map(
+        [
+            (
+                dbname,
+                state.DatabaseState(
+                    name=dbname,
+                    user_schema=(
+                        None  # type: ignore
+                        if db.user_schema_pickle is None
+                        else pickle.loads(db.user_schema_pickle)
+                    ),
+                    reflection_cache=db.reflection_cache,
+                    database_config=db.database_config,
+                ),
+            )
+            for dbname, db in dbs.items()
+        ]
+    )
     BACKEND_RUNTIME_PARAMS = backend_runtime_params
     STD_SCHEMA = std_schema
-    GLOBAL_SCHEMA = global_schema
+    GLOBAL_SCHEMA = pickle.loads(global_schema_pickle)
     INSTANCE_CONFIG = system_config
 
     COMPILER = compiler.new_compiler(
@@ -80,7 +98,7 @@ def __init_worker__(
         refl_schema,
         schema_class_layout,
         backend_runtime_params=BACKEND_RUNTIME_PARAMS,
-        load_config=True,
+        config_spec=None,
     )
 
 
@@ -158,7 +176,7 @@ def compile(
         system_config,
     )
 
-    units, cstate = COMPILER.compile(
+    units, cstate = COMPILER.compile_serialized_request(
         db.user_schema,
         GLOBAL_SCHEMA,
         db.reflection_cache,
@@ -177,13 +195,22 @@ def compile(
     return units, pickled_state
 
 
-def compile_in_tx(cstate, *args, **kwargs):
+def compile_in_tx(
+    dbname: Optional[str], user_schema: Optional[bytes], cstate, *args, **kwargs
+):
     global LAST_STATE
     if cstate == state.REUSE_LAST_STATE_MARKER:
+        assert LAST_STATE is not None
         cstate = LAST_STATE
     else:
         cstate = pickle.loads(cstate)
-    units, cstate = COMPILER.compile_in_tx(cstate, *args, **kwargs)
+        if dbname is None:
+            assert user_schema is not None
+            cstate.set_root_user_schema(pickle.loads(user_schema))
+        else:
+            cstate.set_root_user_schema(DBS[dbname].user_schema)
+    units, cstate = COMPILER.compile_serialized_request_in_tx(
+        cstate, *args, **kwargs)
     LAST_STATE = cstate
     return units, pickle.dumps(cstate, -1)
 
@@ -216,13 +243,6 @@ def compile_notebook(
         *compile_args,
         **compile_kwargs
     )
-
-
-def try_compile_rollback(
-    *compile_args: Any,
-    **compile_kwargs: Any,
-):
-    return COMPILER.try_compile_rollback(*compile_args, **compile_kwargs)
 
 
 def compile_graphql(
@@ -258,27 +278,63 @@ def compile_graphql(
         edgeql.generate_source(gql_op.edgeql_ast, pretty=True),
     )
 
+    cfg_ser = COMPILER.state.compilation_config_serializer
+    request = compiler.CompilationRequest(
+        source=source,
+        protocol_version=defines.CURRENT_PROTOCOL,
+        schema_version=uuidgen.uuid4(),
+        compilation_config_serializer=cfg_ser,
+        output_format=compiler.OutputFormat.JSON,
+        input_format=compiler.InputFormat.JSON,
+        expect_one=True,
+        implicit_limit=0,
+        inline_typeids=False,
+        inline_typenames=False,
+        inline_objectids=False,
+        modaliases=None,
+        session_config=None,
+    )
+
     unit_group, _ = COMPILER.compile(
         user_schema=db.user_schema,
         global_schema=GLOBAL_SCHEMA,
         reflection_cache=db.reflection_cache,
         database_config=db.database_config,
         system_config=INSTANCE_CONFIG,
-        source=source,
-        sess_modaliases=None,
-        sess_config=None,
-        output_format=compiler.OutputFormat.JSON,
-        expect_one=True,
-        implicit_limit=0,
-        inline_typeids=False,
-        inline_typenames=False,
-        inline_objectids=False,
-        json_parameters=True,
-        skip_first=False,
-        protocol_version=defines.CURRENT_PROTOCOL,
+        request=request,
     )
 
-    return unit_group, gql_op
+    return unit_group, gql_op  # type: ignore[return-value]
+
+
+def compile_sql(
+    dbname: str,
+    user_schema: Optional[bytes],
+    reflection_cache: Optional[bytes],
+    global_schema: Optional[bytes],
+    database_config: Optional[bytes],
+    system_config: Optional[bytes],
+    *compile_args: Any,
+    **compile_kwargs: Any,
+):
+    db = __sync__(
+        dbname,
+        user_schema,
+        reflection_cache,
+        global_schema,
+        database_config,
+        system_config,
+    )
+
+    return COMPILER.compile_sql(
+        db.user_schema,
+        GLOBAL_SCHEMA,
+        db.reflection_cache,
+        db.database_config,
+        INSTANCE_CONFIG,
+        *compile_args,
+        **compile_kwargs
+    )
 
 
 def get_handler(methname):
@@ -297,8 +353,8 @@ def get_handler(methname):
             meth = compile_notebook
         elif methname == "compile_graphql":
             meth = compile_graphql
-        elif methname == "try_compile_rollback":
-            meth = try_compile_rollback
+        elif methname == "compile_sql":
+            meth = compile_sql
         else:
             meth = getattr(COMPILER, methname)
     return meth

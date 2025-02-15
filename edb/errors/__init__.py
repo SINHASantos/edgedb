@@ -39,6 +39,7 @@ __all__ = base.__all__ + (  # type: ignore
     'UnknownUserError',
     'UnknownDatabaseError',
     'UnknownParameterError',
+    'DeprecatedScopingError',
     'SchemaError',
     'SchemaDefinitionError',
     'InvalidDefinitionError',
@@ -74,6 +75,7 @@ __all__ = base.__all__ + (  # type: ignore
     'DivisionByZeroError',
     'NumericOutOfRangeError',
     'AccessPolicyError',
+    'QueryAssertionError',
     'IntegrityError',
     'ConstraintViolationError',
     'CardinalityViolationError',
@@ -82,11 +84,15 @@ __all__ = base.__all__ + (  # type: ignore
     'TransactionConflictError',
     'TransactionSerializationError',
     'TransactionDeadlockError',
+    'WatchError',
     'ConfigurationError',
     'AccessError',
     'AuthenticationError',
     'AvailabilityError',
     'BackendUnavailableError',
+    'ServerOfflineError',
+    'UnknownTenantError',
+    'ServerBlockedError',
     'BackendError',
     'UnsupportedBackendFeatureError',
     'LogMessage',
@@ -212,6 +218,10 @@ class UnknownDatabaseError(InvalidReferenceError):
 
 class UnknownParameterError(InvalidReferenceError):
     _code = 0x_04_03_00_06
+
+
+class DeprecatedScopingError(InvalidReferenceError):
+    _code = 0x_04_03_00_07
 
 
 class SchemaError(QueryError):
@@ -354,6 +364,10 @@ class AccessPolicyError(InvalidValueError):
     _code = 0x_05_01_00_03
 
 
+class QueryAssertionError(InvalidValueError):
+    _code = 0x_05_01_00_04
+
+
 class IntegrityError(ExecutionError):
     _code = 0x_05_02_00_00
 
@@ -386,6 +400,10 @@ class TransactionDeadlockError(TransactionConflictError):
     _code = 0x_05_03_01_02
 
 
+class WatchError(ExecutionError):
+    _code = 0x_05_04_00_00
+
+
 class ConfigurationError(EdgeDBError):
     _code = 0x_06_00_00_00
 
@@ -404,6 +422,18 @@ class AvailabilityError(EdgeDBError):
 
 class BackendUnavailableError(AvailabilityError):
     _code = 0x_08_00_00_01
+
+
+class ServerOfflineError(AvailabilityError):
+    _code = 0x_08_00_00_02
+
+
+class UnknownTenantError(AvailabilityError):
+    _code = 0x_08_00_00_03
+
+
+class ServerBlockedError(AvailabilityError):
+    _code = 0x_08_00_00_04
 
 
 class BackendError(EdgeDBError):

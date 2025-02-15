@@ -71,14 +71,14 @@ Forget foreign keys; tabular data modeling is a relic of an older age, and it
 with modern languages. Instead, EdgeDB thinks about schema the same way you do:
 as **object types** containing **properties** connected by **links**.
 
-```
+```esdl
 type Person {
-  required property name -> str;
+  required name: str;
 }
 
 type Movie {
-  required property title -> str;
-  multi link actors -> Person;
+  required title: str;
+  multi actors: Person;
 }
 ```
 
@@ -101,7 +101,7 @@ EdgeDB's super-powered query language EdgeQL is designed as a ground-up
 redesign of SQL. EdgeQL queries produce rich, structured objects, not flat
 lists of rows. Deeply fetching related objects is painless...bye, bye, JOINs.
 
-```
+```esdl
 select Movie {
   title,
   actors: {
@@ -115,7 +115,7 @@ EdgeQL queries are also _composable_; you can use one EdgeQL query as an
 expression inside another. This property makes things like _subqueries_ and
 _nested mutations_ a breeze.
 
-```
+```esdl
 insert Movie {
   title := "The Matrix Resurrections",
   actors := (
@@ -176,6 +176,8 @@ To start learning about EdgeDB, check out the following resources:
 - **[The quickstart](https://www.edgedb.com/docs/guides/quickstart)**. If
   you're just starting out, the 10-minute quickstart guide is the fastest way
   to get up and running.
+- **[EdgeDB Cloud 🌤️](https://www.edgedb.com/cloud)**. The best
+  most effortless way to host your EdgeDB database in the cloud.
 - **[The interactive tutorial](https://www.edgedb.com/tutorial)**. For a
   structured deep-dive into the EdgeQL query language, try the web-based
   tutorial— no need to install anything.

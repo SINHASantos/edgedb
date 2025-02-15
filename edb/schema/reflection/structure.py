@@ -18,7 +18,7 @@
 
 
 from __future__ import annotations
-from typing import *
+from typing import Any, Optional, Tuple, Type, Sequence, Dict, List, NamedTuple
 
 import collections
 import uuid
@@ -49,6 +49,8 @@ class FieldType(enum.StrEnum):
     EXPR = 'EXPR'
     #: An ExpressionList field.
     EXPR_LIST = 'EXPR_LIST'
+    #: An ExpressionDict field.
+    EXPR_DICT = 'EXPR_DICT'
     #: An ObjectDict field.
     OBJ_DICT = 'OBJ_DICT'
     #: All other field types.
@@ -163,6 +165,16 @@ def _classify_object_field(field: s_obj.Field[Any]) -> FieldStorage:
         ptr_type = 'array<str>'
         fieldtype = FieldType.EXPR_LIST
 
+    elif issubclass(ftype, s_expr.ExpressionDict):
+        shadow_ptr_kind = 'property'
+        shadow_ptr_type = '''array<tuple<
+            name: str,
+            expr: tuple<text: str, refs: array<uuid>>
+        >>'''
+        ptr_kind = 'property'
+        ptr_type = 'array<tuple<name: str, expr: str>>'
+        fieldtype = FieldType.EXPR_DICT
+
     elif issubclass(ftype, collections.abc.Mapping):
         ptr_kind = 'property'
         ptr_type = 'json'
@@ -271,6 +283,7 @@ def generate_structure(
                 typeid: std::uuid,
                 kind: std::str,
                 elemid: OPTIONAL std::uuid,
+                sql_type: OPTIONAL std::str,
             ) -> std::int64 {
                 USING SQL FUNCTION 'edgedb.get_pg_type_for_edgedb_type';
                 SET volatility := 'STABLE';
@@ -295,6 +308,26 @@ def generate_structure(
                 $$;
                 SET volatility := 'IMMUTABLE';
             };
+
+            # A strictly-internal get config function that bypasses
+            # the redaction of secrets in the public-facing one.
+            CREATE FUNCTION
+            cfg::_get_config_json_internal(
+                NAMED ONLY sources: OPTIONAL array<std::str> = {},
+                NAMED ONLY max_source: OPTIONAL std::str = {}
+            ) -> std::json
+            {
+                USING SQL $$
+                SELECT
+                    coalesce(jsonb_object_agg(cfg.name, cfg), '{}'::jsonb)
+                FROM
+                    edgedb_VER._read_sys_config(
+                        sources::edgedb._sys_config_source_t[],
+                        max_source::edgedb._sys_config_source_t
+                    ) AS cfg
+                $$;
+            };
+
             ''',
             schema=schema,
             delta=delta,
@@ -340,6 +373,7 @@ def generate_structure(
                     py_cls is s_obj.InternalObject
                     or not issubclass(py_cls, s_obj.InternalObject)
                 )
+                and py_cls._abstract is not False
             )
 
             schema = _run_ddl(
@@ -491,7 +525,7 @@ def generate_structure(
                     read_ptr = f'{read_ptr}[IS {rschema_name}]'
 
                 if field.reflection_proxy:
-                    proxy_type, proxy_link = field.reflection_proxy
+                    _proxy_type, proxy_link = field.reflection_proxy
                     read_ptr = (
                         f'{read_ptr}: {{name, value := .{proxy_link}.id}}'
                     )

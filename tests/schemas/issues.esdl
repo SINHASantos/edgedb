@@ -19,28 +19,28 @@
 
 abstract type Text {
     # This is an abstract object containing text.
-    required property body -> str {
+    required body: str {
         # Maximum length of text is 10000 characters.
         constraint max_len_value(10000);
     }
 }
 
 abstract type Named {
-    required property name -> str;
+    required name: str;
 }
 
 # Dictionary is a NamedObject variant, that enforces
 # name uniqueness across all instances if its subclass.
 abstract type Dictionary extending Named {
-    overloaded required property name -> str {
+    overloaded required name: str {
         delegated constraint exclusive;
     }
-    index on (__subject__.name);
+    index on (.name);
 }
 
 type User extending Dictionary {
-    multi link todo -> Issue {
-        property rank -> int64 {
+    multi todo: Issue {
+        rank: int64 {
             default := 42;
         }
     }
@@ -48,8 +48,8 @@ type User extending Dictionary {
 
 abstract type Owned {
     # By default links are optional.
-    required link owner -> User {
-        property note -> str;
+    required owner: User {
+        note: str;
     }
 }
 
@@ -61,49 +61,54 @@ type LogEntry extending Owned, Text {
     # LogEntry is an Owned and a Text, so it
     # will have all of their links and attributes,
     # in particular, owner and text links.
-    required property spent_time -> int64;
+    required spent_time: int64;
 }
 
 scalar type issue_num_t extending std::str;
 
 type Comment extending Text, Owned {
-    required link issue -> Issue;
-    optional link parent -> Comment;
+    required issue: Issue;
+    optional parent: Comment;
 }
 
 type Issue extending Named, Owned, Text {
     overloaded required link owner {
-        property since -> datetime;
+        property since: datetime;
     }
 
-    required property number -> issue_num_t {
+    required number: issue_num_t {
         readonly := true;
         constraint exclusive;
     }
-    required link status -> Status;
+    required status: Status;
 
-    link priority -> Priority;
+    priority: Priority;
 
-    optional multi link watchers -> User;
+    optional multi watchers: User;
 
-    optional property time_estimate -> int64;
+    optional time_estimate: int64;
 
-    multi link time_spent_log -> LogEntry;
+    multi time_spent_log: LogEntry;
 
-    property start_date -> datetime {
+    start_date: datetime {
         default := (SELECT datetime_current());
         # The default value of start_date will be a
         # result of the EdgeQL expression above.
     }
-    property due_date -> datetime;
+    due_date: datetime;
 
-    multi link related_to -> Issue;
+    multi related_to: Issue;
 
-    multi link references -> File | URL | Publication {
-        property list_order -> int64;
+    multi references: File | URL | Publication {
+        list_order: int64;
     };
 
-    property tags -> array<str>;
+    tags: array<str>;
+
+    index fts::index on ((
+        fts::with_options(.name, language := fts::Language.eng),
+        fts::with_options(.body, language := fts::Language.eng),
+    ));
 }
 
 # This is used to test correct behavior of boolean operators: NOT,
@@ -111,28 +116,28 @@ type Issue extending Named, Owned, Text {
 #
 # Issue can be used to test similar interaction for links.
 type BooleanTest extending Named {
-    property val -> int64;
-    multi property tags -> str;
+    val: int64;
+    multi tags: str;
 }
 
 type File extending Named;
 
 type URL extending Named {
-    required property address -> str;
+    required address: str;
 }
 
 type Publication {
-    required property title -> str;
+    required title: str;
 
-    property title1 := (SELECT ident(.title));
-    required property title2 := (SELECT ident(.title));
-    required single property title3 := (SELECT ident(.title));
-    optional single property title4 := (SELECT ident(.title));
-    optional multi property title5 := (SELECT ident(.title));
-    required multi property title6 := (SELECT ident(.title));
+    title1 := (SELECT ident(.title));
+    required title2 := (SELECT ident(.title));
+    required single title3 := (SELECT ident(.title));
+    optional single title4 := (SELECT ident(.title));
+    optional multi title5 := (SELECT ident(.title));
+    required multi title6 := (SELECT ident(.title));
 
-    multi link authors -> User {
-        property list_order -> int64;
+    multi authors: User {
+        list_order: int64;
     };
 }
 
@@ -156,3 +161,7 @@ function opt_test(tag: bool, x: optional int64) -> int64 using (x ?? -1);
 
 function opt_test(tag: int64, x: int64, y: optional int64) -> int64 using (y ?? -1);
 function opt_test(tag: bool, x: optional int64, y: optional int64) -> int64 using (y ?? -1);
+
+function all_objects() -> SET OF BaseObject {
+    USING (BaseObject)
+}

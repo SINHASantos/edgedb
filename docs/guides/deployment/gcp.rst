@@ -68,7 +68,7 @@ Then create a Cloud SQL instance and set the password.
 .. code-block:: bash
 
    $ gcloud sql instances create ${PROJECT}-postgres \
-       --database-version=POSTGRES_13 \
+       --database-version=POSTGRES_14 \
        --cpu=1 \
        --memory=3840MiB \
        --region=us-west2 \
@@ -229,7 +229,7 @@ To test it, try opening a REPL:
 .. code-block:: bash
 
     $ edgedb --dsn $EDGEDB_DSN --tls-security insecure
-    EdgeDB 2.x (repl 2.x)
+    EdgeDB 3.x (repl 3.x)
     Type \help for help, \quit to quit.
     edgedb> select "hello world!";
 
@@ -238,6 +238,11 @@ In development
 
 To make this instance easier to work with during local development, create an
 alias using ``edgedb instance link``.
+
+.. note::
+
+   The command groups ``edgedb instance`` and ``edgedb project`` are not
+   intended to manage production instances.
 
 .. code-block:: bash
 
@@ -270,3 +275,9 @@ variable wherever you deploy your application server; EdgeDB's client
 libraries read the value of this variable to know how to connect to your
 instance.
 
+Health Checks
+=============
+
+Using an HTTP client, you can perform health checks to monitor the status of
+your EdgeDB instance. Learn how to use them with our :ref:`health checks guide
+<ref_guide_deployment_health_checks>`.

@@ -20,15 +20,33 @@
 
 
 from __future__ import annotations
-from typing import *
+from typing import (
+    Any,
+    Optional,
+    Tuple,
+    Type,
+    TypeVar,
+    AbstractSet,
+    Mapping,
+    Sequence,
+    Dict,
+    List,
+    Iterable,
+    Set,
+    cast,
+    TYPE_CHECKING,
+)
+
 if TYPE_CHECKING:
     from typing_extensions import TypeGuard
 
 import json
+import uuid
 
 from edb import errors
 
 from edb.common import ast
+from edb.common import ordered
 
 from edb.edgeql import qltypes as ft
 
@@ -45,11 +63,15 @@ def get_longest_paths(ir: irast.Base) -> Set[irast.Set]:
     result = set()
     parents = set()
 
-    ir_sets = ast.find_children(ir, irast.Set, lambda n: n.expr is None)
+    ir_sets = ast.find_children(
+        ir,
+        irast.Set,
+        lambda n: sub_expr(n) is None or isinstance(n.expr, irast.TypeRoot),
+    )
     for ir_set in ir_sets:
         result.add(ir_set)
-        if ir_set.rptr:
-            parents.add(ir_set.rptr.source)
+        if isinstance(ir_set.expr, irast.Pointer):
+            parents.add(ir_set.expr.source)
 
     return result - parents
 
@@ -61,10 +83,9 @@ def get_parameters(ir: irast.Base) -> Set[irast.Parameter]:
 
 def is_const(ir: irast.Base) -> bool:
     """Return True if the given *ir* expression is constant."""
-    flt = lambda n: n.expr is None and n is not ir
-    ir_sets = ast.find_children(ir, irast.Set, flt)
+    roots = ast.find_children(ir, irast.TypeRoot)
     variables = get_parameters(ir)
-    return not ir_sets and not variables
+    return not roots and not variables
 
 
 def is_union_expr(ir: irast.Base) -> bool:
@@ -76,7 +97,7 @@ def is_union_expr(ir: irast.Base) -> bool:
     )
 
 
-def is_empty_array_expr(ir: irast.Base) -> bool:
+def is_empty_array_expr(ir: Optional[irast.Base]) -> TypeGuard[irast.Array]:
     """Return True if the given *ir* expression is an empty array expression.
     """
     return (
@@ -85,27 +106,28 @@ def is_empty_array_expr(ir: irast.Base) -> bool:
     )
 
 
-def is_untyped_empty_array_expr(ir: irast.Base) -> bool:
+def is_untyped_empty_array_expr(
+    ir: Optional[irast.Base],
+) -> TypeGuard[irast.Array]:
     """Return True if the given *ir* expression is an empty
        array expression of an uknown type.
     """
     return (
         is_empty_array_expr(ir)
-        and (ir.typeref is None                    # type: ignore
-             or typeutils.is_generic(ir.typeref))  # type: ignore
+        and (ir.typeref is None
+             or typeutils.is_generic(ir.typeref))
     )
 
 
 def is_empty(ir: irast.Base) -> bool:
     """Return True if the given *ir* expression is an empty set
-       or an empty array.
+    or an empty array.
     """
     return (
         isinstance(ir, irast.EmptySet) or
         (isinstance(ir, irast.Array) and not ir.elements) or
         (
             isinstance(ir, irast.Set)
-            and ir.expr is not None
             and is_empty(ir.expr)
         )
     )
@@ -114,24 +136,20 @@ def is_empty(ir: irast.Base) -> bool:
 def is_subquery_set(ir_expr: irast.Base) -> bool:
     """Return True if the given *ir_expr* expression is a subquery."""
     return (
-        isinstance(ir_expr, irast.Set) and
-        isinstance(ir_expr.expr, irast.Stmt)
+        isinstance(ir_expr, irast.Set)
+        and (
+            isinstance(ir_expr.expr, irast.Stmt)
+            or (
+                isinstance(ir_expr.expr, irast.Pointer)
+                and ir_expr.expr.expr is not None
+            )
+        )
     )
 
 
-def is_scalar_view_set(ir_expr: irast.Base) -> bool:
-    """Return True if the given *ir_expr* expression is a view
-       of scalar type.
-    """
-    return (
-        isinstance(ir_expr, irast.Set) and
-        len(ir_expr.path_id) == 1 and
-        ir_expr.path_id.is_scalar_path() and
-        ir_expr.path_id.is_view_path()
-    )
-
-
-def is_implicit_wrapper(ir_expr: irast.Base) -> bool:
+def is_implicit_wrapper(
+    ir_expr: Optional[irast.Base],
+) -> TypeGuard[irast.SelectStmt]:
     """Return True if the given *ir_expr* expression is an implicit
        SELECT wrapper.
     """
@@ -154,36 +172,37 @@ def is_trivial_select(ir_expr: irast.Base) -> TypeGuard[irast.SelectStmt]:
         and ir_expr.where is None
         and ir_expr.limit is None
         and ir_expr.offset is None
+        and ir_expr.card_inference_override is None
     )
 
 
 def unwrap_set(ir_set: irast.Set) -> irast.Set:
-    """If the give *ir_set* is an implicit SELECT wrapper, return the
+    """If the given *ir_set* is an implicit SELECT wrapper, return the
        wrapped set.
     """
-    if ir_set.expr is not None and is_implicit_wrapper(ir_set.expr):
-        return ir_set.expr.result  # type: ignore
+    if is_implicit_wrapper(ir_set.expr):
+        return ir_set.expr.result
     else:
         return ir_set
 
 
 def get_path_root(ir_set: irast.Set) -> irast.Set:
     result = ir_set
-    while result.rptr is not None:
-        result = result.rptr.source
+    while isinstance(result.expr, irast.Pointer):
+        result = result.expr.source
     return result
 
 
-def get_source_context_as_json(
+def get_span_as_json(
     expr: irast.Base,
     exctype: Type[errors.EdgeDBError] = errors.InternalServerError,
 ) -> str:
-    if expr.context:
+    if expr.span:
         details = json.dumps({
             # TODO(tailhook) should we add offset, utf16column here?
-            'line': expr.context.start_point.line,
-            'column': expr.context.start_point.column,
-            'name': expr.context.name,
+            'line': expr.span.start_point.line,
+            'column': expr.span.start_point.column,
+            'name': expr.span.name,
             'code': exctype.get_code(),
         })
 
@@ -201,10 +220,9 @@ def is_type_intersection_reference(ir_expr: irast.Base) -> bool:
     """
     if not isinstance(ir_expr, irast.Set):
         return False
-
-    rptr = ir_expr.rptr
-    if rptr is None:
+    if not isinstance(ir_expr.expr, irast.Pointer):
         return False
+    rptr = ir_expr.expr
 
     ir_source = rptr.source
 
@@ -218,7 +236,10 @@ def is_type_intersection_reference(ir_expr: irast.Base) -> bool:
 
 def is_trivial_free_object(ir: irast.Set) -> bool:
     ir = unwrap_set(ir)
-    return not ir.expr and typeutils.is_exactly_free_object(ir.typeref)
+    return (
+        isinstance(ir.expr, irast.TypeRoot)
+        and typeutils.is_exactly_free_object(ir.typeref)
+    )
 
 
 def collapse_type_intersection(
@@ -229,7 +250,7 @@ def collapse_type_intersection(
 
     source = ir_set
     while True:
-        rptr = source.rptr
+        rptr = source.expr
         if not isinstance(rptr, irast.TypeIntersectionPointer):
             break
         result.append(rptr)
@@ -238,29 +259,42 @@ def collapse_type_intersection(
     return source, result
 
 
-def get_nearest_dml_stmt(ir_set: irast.Set) -> Optional[irast.MutatingStmt]:
-    """For a given *ir_set* representing a Path, return the nearest path
-       step that is a DML expression.
-    """
-    cur_set: Optional[irast.Set] = ir_set
-    while cur_set is not None:
-        if isinstance(cur_set.expr, irast.MutatingStmt):
-            return cur_set.expr
-        elif isinstance(cur_set.expr, irast.SelectStmt):
-            cur_set = cur_set.expr.result
-        # FIXME: This is a very narrow hack around issue #3030 designed
-        # to make the most common case work: assert_exists inserted by
-        # access policies.
-        elif (
-            isinstance(cur_set.expr, irast.FunctionCall)
-            and str(cur_set.expr.func_shortname) == 'std::assert_exists'
-        ):
-            cur_set = cur_set.expr.args[1].expr
-        elif cur_set.rptr is not None:
-            cur_set = cur_set.rptr.source
+class CollectDMLSourceVisitor(ast.NodeVisitor):
+    skip_hidden = True
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.dml: list[irast.MutatingLikeStmt] = []
+
+    def visit_MutatingLikeStmt(self, stmt: irast.MutatingLikeStmt) -> None:
+        # Only INSERTs and UPDATEs produce meaningful overlays.
+        if not isinstance(stmt, irast.DeleteStmt):
+            self.dml.append(stmt)
+
+    def visit_Set(self, node: irast.Set) -> None:
+        # Visit sub-trees
+        if node.expr:
+            self.visit(node.expr)
+
+    def visit_Pointer(self, node: irast.Pointer) -> None:
+        if node.expr:
+            self.visit(node.expr)
         else:
-            cur_set = None
-    return None
+            self.visit(node.source)
+
+
+def get_dml_sources(ir_set: irast.Set) -> Sequence[irast.MutatingLikeStmt]:
+    """Find the DML expressions that can contribute to the value of a set
+
+    This is used to compute which overlays to use during SQL compilation.
+    """
+    # TODO: Make this caching.
+    visitor = CollectDMLSourceVisitor()
+    visitor.visit(ir_set)
+    # Deduplicate, but preserve order. It shouldn't matter for
+    # *correctness* but it helps keep the nondeterminism in the output
+    # SQL down.
+    return tuple(ordered.OrderedSet(visitor.dml))
 
 
 class ContainsDMLVisitor(ast.NodeVisitor):
@@ -270,10 +304,11 @@ class ContainsDMLVisitor(ast.NodeVisitor):
         super().__init__()
         self.skip_bindings = skip_bindings
 
-    def combine_field_results(self, xs: List[Optional[bool]]) -> bool:
+    def combine_field_results(self, xs: Iterable[Optional[bool]]) -> bool:
         return any(
             x is True
-            or (isinstance(x, list) and self.combine_field_results(x))
+            or (isinstance(x, (list, tuple)) and self.combine_field_results(x))
+            or (isinstance(x, dict) and self.combine_field_results(x.values()))
             for x in xs
         )
 
@@ -288,10 +323,17 @@ class ContainsDMLVisitor(ast.NodeVisitor):
         return bool(self.generic_visit(node))
 
 
-def contains_dml(stmt: irast.Base, *, skip_bindings: bool=False) -> bool:
+def contains_dml(
+    stmt: irast.Base,
+    *,
+    skip_bindings: bool = False,
+    skip_nodes: Iterable[irast.Base] = (),
+) -> bool:
     """Check whether a statement contains any DML in a subtree."""
     # TODO: Make this caching.
     visitor = ContainsDMLVisitor(skip_bindings=skip_bindings)
+    for node in skip_nodes:
+        visitor._memo[node] = False
     res = visitor.visit(stmt) is True
     return res
 
@@ -305,7 +347,8 @@ class FindPathScopes(ast.NodeVisitor):
     This is set up so that another visitor could inherit from it,
     override process_set, and also collect the scope tree info.
     """
-    def __init__(self, init_scope: Optional[int]=None) -> None:
+
+    def __init__(self, init_scope: Optional[int] = None) -> None:
         super().__init__()
         self.path_scope_ids: List[Optional[int]] = [init_scope]
         self.use_scopes: Dict[irast.Set, Optional[int]] = {}
@@ -350,7 +393,9 @@ class FindPathScopes(ast.NodeVisitor):
         return None
 
 
-def find_path_scopes(stmt: irast.Base) -> Dict[irast.Set, Optional[int]]:
+def find_path_scopes(
+    stmt: irast.Base | Sequence[irast.Base],
+) -> Dict[irast.Set, Optional[int]]:
     visitor = FindPathScopes()
     visitor.visit(stmt)
     return visitor.scopes
@@ -374,12 +419,18 @@ class FindPotentiallyVisibleVisitor(FindPathScopes):
     def combine_field_results(self, xs: Any) -> Set[irast.Set]:
         out = set()
         for x in xs:
-            if isinstance(x, list):
+            if isinstance(x, (list, tuple)):
                 x = self.combine_field_results(x)
+            if isinstance(x, dict):
+                x = self.combine_field_results(x.values())
             if x:
                 if isinstance(x, set):
                     out.update(x)
         return out
+
+    def visit_Pointer(self, node: irast.Pointer) -> Set[irast.Set]:
+        res: Set[irast.Set] = self.visit(node.source)
+        return res
 
     def process_set(self, node: irast.Set) -> Set[irast.Set]:
         if node.path_id in self.to_skip:
@@ -397,16 +448,18 @@ class FindPotentiallyVisibleVisitor(FindPathScopes):
                 return set()
 
         results = [{node}]
-        results.append(self.visit(node.rptr))
-        results.append(self.visit(node.shape))
-        if not node.rptr:
+        if isinstance(node.expr, irast.Pointer):
+            results.append(self.visit(node.expr))
+            results.append(self.visit(node.shape))
+        else:
+            results.append(self.visit(node.shape))
             results.append(self.visit(node.expr))
 
         # Bound variables are always potentially visible as are object
-        # references (which have no expr or rptr).
+        # references.
         if (
             node.is_binding
-            or (not node.expr and not node.rptr)
+            or isinstance(node.expr, irast.TypeRoot)
         ):
             results.append({node})
 
@@ -447,7 +500,98 @@ def find_potentially_visible(
     return visible_paths
 
 
-def contains_set_of_op(ir: irast.Base) -> bool:
-    flt = (lambda n: any(x == ft.TypeModifier.SetOfType
-                         for x in n.params_typemods))
-    return bool(ast.find_children(ir, irast.Call, flt, terminate_early=True))
+def is_singleton_set_of_call(
+    call: irast.Call
+) -> bool:
+    # Some set functions and operators are allowed in singleton mode
+    # as long as their inputs are singletons
+
+    return bool(call.is_singleton_set_of)
+
+
+def has_set_of_param(
+    call: irast.Call,
+) -> bool:
+    return any(
+        arg.param_typemod == ft.TypeModifier.SetOfType
+        for arg in call.args.values()
+    )
+
+
+def returns_set_of(
+    call: irast.Call,
+) -> bool:
+    return call.typemod == ft.TypeModifier.SetOfType
+
+
+def find_set_of_op(
+    ir: irast.Base,
+    has_multi_param: bool,
+) -> Optional[irast.Call]:
+    def flt(n: irast.Call) -> bool:
+        return (
+            (has_multi_param or not is_singleton_set_of_call(n))
+            and (has_set_of_param(n) or returns_set_of(n))
+        )
+    calls = ast.find_children(ir, irast.Call, flt, terminate_early=True)
+    return next(iter(calls or []), None)
+
+
+ExprT = TypeVar('ExprT', bound=irast.Expr)
+
+
+def is_set_instance(
+    ir: irast.Set,
+    typ: Type[ExprT],
+) -> TypeGuard[irast.SetE[ExprT]]:
+    return isinstance(ir.expr, typ)
+
+
+def ref_contains_multi(ref: irast.Set, singleton_id: uuid.UUID) -> bool:
+    while isinstance(ref.expr, irast.Pointer):
+        pointer: irast.Pointer = ref.expr
+        if pointer.dir_cardinality.is_multi():
+            return True
+
+        # We don't need to look further than the object that we know is a
+        # singleton.
+        if (
+            singleton_id
+            and isinstance(pointer.ptrref, irast.PointerRef)
+            and pointer.ptrref.id == singleton_id
+        ):
+            break
+        ref = pointer.source
+    return False
+
+
+def sub_expr(ir: irast.Set) -> Optional[irast.Expr]:
+    """Fetch the "sub-expression" of a set.
+
+    For a non-pointer Set, it's just the expr, but for a Pointer
+    it is the optional computed expression.
+    """
+    if isinstance(ir.expr, irast.Pointer):
+        return ir.expr.expr
+    else:
+        return ir.expr
+
+
+class CollectSchemaTypesVisitor(ast.NodeVisitor):
+    types: Set[uuid.UUID]
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.types = set()
+
+    def visit_Set(self, node: irast.Set) -> None:
+        self.types.add(node.typeref.id)
+        self.generic_visit(node)
+
+
+def collect_schema_types(stmt: irast.Base) -> Set[uuid.UUID]:
+    """Collect ids of all types referenced in the statement."""
+
+    visitor = CollectSchemaTypesVisitor()
+    visitor.visit(stmt)
+    return visitor.types

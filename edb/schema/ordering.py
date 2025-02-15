@@ -18,7 +18,18 @@
 
 
 from __future__ import annotations
-from typing import *
+from typing import (
+    Any,
+    Optional,
+    Tuple,
+    Type,
+    Sequence,
+    Dict,
+    List,
+    Set,
+    NamedTuple,
+    TYPE_CHECKING,
+)
 
 import collections
 
@@ -29,9 +40,11 @@ from edb.common import topological
 from . import delta as sd
 from . import expraliases as s_expraliases
 from . import functions as s_func
+from . import indexes as s_indexes
 from . import inheriting
 from . import name as sn
 from . import objects as so
+from . import objtypes as s_objtypes
 from . import pointers as s_pointers
 from . import constraints as s_constraints
 from . import referencing
@@ -110,7 +123,18 @@ def linearize_delta(
         item.deps &= everything
         item.weak_deps &= everything
 
-    sortedlist = [i[1] for i in topological.sort_ex(depgraph)]
+    try:
+        sortedlist = [i[1] for i in topological.sort_ex(depgraph)]
+    except topological.CycleError as ex:
+        cycle = [depgraph[k].item for k in (ex.item,) + ex.path + (ex.item,)]
+        messages = [
+            '  ' + nodes[-1].get_friendly_description(parent_op=nodes[-2])
+            for nodes in cycle
+        ]
+        raise errors.SchemaDefinitionError(
+            'cannot produce migration because of a dependency cycle:\n'
+            + ' depends on\n'.join(messages)
+        ) from None
     reconstructed = reconstruct_tree(sortedlist, depgraph)
     delta.replace_all(reconstructed.get_subcommands())
     return delta
@@ -189,9 +213,9 @@ def reconstruct_tree(
             parent_offset = offsets[new_parent] + (offset_within_parent,)
         else:
             parent_offset = (offset_within_parent,)
-        new_parent.add(parent)
         old_parent = parents[parent]
         old_parent.discard(parent)
+        new_parent.add_caused(parent)
         parents[parent] = new_parent
 
         for i in range(slice_start, len(opbranch)):
@@ -224,7 +248,7 @@ def reconstruct_tree(
             isinstance(op, sd.DeleteObject)
             or (
                 isinstance(op, sd.AlterObject)
-                and op.get_nonattr_special_subcommand_count() == 0
+                and op.get_nonattr_subcommand_count() == 0
             )
         ):
             return False
@@ -248,6 +272,7 @@ def reconstruct_tree(
                 isinstance(parents[op], sd.DeltaRoot)
                 != isinstance(parents[alter_op], sd.DeltaRoot)
             )
+            or bool(alter_op.get_subcommands(type=sd.RenameObject))
         ):
             return False
 
@@ -375,7 +400,7 @@ def reconstruct_tree(
 
             allowed_ops = []
             create_cmd_t = ancestor_op.get_other_command_class(sd.CreateObject)
-            if type(ancestor_op) != create_cmd_t:
+            if type(ancestor_op) is not create_cmd_t:
                 allowed_ops.append(create_cmd_t)
             allowed_ops.append(type(ancestor_op))
 
@@ -500,6 +525,7 @@ def _trace_op(
         op: sd.AlterObjectProperty,
         parent_op: sd.ObjectCommand[so.Object],
     ) -> str:
+        nvn = None
         if isinstance(op.new_value, (so.Object, so.ObjectShell)):
             obj = op.new_value
             nvn = obj.get_name(new_schema)
@@ -524,7 +550,6 @@ def _trace_op(
         if isinstance(op.old_value, (so.Object, so.ObjectShell)):
             assert old_schema is not None
             ovn = op.old_value.get_name(old_schema)
-            nvn = op.new_value.get_name(new_schema)
             if ovn != nvn:
                 ov_item = get_deps(('delete', str(ovn)))
                 ov_item.deps.add((tag, graph_key))
@@ -699,7 +724,7 @@ def _trace_op(
                 # new one is created)
                 if not isinstance(ref, s_expraliases.Alias):
                     deps.add(('alter', ref_name_str))
-                if type(ref) == type(obj):
+                if type(ref) is type(obj):
                     deps.add(('rebase', ref_name_str))
 
                 # The deletion of any implicit ancestors needs to come after
@@ -712,6 +737,21 @@ def _trace_op(
                         anc_item.deps.add(('delete', ref_name_str))
 
         if isinstance(obj, referencing.ReferencedObject):
+            if tag == 'delete':
+                # If the object is being deleted and then recreated
+                # via inheritance, that deletion needs to come before
+                # an ancestor gets created (since that will cause our
+                # recreation.)
+                try:
+                    new_obj = get_object(new_schema, op)
+                except errors.InvalidReferenceError:
+                    new_obj = None
+                if isinstance(new_obj, referencing.ReferencedInheritingObject):
+                    for ancestor in new_obj.get_implicit_ancestors(new_schema):
+                        rep_item = get_deps(
+                            ('create', str(ancestor.get_name(new_schema))))
+                        rep_item.deps.add((tag, str(op.classname)))
+
             referrer = obj.get_referrer(old_schema)
             if referrer is not None:
                 assert isinstance(referrer, so.QualifiedObject)
@@ -796,12 +836,12 @@ def _trace_op(
         for ref in refs:
             write_ref_deps(ref, obj, this_name_str)
 
-        if tag in ('create', 'alter'):
+        if tag == 'create':
             # In a delete/create cycle, deletion must obviously
             # happen first.
-            deps.add(('delete', str(op.classname)))
+            deps.add(('delete', this_name_str))
             # Renaming also
-            deps.add(('rename', str(op.classname)))
+            deps.add(('rename', this_name_str))
 
             if isinstance(obj, s_func.Function) and old_schema is not None:
                 old_funcs = old_schema.get_functions(
@@ -810,6 +850,26 @@ def _trace_op(
                 )
                 for old_func in old_funcs:
                     deps.add(('delete', str(old_func.get_name(old_schema))))
+
+            # Some index types only allow one per object type. Make
+            # sure we drop the old one before creating the new.
+            if (
+                isinstance(obj, s_indexes.Index)
+                and s_indexes.is_exclusive_object_scope_index(new_schema, obj)
+                and old_schema is not None
+                and (subject := obj.get_subject(new_schema))
+                and (old_subject := old_schema.get(
+                    subject.get_name(new_schema),
+                    type=s_objtypes.ObjectType,
+                    default=None
+                ))
+                and (eff_index := s_indexes.get_effective_object_index(
+                    old_schema,
+                    old_subject,
+                    obj.get_root(new_schema).get_name(new_schema),
+                )[0])
+            ):
+                deps.add(('delete', str(eff_index.get_name(old_schema))))
 
         if tag == 'alter':
             # Alteration must happen after creation, if any.

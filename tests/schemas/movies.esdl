@@ -16,36 +16,86 @@
 # limitations under the License.
 #
 
+global username_prefix: str;
 
 type Person {
-    required property first_name -> str;
-    property last_name -> str;
+    required first_name: str;
+    last_name: str;
+
+    full_name := __source__.first_name ++ ((' ' ++ .last_name) ?? '');
+    favorite_genre := (select Genre filter .name = 'Drama' limit 1);
+    username := (global username_prefix ?? 'u_') ++ str_lower(.first_name);
 }
 
 type Genre {
-    required property name -> str;
+    required name: str;
 }
 
+global filter_title: str;
+
 type Content {
-    required property title -> str;
-    link genre -> Genre;
+    required title: str;
+    genre: Genre;
+
+    access policy filter_title
+        allow select
+        using (global filter_title ?= .title);
+    access policy dml allow insert, update, delete;
 }
 
 type Movie extending Content {
-    property release_year -> int64;
-    multi link actors -> Person {
-        property role -> str;
+    release_year: int64;
+    multi actors: Person {
+        property role: str;
+        property role_lower := str_lower(@role);
     };
-    link director -> Person {
-        property bar -> str;
+    director: Person {
+        bar: str;
     };
+
+    multi actor_names := __source__.actors.first_name;
+    multi similar_to := (select Content);
 }
 
 type Book extending Content {
-    required property pages -> int16;
-    multi property chapters -> str;
+    required pages: int16;
+    multi chapters: str;
 }
 
 type novel extending Book {
-    property foo -> str;
+    foo: str;
+}
+
+module nested {
+    type Hello {
+        property hello -> str;
+    };
+
+    module deep {
+        type Rolling {
+            property rolling -> str;
+        };
+    };
+}
+
+type ContentSummary {
+    property x := std::count((select Content));
+
+    access policy select_always allow select;
+    access policy dml allow insert, update, delete
+        using (global filter_title ?= 'summary');
+}
+
+module links {
+    type A;
+
+    type B {
+        multi link a: A;
+        link prop: A {
+            property lp: str;
+        };
+        multi property vals: str;
+    }
+
+    type C extending B;
 }

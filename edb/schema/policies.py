@@ -18,11 +18,9 @@
 
 
 from __future__ import annotations
-from typing import *
+from typing import Any, Optional, Type, List, TYPE_CHECKING
 
 from edb import errors
-
-from edb.common import topological
 
 from edb.edgeql import ast as qlast
 from edb.edgeql import compiler as qlcompiler
@@ -32,7 +30,6 @@ from . import annos as s_anno
 from . import delta as sd
 from . import expr as s_expr
 from . import futures as s_futures
-from . import links as s_links
 from . import name as sn
 from . import objects as so
 from . import properties as s_props
@@ -46,7 +43,8 @@ if TYPE_CHECKING:
 
 
 class AccessPolicy(
-    referencing.ReferencedInheritingObject,
+    referencing.NamedReferencedInheritingObject,
+    so.InheritingObject,  # Help reflection figure out the right db MRO
     s_anno.AnnotationSubject,
     qlkind=qltypes.SchemaObjectClass.ACCESS_POLICY,
     data_safe=True,
@@ -90,24 +88,16 @@ class AccessPolicy(
         str, default=None, compcoef=0.971, allow_ddl_set=True
     )
 
-    @classmethod
-    def get_schema_class_displayname(cls) -> str:
-        return 'access policy'
-
-    @classmethod
-    def get_displayname_static(cls, name: sn.Name) -> str:
-        sn = cls.get_shortname_static(name)
-        if sn.module == '__':
-            return sn.name
-        else:
-            return str(sn)
-
-    def get_derived_name_base(
-        self,
-        schema: s_schema.Schema,
-    ) -> sn.QualName:
-        shortname = self.get_shortname(schema)
-        return sn.QualName(module='__', name=shortname.name)
+    # We don't support SET/DROP OWNED owned on policies so we set its
+    # compcoef to 0.0
+    owned = so.SchemaField(
+        bool,
+        default=False,
+        inheritable=False,
+        compcoef=0.0,
+        reflection_method=so.ReflectionMethod.AS_LINK,
+        special_ddl_syntax=True,
+    )
 
     def get_expr_refs(self, schema: s_schema.Schema) -> List[so.Object]:
         objs: List[so.Object] = []
@@ -122,7 +112,8 @@ class AccessPolicy(
         return subj
 
     def get_original_subject(
-            self, schema: s_schema.Schema) -> s_objtypes.ObjectType:
+        self, schema: s_schema.Schema
+    ) -> s_objtypes.ObjectType:
         ancs = (self,) + self.get_ancestors(schema).objects(schema)
         return ancs[-1].get_subject(schema)
 
@@ -140,7 +131,7 @@ class AccessPolicySourceCommandContext(
 
 
 class AccessPolicyCommand(
-    referencing.ReferencedInheritingObjectCommand[AccessPolicy],
+    referencing.NamedReferencedInheritingObjectCommand[AccessPolicy],
     s_anno.AnnotationSubjectCommand[AccessPolicy],
     context_class=AccessPolicyCommandContext,
     referrer_context_class=AccessPolicySourceCommandContext,
@@ -168,38 +159,38 @@ class AccessPolicyCommand(
                 value=expr,
             )
 
-            srcctx = self.get_attribute_source_context(field)
+            span = self.get_attribute_span(field)
 
             if expression.irast.cardinality.can_be_zero():
                 raise errors.SchemaDefinitionError(
                     f'possibly an empty set returned by {vname} '
                     f'expression for the {pol_name} ',
-                    context=srcctx
+                    span=span
                 )
 
             if expression.irast.cardinality.is_multi():
                 raise errors.SchemaDefinitionError(
                     f'possibly more than one element returned by {vname} '
                     f'expression for the {pol_name} ',
-                    context=srcctx
+                    span=span
                 )
 
             if expression.irast.volatility.is_volatile():
                 raise errors.SchemaDefinitionError(
                     f'{pol_name} has a volatile {vname} expression, '
                     f'which is not allowed',
-                    context=srcctx
+                    span=span
                 )
 
             target = schema.get(sn.QualName('std', 'bool'), type=s_types.Type)
             expr_type = expression.irast.stype
-            if not expr_type.issubclass(schema, target):
-                srcctx = self.get_attribute_source_context(field)
+            if not expr_type.issubclass(expression.irast.schema, target):
+                span = self.get_attribute_span(field)
                 raise errors.SchemaDefinitionError(
                     f'{vname} expression for {pol_name} is of invalid type: '
-                    f'{expr_type.get_displayname(schema)}, '
+                    f'{expr_type.get_displayname(expression.irast.schema)}, '
                     f'expected {target.get_displayname(schema)}',
-                    context=self.source_context,
+                    span=self.span,
                 )
 
         return schema
@@ -227,14 +218,15 @@ class AccessPolicyCommand(
                 options=qlcompiler.CompilerOptions(
                     modaliases=context.modaliases,
                     schema_object_context=self.get_schema_metaclass(),
-                    anchors={qlast.Subject().name: source},
-                    path_prefix_anchor=qlast.Subject().name,
+                    anchors={'__subject__': source},
+                    path_prefix_anchor='__subject__',
                     singletons=frozenset({source}),
                     apply_query_rewrites=not context.stdmode,
                     track_schema_ref_exprs=track_schema_ref_exprs,
                     in_ddl_context_name=in_ddl_context_name,
                     detached=True,
                 ),
+                context=context,
             )
         else:
             return super().compile_expr_field(
@@ -251,40 +243,6 @@ class AccessPolicyCommand(
             return s_expr.Expression(text='false')
         else:
             raise NotImplementedError(f'unhandled field {field.name!r}')
-
-    @classmethod
-    def _classname_from_ast(
-        cls,
-        schema: s_schema.Schema,
-        astnode: qlast.NamedDDL,
-        context: sd.CommandContext,
-    ) -> sn.QualName:
-        referrer_ctx = cls.get_referrer_context(context)
-        if referrer_ctx is not None:
-
-            referrer_name = context.get_referrer_name(referrer_ctx)
-
-            shortname = sn.QualName(module='__', name=astnode.name.name)
-
-            name = sn.QualName(
-                module=referrer_name.module,
-                name=sn.get_specialized_name(shortname, str(referrer_name)),
-            )
-        else:
-            name = super()._classname_from_ast(schema, astnode, context)
-
-        return name
-
-    def _deparse_name(
-        self,
-        schema: s_schema.Schema,
-        context: sd.CommandContext,
-        name: sn.Name,
-    ) -> qlast.ObjectRef:
-
-        ref = super()._deparse_name(schema, context, name)
-        ref.module = ''
-        return ref
 
     def validate_object(
         self,
@@ -306,9 +264,7 @@ class AccessPolicyCommand(
                     and obj.is_link_property(schema)
                     and obj.get_default(schema)
                     and any(
-                        # XXX: apparently we don't do this coercion
-                        # automatically!
-                        qltypes.AccessKind(kind).is_data_check()
+                        kind.is_data_check()
                         for kind in self.scls.get_access_kinds(schema)
                     )
                 ):
@@ -319,90 +275,8 @@ class AccessPolicyCommand(
                         f'insert and update write access policies may not '
                         f'refer to link properties with default values: '
                         f'{pol_name} refers to {obj_name}',
-                        context=self.source_context,
+                        span=self.span,
                     )
-
-        try:
-            if not s_futures.future_enabled(
-                schema, 'nonrecursive_access_policies'
-            ):
-                check_type_policy_ordering(subject, schema)
-        except topological.CycleError as e:
-            assert e.item is not None
-            assert e.path is not None
-
-            item_vn = e.item.get_verbosename(schema, with_parent=True)
-            # Recursion involving more than one schema object.
-            el = e.path[-1] if e.path else e.item
-            rec_vn = el.get_verbosename(schema, with_parent=True)
-            # Sort for output determinism
-            vn1, vn2 = sorted([rec_vn, item_vn])
-            msg = (
-                f'dependency cycle between access policies of {vn1} and {vn2}'
-            )
-            raise errors.InvalidDefinitionError(
-                msg,
-                hint=(
-                    "Consider 'using future nonrecursive_access_policies' in "
-                    "your schema to disable the evaluation of access policies "
-                    "inside of other access policies."
-                ),
-            ) from e
-
-
-def get_type_policy_deps(
-    stype: s_objtypes.ObjectType,
-    schema: s_schema.Schema,
-) -> Set[s_objtypes.ObjectType]:
-    from . import objtypes as s_objtypes
-
-    typs: Set[s_objtypes.ObjectType] = set()
-    for pol in stype.get_access_policies(schema).objects(schema):
-        objs = pol.get_expr_refs(schema)
-
-        ntyps = set()
-        for obj in objs:
-            if isinstance(obj, s_objtypes.ObjectType):
-                ntyps.add(obj)
-                ntyps.update(stype.get_union_of(schema).objects(schema))
-                ntyps.update(stype.get_intersection_of(schema).objects(schema))
-            elif isinstance(obj, s_links.Link):
-                if tgt := obj.get_target(schema):
-                    ntyps.add(tgt)
-
-        # The original subject of a rule and its children don't have
-        # their policies applied while evaluating a policy, so we
-        # don't depend on them.
-        orig_subj = pol.get_original_subject(schema)
-        ntyps.discard(orig_subj)
-        ntyps.difference_update(orig_subj.descendants(schema))
-
-        typs.update(ntyps)
-
-    typs.update({x for typ in typs for x in typ.descendants(schema)})
-
-    return typs
-
-
-def check_type_policy_ordering(
-    stype: s_objtypes.ObjectType,
-    schema: s_schema.Schema,
-) -> None:
-    graph = {}
-
-    # Trace out the graph of things we depend on
-    wl = [stype]
-    while wl:
-        obj = wl.pop()
-        deps = get_type_policy_deps(obj, schema)
-        graph[obj] = topological.DepGraphEntry(
-            item=obj,
-            deps=deps,
-            extra=False,
-        )
-        wl.extend([dep for dep in deps if dep not in graph])
-
-    topological.sort(graph)
 
 
 class CreateAccessPolicy(
@@ -443,7 +317,7 @@ class CreateAccessPolicy(
                     astnode.condition, schema, context.modaliases,
                     context.localnames,
                 ),
-                source_context=astnode.condition.context,
+                span=astnode.condition.span,
             )
 
         if astnode.expr:
@@ -453,7 +327,7 @@ class CreateAccessPolicy(
                     astnode.expr, schema, context.modaliases,
                     context.localnames,
                 ),
-                source_context=astnode.expr.context,
+                span=astnode.expr.span,
             )
 
         cmd.set_attribute_value('action', astnode.action)
@@ -513,7 +387,7 @@ class AlterAccessPolicy(
             raise errors.SchemaDefinitionError(
                 f'cannot alter the definition of inherited access policy '
                 f'{self.scls.get_displayname(schema)}',
-                context=self.source_context
+                span=self.span
             )
 
         return schema
@@ -560,14 +434,14 @@ class AlterAccessPolicyPerms(
             sd.AlterObjectProperty(
                 property='action',
                 new_value=astnode.action,
-                source_context=astnode.context,
+                span=astnode.span,
             )
         )
         cmd.add(
             sd.AlterObjectProperty(
                 property='access_kinds',
                 new_value=astnode.access_kinds,
-                source_context=astnode.context,
+                span=astnode.span,
             )
         )
         return cmd
@@ -587,30 +461,6 @@ def toggle_nonrecursive_access_policies(
     context: sd.CommandContext,
     on: bool,
 ) -> tuple[s_schema.Schema, sd.Command]:
-    # When nonrecursive_access_policies is turned on or off, we mark every
-    # policy as changed, to force all policy using functions to
-    # recompile.
-    all_pols = [
-        pol
-        for pol in schema.get_objects(type=AccessPolicy)
-        if (
-            sn.UnqualName(pol.get_name(schema).module)
-            not in s_schema.STD_MODULES
-        )
-    ]
-
+    # Nothing to do anymore
     group = sd.CommandGroup()
-
-    for pol in all_pols:
-        delta_alter, cmd_alter, _ = pol.init_delta_branch(
-            schema, context, cmdtype=sd.AlterObject)
-
-        schema = cmd_alter._propagate_if_expr_refs(
-            schema,
-            context,
-            action='change nonrecursive_access_policies',
-            metadata_only=False,
-        )
-        group.add(delta_alter)
-
     return schema, group

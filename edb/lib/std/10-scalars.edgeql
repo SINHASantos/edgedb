@@ -21,6 +21,8 @@ CREATE PSEUDO TYPE `anytype`;
 
 CREATE PSEUDO TYPE `anytuple`;
 
+CREATE PSEUDO TYPE `anyobject`;
+
 CREATE ABSTRACT SCALAR TYPE std::anyscalar;
 
 CREATE ABSTRACT SCALAR TYPE std::anypoint EXTENDING std::anyscalar;
@@ -39,9 +41,9 @@ CREATE SCALAR TYPE std::str EXTENDING std::anyscalar;
 
 CREATE SCALAR TYPE std::json EXTENDING std::anyscalar;
 
-CREATE SCALAR TYPE std::datetime EXTENDING std::anyscalar, std::anycontiguous;
+CREATE SCALAR TYPE std::datetime EXTENDING std::anycontiguous;
 
-CREATE SCALAR TYPE std::duration EXTENDING std::anyscalar, std::anycontiguous;
+CREATE SCALAR TYPE std::duration EXTENDING std::anycontiguous;
 
 CREATE ABSTRACT SCALAR TYPE std::anyreal EXTENDING std::anyscalar;
 

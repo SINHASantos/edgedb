@@ -13,7 +13,7 @@ The ``delete`` command is used to delete objects from the database.
 Clauses
 -------
 
-Deletion statements support ``filter``, ``order by``, and ``offset/limit``
+Deletion statements support ``filter``, ``order by``, ``offset``, and ``limit``
 clauses. See :ref:`EdgeQL > Select <ref_eql_select>` for full documentation
 on these clauses.
 
@@ -57,15 +57,27 @@ To avoid this behavior, we could update the ``Movie.characters`` link to use
 the ``allow`` deletion policy.
 
 .. code-block:: sdl-diff
+    :version-lt: 3.0
 
-    type Movie {
-      required property title -> str { constraint exclusive };
-      required property release_year -> int64;
-  -   multi link characters -> Person;
-  +   multi link characters -> Person {
-  +     on target delete allow;
-  +   };
-    }
+      type Movie {
+        required property title -> str { constraint exclusive };
+        required property release_year -> int64;
+    -   multi link characters -> Person;
+    +   multi link characters -> Person {
+    +     on target delete allow;
+    +   };
+      }
+
+.. code-block:: sdl-diff
+
+      type Movie {
+        required title: str { constraint exclusive };
+        required release_year: int64;
+    -   multi characters: Person;
+    +   multi characters: Person {
+    +     on target delete allow;
+    +   };
+      }
 
 
 Cascading deletes
@@ -101,3 +113,5 @@ permanently deleted.
   * - **See also**
   * - :ref:`Reference > Commands > Delete <ref_eql_statements_delete>`
   * - :ref:`Cheatsheets > Deleting data <ref_cheatsheet_delete>`
+  * - `Tutorial > Data Mutations > Delete
+      </tutorial/data-mutations/delete>`_

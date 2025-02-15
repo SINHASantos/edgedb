@@ -141,7 +141,7 @@ and some Docker-specific environment variables, documented below.
 
 .. note::
 
-   Seme variables support ``_ENV`` and ``_FILE`` :ref:`variants
+   Some variables support ``_ENV`` and ``_FILE`` :ref:`variants
    <ref_reference_envvar_variants>` to support more advanced configurations.
 
 .. _ref_guides_deployment_docker_initial_setup:
@@ -160,13 +160,13 @@ effect on subsequent container runs.
 EDGEDB_SERVER_BOOTSTRAP_COMMAND
 ...............................
 
-Useful to fine-tune initial user and database creation, and other initial
+Useful to fine-tune initial user and branch creation, and other initial
 setup. If neither the ``EDGEDB_SERVER_BOOTSTRAP_COMMAND`` variable or the
 ``EDGEDB_SERVER_BOOTSTRAP_SCRIPT_FILE`` are explicitly specified, the container
 will look for the presence of ``/edgedb-bootstrap.edgeql`` in the container
 (which can be placed in a derived image).
 
-Maps directly to the ``edgedb-server`` flag ``--default-auth-method``. The
+Maps directly to the ``edgedb-server`` flag ``--bootstrap-command``. The
 ``*_FILE`` and ``*_ENV`` variants are also supported.
 
 
@@ -176,7 +176,7 @@ Deprecated in image version 2.8: use ``EDGEDB_SERVER_BOOTSTRAP_COMMAND_FILE``
 instead.
 
 Run the script when initializing the database. The script is run by default
-user within default database.
+user within default branch.
 
 
 EDGEDB_SERVER_PASSWORD
@@ -248,6 +248,7 @@ Determines the log verbosity level in the entrypoint script. Valid levels are
 ``trace``, ``debug``, ``info``, ``warning``, and ``error``.  The default is
 ``info``.
 
+.. _ref_guide_deployment_docker_custom_bootstrap_scripts:
 
 Custom scripts in ``/edgedb-bootstrap.d/`` and ``/edgedb-bootstrap-late.d``
 ...........................................................................
@@ -259,3 +260,16 @@ To perform additional initialization, a derived image may include one or more
 executed *before* any schema migrations are applied, and parts in
 ``/edgedb-bootstrap-late.d`` are executed *after* the schema migration have
 been applied.
+
+.. note::
+
+    Best practice for naming your script files when you will have multiple
+    script files to run on bootstrap is to prepend the filenames with ``01-``,
+    ``02-``, and so on to indicate your desired order of execution.
+
+Health Checks
+=============
+
+Using an HTTP client, you can perform health checks to monitor the status of
+your EdgeDB instance. Learn how to use them with our :ref:`health checks guide
+<ref_guide_deployment_health_checks>`.

@@ -24,7 +24,9 @@ from edb.testbase import server as tb
 from edb.tools import test
 
 
-class TestEdgeQLFuncCalls(tb.DDLTestCase):
+class TestEdgeQLFuncCalls(tb.QueryTestCase):
+
+    NO_FACTOR = True
 
     async def test_edgeql_calls_01(self):
         await self.con.execute('''
@@ -1672,6 +1674,50 @@ class TestEdgeQLFuncCalls(tb.DDLTestCase):
             CREATE FUNCTION frob(s: schema::Pointer) -> OPTIONAL str
                 USING (s.name ++ <str>s.required);
         """)
+
+    async def test_edgeql_calls_obj_05(self):
+        await self.con.execute("""
+            CREATE TYPE Ghost {
+                CREATE PROPERTY name -> str;
+            };
+
+            CREATE FUNCTION boo(s: Ghost) -> set of str
+                USING ("oh my, " ++ s.name ++ " scared me!");
+
+            INSERT Ghost { name := 'Casper' };
+        """)
+
+        await self.assert_query_result(
+            "SELECT boo((SELECT Ghost))",
+            ["oh my, Casper scared me!"],
+        )
+
+        async with self.assertRaisesRegexTx(
+            edgedb.UnsupportedFeatureError,
+            r'newly created or updated objects cannot be passed to functions',
+        ):
+            await self.con.execute(
+                r"SELECT boo((UPDATE Ghost SET { name := 'Tom' }))",
+            )
+
+        async with self.assertRaisesRegexTx(
+            edgedb.UnsupportedFeatureError,
+            r'newly created or updated objects cannot be passed to functions',
+        ):
+            await self.con.execute(
+                r"SELECT boo((INSERT Ghost { name := 'Jack' }));",
+            )
+
+        async with self.assertRaisesRegexTx(
+            edgedb.UnsupportedFeatureError,
+            r'newly created or updated objects cannot be passed to functions',
+        ):
+            await self.con.execute(
+                r"""
+                WITH friendly := (INSERT Ghost { name := 'Jack' })
+                SELECT boo(friendly);
+                """,
+            )
 
     async def test_edgeql_call_builtin_obj(self):
         await self.con.execute(

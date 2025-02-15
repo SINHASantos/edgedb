@@ -19,7 +19,7 @@
 
 from __future__ import annotations
 
-from typing import *
+from typing import Any, Optional, Tuple, Type, Dict, TYPE_CHECKING
 
 from edb.edgeql import ast as qlast
 from edb.edgeql import qltypes
@@ -34,9 +34,11 @@ from . import name as sn
 from . import objects as so
 from . import pointers
 from . import referencing
+from . import rewrites as s_rewrites
 from . import sources
 from . import types as s_types
 from . import utils
+from . import expr as s_expr
 
 if TYPE_CHECKING:
     from . import schema as s_schema
@@ -96,14 +98,16 @@ class Property(
             other, our_schema=our_schema,
             their_schema=their_schema, context=context)
 
-        if (not self.generic(our_schema) and
-                not other.generic(their_schema) and
-                self.issubclass(
-                    our_schema,
-                    our_schema.get('std::source', type=Property)) and
-                other.issubclass(
-                    their_schema,
-                    their_schema.get('std::source', type=Property))):
+        if (
+            not self.is_non_concrete(our_schema)
+            and not other.is_non_concrete(their_schema)
+            and self.issubclass(
+                our_schema, our_schema.get('std::source', type=Property)
+            )
+            and other.issubclass(
+                their_schema, their_schema.get('std::source', type=Property)
+            )
+        ):
             # Make std::source link property ignore differences in its target.
             # This is consistent with skipping the comparison on Pointer.source
             # in general.
@@ -136,18 +140,18 @@ class Property(
     def is_link_property(self, schema: s_schema.Schema) -> bool:
         source = self.get_source(schema)
         if source is None:
-            raise ValueError(f'{self.get_verbosename(schema)} is abstract')
+            return False
         return isinstance(source, pointers.Pointer)
 
     def allow_ref_propagation(
         self,
         schema: s_schema.Schema,
-        constext: sd.CommandContext,
+        context: sd.CommandContext,
         refdict: so.RefDict,
     ) -> bool:
         source = self.get_source(schema)
         if isinstance(source, pointers.Pointer):
-            if source.generic(schema):
+            if source.is_non_concrete(schema):
                 return True
             else:
                 source = source.get_source(schema)
@@ -203,8 +207,11 @@ class PropertySourceCommand(
     pass
 
 
-class PropertyCommandContext(pointers.PointerCommandContext[Property],
-                             constraints.ConsistencySubjectCommandContext):
+class PropertyCommandContext(
+    pointers.PointerCommandContext[Property],
+    constraints.ConsistencySubjectCommandContext,
+    s_rewrites.RewriteCommandContext,
+):
     pass
 
 
@@ -237,13 +244,13 @@ class PropertyCommand(
             if self.get_attribute_value('required'):
                 raise errors.InvalidPropertyDefinitionError(
                     'link properties cannot be required',
-                    context=self.source_context,
+                    span=self.span,
                 )
             if (self.get_attribute_value('cardinality')
                     is qltypes.SchemaCardinality.Many):
                 raise errors.InvalidPropertyDefinitionError(
                     "multi properties aren't supported for links",
-                    context=self.source_context,
+                    span=self.span,
                 )
 
         target_type = scls.get_target(schema)
@@ -251,24 +258,47 @@ class PropertyCommand(
             raise TypeError(f'missing target type in scls {scls}')
 
         if target_type.is_polymorphic(schema):
-            srcctx = self.get_attribute_source_context('target')
+            span = self.get_attribute_span('target')
             raise errors.InvalidPropertyTargetError(
                 f'invalid property type: '
                 f'{target_type.get_verbosename(schema)} '
                 f'is a generic type',
-                context=srcctx,
+                span=span,
             )
 
         if (target_type.is_object_type()
                 or (isinstance(target_type, s_types.Collection)
                     and target_type.contains_object(schema))):
-            srcctx = self.get_attribute_source_context('target')
+            span = self.get_attribute_span('target')
             raise errors.InvalidPropertyTargetError(
                 f'invalid property type: expected a scalar type, '
                 f'or a scalar collection, got '
                 f'{target_type.get_verbosename(schema)}',
-                context=srcctx,
+                span=span,
             )
+
+    def _check_field_errors(self, node: qlast.DDLOperation) -> None:
+        for sub in node.commands:
+            # do not allow link property on properties
+            if isinstance(sub, qlast.CreateConcretePointer):
+                raise errors.InvalidDefinitionError(
+                    f'cannot place a link property on a property',
+                    span=node.span,
+                    hint=(
+                        'Link properties can only be placed on links, whose '
+                        'target types are object types.'
+                    ),
+                )
+            # do not allow on source/target delete on properties
+            if isinstance(sub, (qlast.OnSourceDelete, qlast.OnTargetDelete)):
+                raise errors.InvalidDefinitionError(
+                    f'cannot place a deletion policy on a property',
+                    span=node.span,
+                    hint=(
+                        'Deletion policies can only be placed on links, whose '
+                        'target types are object types.'
+                    ),
+                )
 
 
 class CreateProperty(
@@ -290,14 +320,9 @@ class CreateProperty(
         cmd = super()._cmd_tree_from_ast(schema, astnode, context)
 
         if isinstance(astnode, qlast.CreateConcreteProperty):
-            assert isinstance(cmd, pointers.PointerCommand)
+            assert isinstance(cmd, PropertyCommand)
             cmd._process_create_or_alter_ast(schema, astnode, context)
-        else:
-            # this is an abstract property then
-            if cmd.get_attribute_value('default') is not None:
-                raise errors.SchemaDefinitionError(
-                    f"'default' is not a valid field for an abstract property",
-                    context=astnode.context)
+            cmd._check_field_errors(astnode)
 
         return cmd
 
@@ -330,9 +355,11 @@ class CreateProperty(
 
         if op.property == 'target' and link:
             if isinstance(node, qlast.CreateConcreteProperty):
-                expr = self.get_attribute_value('expr')
+                expr: Optional[s_expr.Expression] = (
+                    self.get_attribute_value('expr')
+                )
                 if expr is not None:
-                    node.target = expr.qlast
+                    node.target = expr.parse()
                 else:
                     ref = op.new_value
                     assert isinstance(ref, (so.Object, so.ObjectShell))
@@ -418,6 +445,7 @@ class AlterProperty(
             cmd._process_create_or_alter_ast(schema, astnode, context)
         else:
             cmd._process_alter_ast(schema, astnode, context)
+        cmd._check_field_errors(astnode)
         return cmd
 
     def _apply_field_ast(
@@ -461,22 +489,6 @@ class DeleteProperty(
                qlast.DropProperty]
 
     referenced_astnode = qlast.DropConcreteProperty
-
-    def _delete_begin(
-        self,
-        schema: s_schema.Schema,
-        context: sd.CommandContext,
-    ) -> s_schema.Schema:
-        schema = super()._delete_begin(schema, context)
-        if (
-            not context.canonical
-            and (target := self.scls.get_target(schema)) is not None
-            and not self.scls.is_link_source_property(schema)
-            and (del_cmd := target.as_type_delete_if_dead(schema)) is not None
-        ):
-            self.add_caused(del_cmd)
-
-        return schema
 
     def _get_ast(
         self,

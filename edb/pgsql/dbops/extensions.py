@@ -21,7 +21,6 @@ from __future__ import annotations
 
 from ..common import quote_ident as qi
 
-from . import base
 from . import ddl
 
 
@@ -33,17 +32,41 @@ class Extension:
     def get_extension_name(self):
         return self.name
 
-    def code(self, block: base.PLBlock) -> str:
+    def code(self) -> str:
         name = qi(self.get_extension_name())
         schema = qi(self.schema)
         return f'CREATE EXTENSION {name} WITH SCHEMA {schema}'
 
 
 class CreateExtension(ddl.DDLOperation):
+    def __init__(
+        self,
+        extension,
+        *,
+        conditions=None,
+        neg_conditions=None,
+        conditional=False,
+    ):
+        super().__init__(conditions=conditions, neg_conditions=neg_conditions)
+        self.extension = extension
+        self.opid = extension.name
+        self.conditional = conditional
+
+    def code(self) -> str:
+        ext = self.extension
+        name = qi(ext.get_extension_name())
+        schema = qi(ext.schema)
+        condition = "IF NOT EXISTS " if self.conditional else ''
+        return f'CREATE EXTENSION {condition}{name} WITH SCHEMA {schema}'
+
+
+class DropExtension(ddl.DDLOperation):
     def __init__(self, extension, *, conditions=None, neg_conditions=None):
         super().__init__(conditions=conditions, neg_conditions=neg_conditions)
         self.extension = extension
         self.opid = extension.name
 
-    def code(self, block: base.PLBlock) -> str:
-        return self.extension.code(block)
+    def code(self) -> str:
+        ext = self.extension
+        name = qi(ext.get_extension_name())
+        return f'DROP EXTENSION {name}'

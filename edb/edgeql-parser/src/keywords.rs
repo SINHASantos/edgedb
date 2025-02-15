@@ -1,4 +1,6 @@
-pub const UNRESERVED_KEYWORDS: &[&str] = &[
+use phf::phf_set;
+
+pub const UNRESERVED_KEYWORDS: phf::Set<&str> = phf_set!(
     "abort",
     "abstract",
     "access",
@@ -12,6 +14,8 @@ pub const UNRESERVED_KEYWORDS: &[&str] = &[
     "asc",
     "assignment",
     "before",
+    "blobal",
+    "branch",
     "cardinality",
     "cast",
     "committed",
@@ -20,6 +24,7 @@ pub const UNRESERVED_KEYWORDS: &[&str] = &[
     "constraint",
     "cube",
     "current",
+    "data",
     "database",
     "ddl",
     "declare",
@@ -29,11 +34,13 @@ pub const UNRESERVED_KEYWORDS: &[&str] = &[
     "delegated",
     "desc",
     "deny",
+    "each",
     "empty",
     "expression",
     "extension",
     "final",
     "first",
+    "force",
     "from",
     "function",
     "future",
@@ -72,6 +79,7 @@ pub const UNRESERVED_KEYWORDS: &[&str] = &[
     "reject",
     "release",
     "rename",
+    "repeatable",
     "required",
     "reset",
     "restrict",
@@ -89,11 +97,13 @@ pub const UNRESERVED_KEYWORDS: &[&str] = &[
     "superuser",
     "system",
     "target",
+    "template",
     "ternary",
     "text",
     "then",
     "to",
     "transaction",
+    "trigger",
     "type",
     "unless",
     "using",
@@ -101,30 +111,18 @@ pub const UNRESERVED_KEYWORDS: &[&str] = &[
     "version",
     "view",
     "write",
-];
+);
 
+pub const PARTIAL_RESERVED_KEYWORDS: phf::Set<&str> = phf_set!("except", "intersect", "union",);
 
-pub const PARTIAL_RESERVED_KEYWORDS: &[&str] = &[
-    // Keep in sync with `tokenizer::is_keyword`
-    "except",
-    "intersect",
-    "union",
-    // Keep in sync with `tokenizer::is_keyword`
-];
-
-
-pub const FUTURE_RESERVED_KEYWORDS: &[&str] = &[
-    // Keep in sync with `tokenizer::is_keyword`
-    "analyze",
+pub const FUTURE_RESERVED_KEYWORDS: phf::Set<&str> = phf_set!(
     "anyarray",
     "begin",
     "case",
     "check",
     "deallocate",
     "discard",
-    "do",
     "end",
-    "execute",
     "explain",
     "fetch",
     "get",
@@ -143,28 +141,31 @@ pub const FUTURE_RESERVED_KEYWORDS: &[&str] = &[
     "partition",
     "raise",
     "refresh",
-    "reindex",
     "revoke",
     "single",
     "when",
     "window",
     "never",
-    // Keep in sync with `tokenizer::is_keyword`
-];
+);
 
-pub const CURRENT_RESERVED_KEYWORDS: &[&str] = &[
-    // Keep in sync with `tokenizer::is_keyword`
+pub const CURRENT_RESERVED_KEYWORDS: phf::Set<&str> = phf_set!(
     "__source__",
     "__subject__",
     "__type__",
     "__std__",
     "__edgedbsys__",
     "__edgedbtpl__",
-    "__std__",
+    "__new__",
+    "__old__",
+    "__specified__",
+    "__default__",
+    "administer",
     "alter",
+    "analyze",
     "and",
     "anytuple",
     "anytype",
+    "anyobject",
     "by",
     "commit",
     "configure",
@@ -173,6 +174,7 @@ pub const CURRENT_RESERVED_KEYWORDS: &[&str] = &[
     "describe",
     "detached",
     "distinct",
+    "do",
     "drop",
     "else",
     "exists",
@@ -203,5 +205,44 @@ pub const CURRENT_RESERVED_KEYWORDS: &[&str] = &[
     "update",
     "variadic",
     "with",
-    // Keep in sync with `tokenizer::is_keyword`
-];
+);
+
+pub const COMBINED_KEYWORDS: phf::Set<&str> = phf_set!(
+    "named only",
+    "set annotation",
+    "set type",
+    "extension package",
+    "order by",
+);
+
+pub fn lookup(s: &str) -> Option<Keyword> {
+    None.or_else(|| PARTIAL_RESERVED_KEYWORDS.get_key(s))
+        .or_else(|| FUTURE_RESERVED_KEYWORDS.get_key(s))
+        .or_else(|| CURRENT_RESERVED_KEYWORDS.get_key(s))
+        .map(|x| Keyword(x))
+}
+
+pub fn lookup_all(s: &str) -> Option<Keyword> {
+    lookup(s).or_else(|| {
+        None.or_else(|| COMBINED_KEYWORDS.get_key(s))
+            .or_else(|| UNRESERVED_KEYWORDS.get_key(s))
+            .map(|x| Keyword(x))
+    })
+}
+
+/// This is required for serde deserializer for Token to work correctly.
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct Keyword(pub &'static str);
+
+impl Keyword {
+    pub fn is_reserved(&self) -> bool {
+        FUTURE_RESERVED_KEYWORDS.contains(self.0) || CURRENT_RESERVED_KEYWORDS.contains(self.0)
+    }
+}
+
+impl From<Keyword> for &'static str {
+    fn from(value: Keyword) -> Self {
+        value.0
+    }
+}

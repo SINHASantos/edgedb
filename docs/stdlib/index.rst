@@ -1,4 +1,5 @@
 .. eql:section-intro-page:: stdlib
+.. versioned-section::
 
 .. _ref_std:
 
@@ -29,8 +30,14 @@ Standard Library
     objects
     abstract
     constraints
+    net
+    fts
     sys
     cfg
+    pgcrypto
+    pg_trgm
+    pg_unaccent
+    pgvector
     deprecated
 
 EdgeDB comes with a rigorously defined type system consisting of **scalar
@@ -75,6 +82,7 @@ Range Types
 -----------
 
 - :ref:`Range <ref_std_range>`
+- :ref:`Multirange <ref_std_multirange>`
 
 Object Types
 ------------
@@ -94,6 +102,10 @@ Utilities
 - :ref:`Math <ref_std_math>`
 - :ref:`Comparison <ref_std_generic>`
 - :ref:`Constraints <ref_std_constraints>`
+- :ref:`Full-text Search <ref_std_fts>`
 - :ref:`System <ref_std_sys>`
 
+Extensions
+----------
 
+- :ref:`ext::pgvector <ref_ext_pgvector>`

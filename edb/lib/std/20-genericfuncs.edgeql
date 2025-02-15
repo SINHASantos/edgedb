@@ -31,7 +31,7 @@ std::assert_single(
     CREATE ANNOTATION std::description :=
         "Check that the input set contains at most one element, raise
          CardinalityViolationError otherwise.";
-    SET volatility := 'Stable';
+    SET volatility := 'Immutable';
     SET preserves_optionality := true;
     USING SQL EXPRESSION;
 };
@@ -49,7 +49,7 @@ std::assert_exists(
     CREATE ANNOTATION std::description :=
         "Check that the input set contains at least one element, raise
          CardinalityViolationError otherwise.";
-    SET volatility := 'Stable';
+    SET volatility := 'Immutable';
     SET preserves_upper_cardinality := true;
     USING SQL EXPRESSION;
 };
@@ -67,9 +67,46 @@ std::assert_distinct(
     CREATE ANNOTATION std::description :=
         "Check that the input set is a proper set, i.e. all elements
          are unique";
-    SET volatility := 'Stable';
+    SET volatility := 'Immutable';
     SET preserves_optionality := true;
     SET preserves_upper_cardinality := true;
+    USING SQL EXPRESSION;
+};
+
+# std::assert -- boolean assertion
+# --------------------------------
+CREATE FUNCTION
+std::assert(
+    input: bool,
+    NAMED ONLY message: OPTIONAL str = <str>{},
+) -> bool
+{
+    CREATE ANNOTATION std::description :=
+        "Assert that a boolean value is true.";
+    SET volatility := 'Stable';
+    USING SQL $$
+    SELECT (
+        edgedb_VER.raise_on_null(
+            nullif("input", false),
+            'cardinality_violation',
+            "constraint" => 'std::assert',
+            msg => coalesce("message", 'assertion failed')
+        )
+    )
+    $$;
+};
+
+# std::materialized_exists -- force materialization of a set
+# ----------------------------------------------------------
+
+CREATE FUNCTION
+std::materialized(
+    input: anytype,
+) -> anytype
+{
+    CREATE ANNOTATION std::description :=
+        "Force materialization of a set.";
+    SET volatility := 'Volatile';
     USING SQL EXPRESSION;
 };
 
@@ -524,12 +561,26 @@ std::contains(haystack: array<anytype>, needle: anytype) -> std::bool
     CREATE ANNOTATION std::description :=
         'A polymorphic function to test if a sequence contains a certain element.';
     SET volatility := 'Immutable';
+    # Postgres only manages to inline this function if it isn't marked strict,
+    # and we want it to be inlined so that std::pg::gin indexes work with it.
+    SET impl_is_strict := false;
     USING SQL $$
-    SELECT
-        CASE
-            WHEN "needle" IS NULL THEN NULL
-            ELSE array_position("haystack", "needle") IS NOT NULL
-        END;
+    SELECT "haystack" @> ARRAY["needle"]
+    $$;
+};
+
+
+CREATE FUNCTION
+std::contains(haystack: json, needle: json) -> std::bool
+{
+    CREATE ANNOTATION std::description :=
+        'A polymorphic function to test if one JSON value contains another JSON value.';
+    SET volatility := 'Immutable';
+    # Postgres only manages to inline this function if it isn't marked strict,
+    # and we want it to be inlined so that std::pg::gin indexes work with it.
+    SET impl_is_strict := false;
+    USING SQL $$
+    SELECT "haystack" @> "needle"
     $$;
 };
 
@@ -588,6 +639,92 @@ std::find(haystack: array<anytype>, needle: anytype,
 
 # Generic comparison operators
 # ----------------------------
+
+CREATE INFIX OPERATOR
+std::`=` (l: anyscalar, r: anyscalar) -> std::bool {
+    CREATE ANNOTATION std::identifier := 'eq';
+    CREATE ANNOTATION std::description := 'Compare two values for equality.';
+    SET volatility := 'Immutable';
+    SET commutator := 'std::=';
+    SET negator := 'std::!=';
+    USING SQL OPERATOR r'=';
+};
+
+
+CREATE INFIX OPERATOR
+std::`?=` (l: OPTIONAL anyscalar, r: OPTIONAL anyscalar) -> std::bool {
+    CREATE ANNOTATION std::identifier := 'coal_eq';
+    CREATE ANNOTATION std::description :=
+        'Compare two (potentially empty) values for equality.';
+    SET volatility := 'Immutable';
+    USING SQL EXPRESSION;
+};
+
+
+CREATE INFIX OPERATOR
+std::`!=` (l: anyscalar, r: anyscalar) -> std::bool {
+    CREATE ANNOTATION std::identifier := 'neq';
+    CREATE ANNOTATION std::description := 'Compare two values for inequality.';
+    SET volatility := 'Immutable';
+    SET commutator := 'std::!=';
+    SET negator := 'std::=';
+    USING SQL OPERATOR r'<>';
+};
+
+
+CREATE INFIX OPERATOR
+std::`?!=` (l: OPTIONAL anyscalar, r: OPTIONAL anyscalar) -> std::bool {
+    CREATE ANNOTATION std::identifier := 'coal_neq';
+    CREATE ANNOTATION std::description :=
+        'Compare two (potentially empty) values for inequality.';
+    SET volatility := 'Immutable';
+    USING SQL EXPRESSION;
+};
+
+
+CREATE INFIX OPERATOR
+std::`>=` (l: anyscalar, r: anyscalar) -> std::bool {
+    CREATE ANNOTATION std::identifier := 'gte';
+    CREATE ANNOTATION std::description := 'Greater than or equal.';
+    SET volatility := 'Immutable';
+    SET commutator := 'std::<=';
+    SET negator := 'std::<';
+    USING SQL OPERATOR '>=';
+};
+
+
+CREATE INFIX OPERATOR
+std::`>` (l: anyscalar, r: anyscalar) -> std::bool {
+    CREATE ANNOTATION std::identifier := 'gt';
+    CREATE ANNOTATION std::description := 'Greater than.';
+    SET volatility := 'Immutable';
+    SET commutator := 'std::<';
+    SET negator := 'std::<=';
+    USING SQL OPERATOR '>';
+};
+
+
+CREATE INFIX OPERATOR
+std::`<=` (l: anyscalar, r: anyscalar) -> std::bool {
+    CREATE ANNOTATION std::identifier := 'lte';
+    CREATE ANNOTATION std::description := 'Less than or equal.';
+    SET volatility := 'Immutable';
+    SET commutator := 'std::>=';
+    SET negator := 'std::>';
+    USING SQL OPERATOR '<=';
+};
+
+
+CREATE INFIX OPERATOR
+std::`<` (l: anyscalar, r: anyscalar) -> std::bool {
+    CREATE ANNOTATION std::identifier := 'lt';
+    CREATE ANNOTATION std::description := 'Less than.';
+    SET volatility := 'Immutable';
+    SET commutator := 'std::>';
+    SET negator := 'std::>=';
+    USING SQL OPERATOR '<';
+};
+
 
 CREATE INFIX OPERATOR
 std::`=` (l: anytuple, r: anytuple) -> std::bool {

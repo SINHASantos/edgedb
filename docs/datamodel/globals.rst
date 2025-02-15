@@ -1,18 +1,21 @@
+.. versionadded:: 2.0
+
 .. _ref_datamodel_globals:
 
-============
-Globals #New
-============
-
-.. note::
-
-  ⚠️ Only available in EdgeDB 2.0 or later.
+=======
+Globals
+=======
 
 Schemas can contain scalar-typed *global variables*.
 
 .. code-block:: sdl
+    :version-lt: 3.0
 
-  global current_user_id -> uuid;
+    global current_user_id -> uuid;
+
+.. code-block:: sdl
+
+    global current_user_id: uuid;
 
 These provide a useful mechanism for specifying session-level data that can be
 referenced in queries with the ``global`` keyword.
@@ -41,7 +44,9 @@ which client library you're using.
 
     import createClient from 'edgedb';
 
-    const baseClient = createClient()
+    const baseClient = createClient();
+    // returns a new Client instance that stores the provided 
+    // globals and sends them along with all future queries:
     const clientWithGlobals = baseClient.withGlobals({
       current_user_id: '2141a5b4-5634-4ccc-b835-437863534c51',
     });
@@ -96,14 +101,33 @@ which client library you're using.
 
       fmt.Println(result)
     }
-    
+
+  .. code-tab:: rust
+
+    use uuid::Uuid;
+
+    let client = edgedb_tokio::create_client().await.expect("Client init");
+
+    let client_with_globals = client.with_globals_fn(|c| {
+        c.set(
+            "current_user_id",
+            Value::Uuid(
+                Uuid::parse_str("2141a5b4-5634-4ccc-b835-437863534c51")
+                    .expect("Uuid should have parsed"),
+            ),
+        )
+    });
+    let val: Uuid = client_with_globals
+        .query_required_single("select global current_user_id;", &())
+        .await
+        .expect("Returning value");
+    println!("Result: {val}");
+
   .. code-tab:: edgeql
 
-    set global current_user_id := <uuid>'2141a5b4-5634-4ccc-b835-437863534c51';
+    set global current_user_id := 
+      <uuid>'2141a5b4-5634-4ccc-b835-437863534c51';
 
-
-The ``.withGlobals/.with_globals`` method returns a new ``Client`` instance
-that stores the provided globals and sends them along with all future queries.
 
 Cardinality
 -----------
@@ -112,10 +136,17 @@ Global variables can be marked ``required``; in this case, you must specify a
 default value.
 
 .. code-block:: sdl
+    :version-lt: 3.0
 
-  required global one_string -> str {
-    default := "Hi Mom!"
-  };
+    required global one_string -> str {
+      default := "Hi Mom!"
+    };
+
+.. code-block:: sdl
+
+    required global one_string: str {
+      default := "Hi Mom!"
+    };
 
 Computed globals
 ----------------
@@ -135,16 +166,29 @@ Computed globals are not subject to the same constraints as non-computed ones;
 specifically, they can be object-typed and have a ``multi`` cardinality.
 
 .. code-block:: sdl
+    :version-lt: 3.0
 
-  global current_user_id -> uuid;
+    global current_user_id -> uuid;
 
-  # object-typed global
-  global current_user := (
-    select User filter .id = global current_user_id
-  );
+    # object-typed global
+    global current_user := (
+      select User filter .id = global current_user_id
+    );
 
-  # multi global
-  global current_user_friends := (global current_user).friends;
+    # multi global
+    global current_user_friends := (global current_user).friends;
+
+.. code-block:: sdl
+
+    global current_user_id: uuid;
+
+    # object-typed global
+    global current_user := (
+      select User filter .id = global current_user_id
+    );
+
+    # multi global
+    global current_user_friends := (global current_user).friends;
 
 
 Usage in schema
@@ -177,21 +221,46 @@ Unlike query parameters, globals can be referenced
 *inside your schema declarations*.
 
 .. code-block:: sdl
+    :version-lt: 3.0
 
-  type User {
-    property name -> str;
-    property is_self := (.id = global current_user_id)
-  };
+    type User {
+      property name -> str;
+      property is_self := (.id = global current_user_id)
+    };
+
+
+.. code-block:: sdl
+    :version-lt: 4.0
+
+    type User {
+      name: str;
+      property is_self := (.id = global current_user_id)
+    };
+
+.. code-block:: sdl
+
+    type User {
+      name: str;
+      is_self := (.id = global current_user_id)
+    };
 
 This is particularly useful when declaring :ref:`access policies
 <ref_datamodel_access_policies>`.
 
 .. code-block:: sdl
+    :version-lt: 3.0
 
-  type Person {
-    required property name -> str;
-    access policy my_policy allow all using (.id = global current_user_id);
-  }
+    type Person {
+      required property name -> str;
+      access policy my_policy allow all using (.id = global current_user_id);
+    }
+
+.. code-block:: sdl
+
+    type Person {
+      required name: str;
+      access policy my_policy allow all using (.id = global current_user_id);
+    }
 
 Refer to :ref:`Access Policies <ref_datamodel_access_policies>` for complete
 documentation.

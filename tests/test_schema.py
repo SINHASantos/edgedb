@@ -18,8 +18,9 @@
 
 
 from __future__ import annotations
-from typing import *
+from typing import Type, TYPE_CHECKING
 
+import random
 import re
 
 from edb import errors
@@ -34,6 +35,7 @@ from edb.schema import ddl as s_ddl
 from edb.schema import links as s_links
 from edb.schema import name as s_name
 from edb.schema import objtypes as s_objtypes
+from edb.schema import properties as s_props
 
 from edb.testbase import lang as tb
 from edb.tools import test
@@ -205,6 +207,21 @@ class TestSchema(tb.BaseSchemaLoadTest):
             }
         """
 
+    @tb.must_fail(errors.SchemaError,
+                  "cannot redefine property 'name' of object type "
+                  "'test::UniqueName_2' as scalar type 'std::bytes'",
+                  position=196)
+    def test_schema_overloaded_prop_11(self):
+        """
+            type UniqueName {
+                property name -> str;
+            };
+
+            type UniqueName_2 extending UniqueName {
+                overloaded property name -> bytes;
+            };
+        """
+
     @tb.must_fail(errors.SchemaDefinitionError,
                   "it is illegal for the computed link 'foo' "
                   "of object type 'test::UniqueName_2' to overload "
@@ -275,6 +292,61 @@ class TestSchema(tb.BaseSchemaLoadTest):
             type UniqueName_3 extending UniqueName, UniqueName_2;
         """
 
+    @tb.must_fail(errors.SchemaDefinitionError,
+                  "index expressions must be immutable")
+    def test_schema_index_computed_01(self):
+        """
+        type SignatureStatus {
+          required property signature -> str;
+          link memo := (
+            select Memo filter .signature = SignatureStatus.signature limit 1);
+
+          index on (.memo);
+        }
+
+        type Memo {
+          required property signature -> str {
+            constraint exclusive;
+          }
+        }
+        """
+
+    @tb.must_fail(errors.SchemaDefinitionError,
+                  "index expressions must be immutable")
+    def test_schema_index_computed_02(self):
+        """
+        type SignatureStatus {
+          required property signature -> str;
+          link memo := (
+            select Memo filter .signature = SignatureStatus.signature limit 1);
+
+          index on (__subject__ { lol := .memo }.lol);
+        }
+
+        type Memo {
+          required property signature -> str {
+            constraint exclusive;
+          }
+        }
+        """
+
+    def test_schema_index_computed_03(self):
+        """
+        type SignatureStatus {
+          required property signature -> str;
+          link memo_: Memo;
+          link memo := .memo_;
+
+          index on (.memo);
+        }
+
+        type Memo {
+          required property signature -> str {
+            constraint exclusive;
+          }
+        }
+        """
+
     @tb.must_fail(
         errors.InvalidLinkTargetError,
         "invalid link target type, expected object type, "
@@ -326,6 +398,83 @@ class TestSchema(tb.BaseSchemaLoadTest):
             };
         """
 
+    @tb.must_fail(
+        errors.InvalidLinkTargetError,
+        "required links may not use `on target delete deferred restrict`",
+    )
+    def test_schema_bad_link_05(self):
+        """
+            type A;
+            type Foo {
+                required link foo -> A {
+                    on target delete deferred restrict;
+                }
+            };
+        """
+
+    @tb.must_fail(
+        errors.SchemaDefinitionError,
+        "illegal for the computed link.*to extend an abstract link",
+    )
+    def test_schema_bad_link_06(self):
+        """
+            abstract link abs { property foo: str };
+            type T { multi link following extending abs -> T {using (T)} }
+        """
+
+    @tb.must_fail(errors.InvalidDefinitionError,
+                  "cannot place a link property on a property")
+    def test_schema_link_prop_on_prop_01(self):
+        """
+            type Test1 {
+                title : str {
+                    sub_title : str
+                }
+            };
+        """
+
+    @tb.must_fail(errors.InvalidDefinitionError,
+                  "cannot place a deletion policy on a property")
+    def test_schema_deletion_policy_on_prop_01(self):
+        """
+            type Test1 {
+                title : str {
+                    on source delete allow;
+                }
+            };
+        """
+
+    @tb.must_fail(errors.InvalidDefinitionError,
+                  "cannot place a deletion policy on a property")
+    def test_schema_deletion_policy_on_prop_02(self):
+        """
+            type Test1 {
+                title : str {
+                    on target delete restrict;
+                }
+            };
+        """
+
+    @tb.must_fail(errors.QueryError,
+                  "could not resolve partial path")
+    def test_schema_partial_path_in_default_of_link_prop_01(self):
+        """
+            module default {
+                type Person {
+                    required name: str {
+                        constraint exclusive;
+                    }
+
+                    multi friends : Person {
+                        note: str {
+                            default := .name
+                        }
+                    }
+
+                }
+            }
+        """
+
     @tb.must_fail(errors.InvalidPropertyTargetError,
                   "invalid property type: expected a scalar type, "
                   "or a scalar collection, got object type 'test::Object'",
@@ -340,7 +489,7 @@ class TestSchema(tb.BaseSchemaLoadTest):
     @tb.must_fail(errors.InvalidPropertyTargetError,
                   "invalid property type: expected a scalar type, "
                   "or a scalar collection, got object type 'test::Object'",
-                  position=73)
+                  position=74)
     def test_schema_bad_prop_02(self):
         """
             type Object {
@@ -500,7 +649,7 @@ class TestSchema(tb.BaseSchemaLoadTest):
         """
 
     @tb.must_fail(errors.SchemaError,
-                  "invalid type: pseudotype 'anytype' is a generic type")
+                  "invalid type: pseudo type 'anytype' is a generic type")
     def test_schema_bad_type_12(self):
         """
             type Foo {
@@ -509,7 +658,7 @@ class TestSchema(tb.BaseSchemaLoadTest):
         """
 
     @tb.must_fail(errors.SchemaError,
-                  "invalid type: pseudotype 'anytype' is a generic type")
+                  "invalid type: pseudo type 'anytype' is a generic type")
     def test_schema_bad_type_13(self):
         """
             type Foo {
@@ -518,7 +667,7 @@ class TestSchema(tb.BaseSchemaLoadTest):
         """
 
     @tb.must_fail(errors.SchemaError,
-                  "invalid type: pseudotype 'anytuple' is a generic type")
+                  "invalid type: pseudo type 'anytuple' is a generic type")
     def test_schema_bad_type_14(self):
         """
             type Foo {
@@ -532,6 +681,65 @@ class TestSchema(tb.BaseSchemaLoadTest):
     def test_schema_bad_type_15(self):
         """
             scalar type Foo;
+        """
+
+    @tb.must_fail(errors.InvalidDefinitionError,
+                  "index of object type 'test::Foo' was already declared")
+    def test_schema_bad_type_16(self):
+        """
+            type Foo {
+                property val -> str;
+                index on (.val);
+                index on (.val);
+            };
+        """
+
+    @tb.must_fail(
+        errors.InvalidDefinitionError,
+        "index 'fts::index' of object type 'test::Foo' was already declared",
+    )
+    def test_schema_bad_type_17a(self):
+        """
+        type Foo {
+            property val -> str;
+            index fts::index on (
+                fts::with_options(.val, language := fts::Language.eng)
+            );
+            index fts::index on (
+                fts::with_options(.val, language := fts::Language.ita)
+            );
+            index fts::index on (
+                fts::with_options(.val, language := fts::Language.eng)
+            );
+        };
+        """
+
+    @tb.must_fail(
+        errors.InvalidDefinitionError,
+        "multiple std::fts::index indexes defined for test::Foo",
+    )
+    def test_schema_bad_type_17b(self):
+        """
+        type Foo {
+            property val -> str;
+            index fts::index on (
+                fts::with_options(.val, language := fts::Language.eng)
+            );
+            index fts::index on (
+                fts::with_options(.val, language := fts::Language.ita)
+            );
+        };
+        """
+
+    @tb.must_fail(
+        errors.InvalidPropertyDefinitionError,
+        "this type cannot be anonymous",
+    )
+    def test_schema_bad_type_18(self):
+        """
+        type Foo {
+            property val -> enum<VariantA, VariantB>;
+        };
         """
 
     def test_schema_computable_cardinality_inference_01(self):
@@ -746,6 +954,196 @@ class TestSchema(tb.BaseSchemaLoadTest):
             };
         """
 
+    @tb.must_fail(
+        errors.SchemaDefinitionError,
+        "module 'super' is a reserved module name"
+    )
+    def test_schema_module_reserved_01(self):
+        """
+            module foo {
+                module super {}
+            }
+        """
+
+    @tb.must_fail(
+        errors.InvalidDefinitionError,
+        "field 'default' .*was already declared"
+    )
+    def test_schema_field_dupe_01(self):
+        """
+        type SimpleNumbers {
+            property bar: str;
+            property foo: str {
+                default := '';
+                default := '';
+            }
+        }
+        """
+
+    @tb.must_fail(
+        errors.InvalidDefinitionError,
+        "field 'default' .*was already declared"
+    )
+    def test_schema_field_dupe_02(self):
+        """
+        type SimpleNumbers {
+            property bar: str;
+            property foo: str {
+                default := .bar;
+                default := .bar;
+            }
+        }
+        """
+
+    @tb.must_fail(
+        errors.InvalidDefinitionError,
+        "link or property 'foo' .*was already declared"
+    )
+    def test_schema_field_dupe_03(self):
+        """
+        type SimpleNumbers {
+            bar: str;
+            foo := .bar ++ "!";
+            foo := .bar ++ "!";
+        }
+        """
+
+    @tb.must_fail(
+        errors.InvalidPropertyTargetError,
+        "got object type"
+    )
+    def test_schema_object_as_lprop_01(self):
+        """
+        type Tgt;
+        type Tgt2;
+        type Src {
+          multi tgts: Tgt {
+            lprop: Tgt2;
+          }
+        };
+        """
+
+    @tb.must_fail(
+        errors.InvalidPropertyTargetError,
+        "got object type"
+    )
+    def test_schema_object_as_lprop_02(self):
+        """
+        type Tgt;
+        type Tgt2;
+        type Src {
+          multi tgts: Tgt {
+          }
+        };
+        type Src2 extending Src {
+          overloaded multi tgts: Tgt {
+            lprop: Tgt2;
+          }
+        };
+        """
+
+    @tb.must_fail(
+        errors.InvalidFunctionDefinitionError,
+        r"cannot create the `test::foo\(VARIADIC bar: "
+        r"OPTIONAL array<std::int64>\)` function: "
+        r"variadic argument `bar` illegally declared "
+        r"with optional type in user-defined function"
+    )
+    def test_schema_func_optional_variadic_01(self):
+        """
+            function foo(variadic bar: optional int64) -> array<int64>
+                using (assert_exists(bar));
+        """
+
+    def test_schema_global_01(self):
+        """
+          global two_things: TwoThings;
+          scalar type TwoThings extending enum<One, Two>;
+       """
+
+    def test_schema_hard_sorting_01(self):
+        # This is hard to sort properly because we don't understand the types.
+        # From #4683.
+        """
+            global current_user_id -> uuid;
+            global current_user := (
+              select User filter .id = global current_user_id
+            );
+            global current_user_role := (
+              (global current_user).role.slug
+            );
+
+            type Role {
+              property slug -> str;
+            }
+
+            type User {
+              required link role -> Role;
+            }
+        """
+
+    def test_schema_hard_sorting_02(self):
+        # This is hard to sort properly because we don't understand the types.
+        # From #5163
+        """
+            type Branch;
+            type CO2DataPoint{
+                required link datapoint -> DataPoint;
+                link branch := .datapoint.data_entry.branch;
+            }
+            type DataPoint{
+                required link data_entry := assert_exists(
+                    .<data_points[is DataEntry]);
+            }
+
+            type DataEntry{
+                required link branch -> Branch;
+                multi link data_points -> DataPoint;
+            }
+       """
+
+    def test_schema_hard_sorting_03(self):
+        # This is hard to sort properly because we don't understand the types.
+        """
+            type A {
+                property foo := assert_exists(B).bar;
+            };
+            type B {
+                property bar := 1;
+            };
+       """
+
+    def test_schema_hard_sorting_04(self):
+        # This is hard to sort properly because we don't understand the types.
+        """
+            type A {
+                property foo := (
+                    with Z := assert_exists(B) select Z.bar);
+            };
+            type B {
+                property bar := 1;
+            };
+       """
+
+    def test_schema_hard_sorting_05(self):
+        """
+            type T {
+                multi as: A;
+                multi bs: B;
+                sections := (
+                    select (.as union .bs)
+                    filter .index > 0
+                );
+            }
+
+            abstract type I {
+                required index: int16;
+            }
+
+            type A extending I;
+            type B extending I;
+       """
+
     def test_schema_refs_01(self):
         schema = self.load_schema("""
             type Object1;
@@ -947,6 +1345,22 @@ class TestSchema(tb.BaseSchemaLoadTest):
                 obj2_num,
             })
         )
+
+    def test_schema_refs_04(self):
+        with self.assertRaisesRegex(
+            errors.InvalidReferenceError,
+            "__subject__ cannot be used in this expression",
+        ):
+            self.load_schema(
+                """
+                type User3 {
+                    required property nick: str;
+                    required property name: str {
+                        default := (select __subject__.nick);
+                    };
+                }
+                """
+            )
 
     def test_schema_annotation_inheritance_01(self):
         schema = self.load_schema("""
@@ -1241,6 +1655,86 @@ class TestSchema(tb.BaseSchemaLoadTest):
             }
         """
 
+    @tb.must_fail(errors.SchemaDefinitionError,
+                  "missing value for required property",
+                  line=10, col=25)
+    def test_schema_rewrite_missing_required_01(self):
+        """
+            type Project {
+                required name: str;
+                required owner: User;
+            }
+
+            type User {
+                link default_project: Project {
+                    rewrite insert using (
+                        insert Project {
+                            owner := __subject__,
+                        }
+                    )
+                };
+            }
+        """
+
+    def test_schema_rewrite_order_01(self):
+        """
+            type EventSession extending Timed {
+
+              lastSeen: datetime {
+                rewrite update using (
+                  __old__.foo
+                )
+              }
+              lastSeen2: datetime {
+                rewrite insert using (
+                  __subject__.foo
+                )
+              }
+            }
+            abstract type Timed {
+              required foo: datetime {
+                default := datetime_current();
+              }
+            }
+        """
+
+    def test_schema_rewrite_order_02(self):
+        # One of the properties is going to reference the other property
+        # before it is created in its rewrite via __specified__.
+        # Ensure that this gets ordered correctly.
+        """
+            type User {
+              property foo -> bool {
+                rewrite insert using (__specified__.bar);
+              };
+              property bar -> bool {
+                rewrite insert using (__specified__.foo);
+              };
+            };
+        """
+
+    def test_schema_scalar_order_01(self):
+        # Make sure scalar types account for base types when tracing SDL
+        # dependencies.
+        """
+            scalar type two extending one;
+            scalar type one extending str;
+        """
+
+    def test_schema_trigger_order_01(self):
+        """
+            type Feed extending Entity {
+              trigger sync_trigger_on_update after update for each when (
+                __old__.field ?= __new__.field
+              )
+              do (1)
+            }
+
+            abstract type Entity {
+              field: str;
+            }
+        """
+
     def test_schema_property_cardinality_alter_01(self):
         schema = self.load_schema('''
             type Foo {
@@ -1310,7 +1804,7 @@ class TestSchema(tb.BaseSchemaLoadTest):
             CREATE MODULE default;
             CREATE TYPE default::A;
             CREATE TYPE default::B EXTENDING A;
-            CREATE TYPE default::C EXTENDING A, B;
+            CREATE TYPE default::C EXTENDING B, A;
         ''')
 
         orig_get_children = type(schema).get_children
@@ -1463,7 +1957,7 @@ class TestSchema(tb.BaseSchemaLoadTest):
             next(iter(obj.get_indexes(
                 schema).objects(schema))).get_verbosename(
                     schema, with_parent=True),
-            "index 'foo_7770702d' of object type 'test::Object1'",
+            "index of object type 'test::Object1'",
         )
 
     def test_schema_advanced_types(self):
@@ -1471,18 +1965,27 @@ class TestSchema(tb.BaseSchemaLoadTest):
             type D;
             abstract type F {
                 property f -> int64;
-                link d -> D {
-                    property f_d_prop -> str;
+                link df -> D {
+                    property df_prop -> str;
                 }
             }
-            type T1 {
-                property n -> str;
-                link d -> D {
-                    property t1_d_prop -> str;
-                }
+            type T1 extending F {
+                property a_ -> str;
+                property a1 -> str;
+                link d_ -> D {
+                    property d_prop_ -> str;
+                    property d_prop1 -> str;
+                };
+                link d1 -> D;
             };
             type T2 extending F {
-                property n -> str;
+                property a_ -> str;
+                property a2 -> str;
+                link d_ -> D {
+                    property d_prop_ -> str;
+                    property d_prop2 -> str;
+                };
+                link d2 -> D;
             };
             type T3;
 
@@ -1494,45 +1997,80 @@ class TestSchema(tb.BaseSchemaLoadTest):
         """)
 
         A = schema.get('test::A')
+        T1 = schema.get('test::T1')
         T2 = schema.get('test::T2')
         F = schema.get('test::F')
-        A_t = A.getptr(schema, s_name.UnqualName('t'))
-        A_t2 = A.getptr(schema, s_name.UnqualName('t2'))
+
+        # Checking (T1 | T2)
+        A_t_link = A.getptr(schema, s_name.UnqualName('t'))
+        A_t = A_t_link.get_target(schema)
+        # Checking type
+        self.assertTrue(T1.issubclass(schema, A_t))
+        self.assertTrue(T2.issubclass(schema, A_t))
+        self.assertTrue(A_t.issubclass(schema, F))
+        # Checking properties
+        A_t.getptr(schema, s_name.UnqualName('a_'))
+        A_t.getptr(schema, s_name.UnqualName('f'))
+        self.assertIsNone(A_t.maybe_get_ptr(schema, s_name.UnqualName('a1')))
+        self.assertIsNone(A_t.maybe_get_ptr(schema, s_name.UnqualName('a2')))
+        # Checking links
+        A_t_d = A_t.getptr(schema, s_name.UnqualName('d_'))
+        A_t_df = A_t.getptr(schema, s_name.UnqualName('df'))
+        self.assertIsNone(A_t.maybe_get_ptr(schema, s_name.UnqualName('d1')))
+        self.assertIsNone(A_t.maybe_get_ptr(schema, s_name.UnqualName('d2')))
+        # Checking link properties
+        A_t_d.getptr(schema, s_name.UnqualName('d_prop_'))
+        self.assertIsNone(A_t_d.maybe_get_ptr(schema, 'd_prop1'))
+        self.assertIsNone(A_t_d.maybe_get_ptr(schema, 'd_prop2'))
+        A_t_df.getptr(schema, s_name.UnqualName('df_prop'))
+
+        # Checking ((T1 | T2) & T2)
+        A_t2_link = A.getptr(schema, s_name.UnqualName('t2'))
+        A_t2 = A_t2_link.get_target(schema)
+        # Checking type
+        self.assertTrue(A_t2.issubclass(schema, T2))
+        self.assertTrue(T2.issubclass(schema, A_t2))
+        self.assertTrue(A_t2.issubclass(schema, F))
+        self.assertTrue(A_t2.issubclass(schema, A_t))
+        # Checking properties
+        A_t2.getptr(schema, s_name.UnqualName('a_'))
+        A_t2.getptr(schema, s_name.UnqualName('f'))
+        self.assertIsNone(A_t2.maybe_get_ptr(schema, s_name.UnqualName('a1')))
+        A_t2.getptr(schema, s_name.UnqualName('a2'))
+        # Checking links
+        A_t2_d = A_t2.getptr(schema, s_name.UnqualName('d_'))
+        A_t2_df = A_t2.getptr(schema, s_name.UnqualName('df'))
+        self.assertIsNone(A_t2.maybe_get_ptr(schema, s_name.UnqualName('d1')))
+        A_t2.getptr(schema, s_name.UnqualName('d2'))
+        # Checking link properties
+        A_t2_d.getptr(schema, s_name.UnqualName('d_prop_'))
+        self.assertIsNone(A_t2_d.maybe_get_ptr(schema, 'd_prop1'))
+        self.assertIsNone(A_t2_d.maybe_get_ptr(schema, 'd_prop2'))
+        A_t2_df.getptr(schema, s_name.UnqualName('df_prop'))
+
+        # Checking ((T1 | T2) & F)
         A_tf_link = A.getptr(schema, s_name.UnqualName('tf'))
         A_tf = A_tf_link.get_target(schema)
-
-        # Check that ((T1 | T2) & F) has properties from both parts
-        # of the intersection.
-        A_tf.getptr(schema, s_name.UnqualName('n'))
+        # Checking type
+        self.assertTrue(T1.issubclass(schema, A_tf))
+        self.assertTrue(T2.issubclass(schema, A_tf))
+        self.assertTrue(A_tf.issubclass(schema, F))
+        self.assertTrue(A_tf.issubclass(schema, A_t))
+        # Checking properties
+        A_tf.getptr(schema, s_name.UnqualName('a_'))
         A_tf.getptr(schema, s_name.UnqualName('f'))
-
-        # Ditto for link properties defined on a common link.
-        tfd = A_tf.getptr(schema, s_name.UnqualName('d'))
-        tfd.getptr(schema, s_name.UnqualName('f_d_prop'))
-
-        # t1_d_prop is only present in T1, and so wouldn't be in T1 | T2
-        self.assertIsNone(tfd.maybe_get_ptr(schema, 't1_d_prop'))
-
-        self.assertTrue(
-            A_t2.get_target(schema).issubclass(
-                schema,
-                A_t.get_target(schema)
-            )
-        )
-
-        self.assertTrue(
-            A_tf.issubclass(
-                schema,
-                T2,
-            )
-        )
-
-        self.assertTrue(
-            A_tf.issubclass(
-                schema,
-                F,
-            )
-        )
+        self.assertIsNone(A_tf.maybe_get_ptr(schema, s_name.UnqualName('a1')))
+        self.assertIsNone(A_tf.maybe_get_ptr(schema, s_name.UnqualName('a2')))
+        # Checking links
+        A_tf_d = A_tf.getptr(schema, s_name.UnqualName('d_'))
+        A_tf_df = A_tf.getptr(schema, s_name.UnqualName('df'))
+        self.assertIsNone(A_tf.maybe_get_ptr(schema, s_name.UnqualName('d1')))
+        self.assertIsNone(A_tf.maybe_get_ptr(schema, s_name.UnqualName('d2')))
+        # Checking link properties
+        A_tf_d.getptr(schema, s_name.UnqualName('d_prop_'))
+        self.assertIsNone(A_tf_d.maybe_get_ptr(schema, 'd_prop1'))
+        self.assertIsNone(A_tf_d.maybe_get_ptr(schema, 'd_prop2'))
+        A_tf_df.getptr(schema, s_name.UnqualName('df_prop'))
 
     def test_schema_ancestor_propagation_on_sdl_migration(self):
         schema = self.load_schema("""
@@ -1625,9 +2163,9 @@ class TestSchema(tb.BaseSchemaLoadTest):
 
         obj = schema.get('test::Foo')
         asdf = obj.getptr(schema, s_name.UnqualName('asdf'))
-        expr_ast = asdf.get_expr(schema).qlast
+        expr_ast = asdf.get_expr(schema).parse()
         self.assertEqual(
-            expr_ast.context.name,
+            expr_ast.span.name,
             f'<{asdf.id} expr>'
         )
 
@@ -1637,9 +2175,9 @@ class TestSchema(tb.BaseSchemaLoadTest):
             }
         """)
         x = obj.getptr(schema, s_name.UnqualName('x'))
-        default_ast = x.get_default(schema).qlast
+        default_ast = x.get_default(schema).parse()
         self.assertEqual(
-            default_ast.context.name,
+            default_ast.span.name,
             f'<{x.id} default>'
         )
 
@@ -2047,6 +2585,1099 @@ class TestSchema(tb.BaseSchemaLoadTest):
             alias val_i := {'alice', 'billie'} intersect User.name;
         """
 
+    @tb.must_fail(
+        errors.UnsupportedFeatureError,
+        "unsupported range subtype: test::Age",
+    )
+    def test_schema_range_01(self):
+        """
+        scalar type Age extending int64;
+        type Y {
+            property age_requirement -> range<Age>
+        }
+        """
+
+    def test_schema_enum_01(self):
+        pass
+    test_schema_enum_01.__doc__ = (
+        "scalar type LongLabel extending enum<\n"
+        "    AAAAAAAAAA"
+            "BBBBBBBBBB"
+            "CCCCCCCCCC"
+            "DDDDDDDDDD"
+            "EEEEEEEEEE"
+            "FFFFFFFFFF"
+            "GGG\n"
+        ">"
+    )
+
+    def test_schema_enum_02(self):
+        pass
+    test_schema_enum_02.__doc__ = (
+        "scalar type LongLabel extending enum<\n"
+        "    'AAAAAAAAAA"
+            "BBBBBBBBBB"
+            "CCCCCCCCCC"
+            "DDDDDDDDDD"
+            "EEEEEEEEEE"
+            "FFFFFFFFFF"
+            "GGG'\n"
+        ">"
+    )
+
+    @tb.must_fail(
+        errors.SchemaDefinitionError,
+        "enum labels cannot exceed 63 characters",
+    )
+    def test_schema_enum_03(self):
+        pass
+    test_schema_enum_03.__doc__ = (
+        "scalar type LongLabel extending enum<\n"
+        "    AAAAAAAAAA"
+            "BBBBBBBBBB"
+            "CCCCCCCCCC"
+            "DDDDDDDDDD"
+            "EEEEEEEEEE"
+            "FFFFFFFFFF"
+            "GGGG\n"
+        ">"
+    )
+
+    @tb.must_fail(
+        errors.SchemaDefinitionError,
+        "enum labels cannot exceed 63 characters",
+    )
+    def test_schema_enum_04(self):
+        pass
+    test_schema_enum_04.__doc__ = (
+        "scalar type LongLabel extending enum<\n"
+        "    'AAAAAAAAAA"
+            "BBBBBBBBBB"
+            "CCCCCCCCCC"
+            "DDDDDDDDDD"
+            "EEEEEEEEEE"
+            "FFFFFFFFFF"
+            "GGGG'\n"
+        ">"
+    )
+
+    @tb.must_fail(
+        errors.UnsupportedFeatureError,
+        "cannot use SET OF operator 'std::DISTINCT' "
+        "in a constraint",
+    )
+    def test_schema_constraint_non_singleton_01(self):
+        """
+        type ConstraintNonSingletonTest {
+            property has_bad_constraint -> str {
+                constraint expression on (
+                    distinct __subject__ = __subject__
+                )
+            }
+        }
+        """
+
+    @tb.must_fail(
+        errors.UnsupportedFeatureError,
+        "cannot use SET OF operator 'std::DISTINCT' "
+        "in a constraint",
+    )
+    def test_schema_constraint_non_singleton_02(self):
+        """
+        type ConstraintNonSingletonTest {
+            property has_bad_constraint -> str {
+                constraint exclusive on (
+                    distinct __subject__
+                )
+            }
+        }
+        """
+
+    @tb.must_fail(
+        errors.UnsupportedFeatureError,
+        "cannot use SET OF operator 'std::DISTINCT' "
+        "in a constraint",
+    )
+    def test_schema_constraint_non_singleton_03(self):
+        """
+        type ConstraintNonSingletonTest {
+            property has_bad_constraint -> str;
+
+            constraint exclusive on (distinct .has_bad_constraint);
+        }
+        """
+
+    @tb.must_fail(
+        errors.UnsupportedFeatureError,
+        "set returning operator 'std::DISTINCT' is not supported "
+        "in singleton expressions",
+    )
+    def test_schema_constraint_non_singleton_04(self):
+        """
+        type ConstraintNonSingletonTest {
+            property has_bad_constraint -> str;
+
+            constraint exclusive on (.has_bad_constraint) except (
+                distinct __subject__ = __subject__
+            );
+        }
+        """
+
+    @tb.must_fail(
+        errors.UnsupportedFeatureError,
+        "set returning operator 'std::DISTINCT' is not supported "
+        "in singleton expressions",
+    )
+    def test_schema_constraint_non_singleton_05(self):
+        """
+        abstract constraint bad_constraint {
+            using (distinct __subject__ = __subject__);
+        }
+        """
+
+    @tb.must_fail(
+        errors.UnsupportedFeatureError,
+        "aggregate function 'std::count' is not supported "
+        "in singleton expressions",
+    )
+    def test_schema_constraint_non_singleton_06(self):
+        """
+        abstract constraint bad_constraint {
+            using (count(__subject__) <= 2);
+        }
+        """
+
+    @tb.must_fail(
+        errors.UnsupportedFeatureError,
+        "cannot use SET OF function 'std::count' "
+        "in a constraint",
+    )
+    def test_schema_constraint_non_singleton_07(self):
+        """
+        type Foo;
+        type ConstraintNonSingletonTest {
+            link has_bad_constraint -> Foo {
+                constraint expression on (
+                    count(__subject__) <= 2
+                )
+            }
+        }
+        """
+
+    @tb.must_fail(
+        errors.UnsupportedFeatureError,
+        "cannot use SET OF function 'std::count' "
+        "in a constraint",
+    )
+    def test_schema_constraint_non_singleton_08(self):
+        """
+        type Foo;
+        type ConstraintNonSingletonTest {
+            multi link has_bad_constraint -> Foo {
+                constraint expression on (
+                    count(__subject__) <= 2
+                )
+            }
+        }
+        """
+
+    @tb.must_fail(
+        errors.UnsupportedFeatureError,
+        "cannot use SET OF operator 'std::DISTINCT' "
+        "in a constraint",
+    )
+    def test_schema_constraint_non_singleton_09(self):
+        """
+        type Foo;
+        type ConstraintNonSingletonTest {
+            link has_bad_constraint -> Foo {
+                constraint expression on (
+                    distinct __subject__ = __subject__
+                )
+            }
+        }
+        """
+
+    @tb.must_fail(
+        errors.UnsupportedFeatureError,
+        "cannot use SET OF operator 'std::DISTINCT' "
+        "in a constraint",
+    )
+    def test_schema_constraint_non_singleton_10(self):
+        """
+        type Foo;
+        type ConstraintNonSingletonTest {
+            multi link has_bad_constraint -> Foo {
+                constraint expression on (
+                    distinct __subject__ = __subject__
+                )
+            }
+        }
+        """
+
+    def test_schema_constraint_singleton_01a(self):
+        # `IN` allowed in singleton
+        """
+        type X {
+            property a -> int64 {
+                constraint expression on (
+                    __subject__ in {1}
+                );
+            }
+        };
+        """
+
+    @tb.must_fail(
+        errors.UnsupportedFeatureError,
+        "cannot use SET OF operator 'std::IN' "
+        "in a constraint",
+    )
+    def test_schema_constraint_singleton_01b(self):
+        """
+        type X {
+            multi property a -> int64 {
+                constraint expression on (
+                    __subject__ in {1}
+                );
+            }
+        };
+        """
+
+    def test_schema_constraint_singleton_02a(self):
+        # `NOT IN` allowed in singleton
+        """
+        type X {
+            property a -> int64 {
+                constraint expression on (
+                    __subject__ not in {1}
+                );
+            }
+        };
+        """
+
+    @tb.must_fail(
+        errors.UnsupportedFeatureError,
+        "cannot use SET OF operator 'std::NOT IN' "
+        "in a constraint",
+    )
+    def test_schema_constraint_singleton_02b(self):
+        """
+        type X {
+            multi property a -> int64 {
+                constraint expression on (
+                    __subject__ not in {1}
+                );
+            }
+        };
+        """
+
+    def test_schema_constraint_singleton_03a(self):
+        # `EXISTS` allowed in singleton
+        """
+        type X {
+            property a -> int64 {
+                constraint expression on (
+                    exists(__subject__)
+                );
+            }
+        };
+        """
+
+    @tb.must_fail(
+        errors.UnsupportedFeatureError,
+        "cannot use SET OF operator 'std::EXISTS' "
+        "in a constraint",
+    )
+    def test_schema_constraint_singleton_03b(self):
+        """
+        type Foo;
+        type ConstraintNonSingletonTest {
+            multi link has_bad_constraint -> Foo {
+                constraint expression on (
+                    exists(__subject__)
+                )
+            }
+        }
+        """
+
+    def test_schema_constraint_singleton_04a(self):
+        # `??` allowed in singleton
+        """
+        type X {
+            property a -> int64 {
+                constraint expression on (
+                    __subject__ ?? 1 = 0
+                );
+            }
+        };
+        """
+
+    @tb.must_fail(
+        errors.UnsupportedFeatureError,
+        r"cannot use SET OF operator 'std::\?\?' "
+        r"in a constraint",
+    )
+    def test_schema_constraint_singleton_04b(self):
+        """
+        type X {
+            multi property a -> int64 {
+                constraint expression on (
+                    __subject__ ?? 1 = 0
+                );
+            }
+        };
+        """
+
+    def test_schema_constraint_singleton_05a(self):
+        # `IF` allowed in singleton
+        """
+        type X {
+            property a -> tuple<bool, int64> {
+                constraint expression on (
+                    __subject__.1 < 0
+                    if __subject__.0 else
+                    __subject__.1 >= 0
+                );
+            }
+        };
+        """
+
+    @tb.must_fail(
+        errors.UnsupportedFeatureError,
+        "cannot use SET OF operator 'std::IF' "
+        "in a constraint",
+    )
+    def test_schema_constraint_singleton_05b(self):
+        """
+        type X {
+            multi property a -> tuple<bool, int64> {
+                constraint expression on (
+                    __subject__.1 < 0
+                    if __subject__.0 else
+                    __subject__.1 >= 0
+                );
+            }
+        };
+        """
+
+    @tb.must_fail(
+        errors.SchemaDefinitionError,
+        "cannot use SET OF operator 'std::DISTINCT' "
+        "in an index expression",
+    )
+    def test_schema_index_non_singleton_01(self):
+        """
+        type IndexNonSingletonTest {
+            property has_bad_index -> str;
+
+            index on (distinct .has_bad_index)
+        }
+        """
+
+    @tb.must_fail(
+        errors.SchemaDefinitionError,
+        "cannot use SET OF function 'std::count' "
+        "in an index expression",
+    )
+    def test_schema_index_non_singleton_02(self):
+        """
+        type IndexNonSingletonTest {
+            property has_bad_index -> str;
+
+            index on (count(.has_bad_index))
+        }
+        """
+
+    @tb.must_fail(
+        errors.SchemaError,
+        "cannot create union \\(test::X | test::Y\\) with property 'a' using "
+        "incompatible types std::int64, std::str",
+    )
+    def test_schema_incompatible_union_01(self):
+        """
+        type X {
+            property a -> int64;
+        }
+        type Y {
+            property a -> str;
+        }
+        type Z {
+            link xy -> X | Y;
+        }
+        """
+
+    @tb.must_fail(
+        errors.SchemaError,
+        "cannot create union \\(test::X | test::Y\\) with link 'a' using "
+        "incompatible types std::int64, test::A",
+    )
+    def test_schema_incompatible_union_02(self):
+        """
+        type A;
+        type X {
+            property a -> int64;
+        }
+        type Y {
+            link a -> A;
+        }
+        type Z {
+            link xy -> X | Y;
+        }
+        """
+
+    @tb.must_fail(
+        errors.SchemaError,
+        "cannot create union \\(test::X | test::Y\\) with link 'a' with "
+        "property 'b' using incompatible types std::int64, std::str",
+    )
+    def test_schema_incompatible_union_03(self):
+        """
+        type A;
+        type X {
+            link a -> A {
+                b -> int64
+            };
+        }
+        type Y {
+            link a -> A {
+                b -> str
+            }
+        }
+        type Z {
+            link xy -> X | Y;
+        }
+        """
+
+    @tb.must_fail(
+        errors.SchemaError,
+        "query parameters are not allowed in schemas",
+    )
+    def test_schema_query_parameter_01(self):
+        """
+        type Foo { foo := <int64>$0 }
+        """
+
+    @tb.must_fail(
+        errors.SchemaError,
+        "query parameters are not allowed in schemas",
+    )
+    def test_schema_query_parameter_02(self):
+        """
+        global foo := <int64>$0
+        """
+
+    @tb.must_fail(
+        errors.InvalidReferenceError,
+        "type 'test::C' does not exist",
+    )
+    def test_schema_unknown_typename_01(self):
+        """
+        type A;
+        type B {
+            link a -> A;
+            property x := <C>.a;
+        }
+        """
+
+    @tb.must_fail(
+        errors.InvalidReferenceError,
+        "type 'test::C' does not exist",
+    )
+    def test_schema_unknown_typename_02(self):
+        """
+        type A;
+        type B {
+            link a -> A;
+            property x := .a is C;
+        }
+        """
+
+    @tb.must_fail(
+        errors.InvalidReferenceError,
+        "type 'test::null' does not exist",
+        hint='Did you mean to use `exists` to check if a set is empty?'
+    )
+    def test_schema_unknown_typename_03(self):
+        """
+        type A;
+        type B {
+            link a -> A;
+            property x := .a is null;
+        }
+        """
+
+    @tb.must_fail(
+        errors.InvalidReferenceError,
+        "type 'test::NONE' does not exist",
+        hint='Did you mean to use `exists` to check if a set is empty?'
+    )
+    def test_schema_unknown_typename_04(self):
+        """
+        type A;
+        type B {
+            link a -> A;
+            property x := .a is NONE;
+        }
+        """
+
+    @tb.must_fail(
+        errors.InvalidReferenceError,
+        "type 'test::C' does not exist",
+    )
+    def test_schema_unknown_typename_05(self):
+        """
+        type B {
+            property x := (introspect C).name;
+        }
+        """
+
+    def _run_migration_to(self, schema_text: str) -> None:
+        migration_text = f'''
+            START MIGRATION TO {{
+                {schema_text}
+            }};
+            POPULATE MIGRATION;
+            COMMIT MIGRATION;
+        '''
+
+        self.run_ddl(self.schema, migration_text)
+
+    def _check_valid_queries(
+        self,
+        schema_text: str,
+        valid_queries: list[str],
+    ) -> None:
+
+        for query in valid_queries:
+            query_text = f'''
+                module default {{ alias query := ({query}); }}
+            '''
+            self._run_migration_to(schema_text + query_text)
+
+    def _check_invalid_queries(
+        self,
+        schema_text: str,
+        invalid_queries: list[str],
+        error_type: Type,
+        error_message: str,
+    ) -> None:
+        for query in invalid_queries:
+            query_text = f'''
+                module default {{ alias query := ({query}); }}
+            '''
+            with self.assertRaisesRegex(error_type, error_message):
+                self._run_migration_to(schema_text + query_text)
+
+    def test_schema_with_module_01(self):
+        schema_text = f'''
+            module dummy {{}}
+            module A {{
+                type Foo;
+            }}
+        '''
+        NO_ERR = 1
+        REF_ERR = 2
+
+        queries = []
+
+        with_mod = ''
+        queries += [
+            (REF_ERR, with_mod + 'SELECT <Foo>{}'),
+            (REF_ERR, with_mod + 'SELECT <std::Foo>{}'),
+            (REF_ERR, with_mod + 'SELECT <dummy::Foo>{}'),
+            (NO_ERR, with_mod + 'SELECT <A::Foo>{}'),
+        ]
+        with_mod = 'WITH MODULE dummy '
+        queries += [
+            (REF_ERR, with_mod + 'SELECT <Foo>{}'),
+            (REF_ERR, with_mod + 'SELECT <std::Foo>{}'),
+            (REF_ERR, with_mod + 'SELECT <dummy::Foo>{}'),
+            (NO_ERR, with_mod + 'SELECT <A::Foo>{}'),
+        ]
+        with_mod = 'WITH MODULE std '
+        queries += [
+            (REF_ERR, with_mod + 'SELECT <Foo>{}'),
+            (REF_ERR, with_mod + 'SELECT <std::Foo>{}'),
+            (REF_ERR, with_mod + 'SELECT <dummy::Foo>{}'),
+            (NO_ERR, with_mod + 'SELECT <A::Foo>{}'),
+        ]
+        with_mod = 'WITH MODULE A '
+        queries += [
+            (NO_ERR, with_mod + 'SELECT <Foo>{}'),
+            (REF_ERR, with_mod + 'SELECT <std::Foo>{}'),
+            (REF_ERR, with_mod + 'SELECT <dummy::Foo>{}'),
+            (NO_ERR, with_mod + 'SELECT <A::Foo>{}'),
+        ]
+        with_mod = 'WITH dum as MODULE dummy '
+        queries += [
+            (REF_ERR, with_mod + 'SELECT <Foo>{}'),
+            (REF_ERR, with_mod + 'SELECT <std::Foo>{}'),
+            (REF_ERR, with_mod + 'SELECT <dummy::Foo>{}'),
+            (NO_ERR, with_mod + 'SELECT <A::Foo>{}'),
+            (REF_ERR, with_mod + 'SELECT <dum::Foo>{}'),
+        ]
+        with_mod = 'WITH AAA as MODULE A '
+        queries += [
+            (REF_ERR, with_mod + 'SELECT <Foo>{}'),
+            (REF_ERR, with_mod + 'SELECT <std::Foo>{}'),
+            (REF_ERR, with_mod + 'SELECT <dummy::Foo>{}'),
+            (NO_ERR, with_mod + 'SELECT <A::Foo>{}'),
+            (NO_ERR, with_mod + 'SELECT <AAA::Foo>{}'),
+        ]
+        with_mod = 'WITH s as MODULE std '
+        queries += [
+            (REF_ERR, with_mod + 'SELECT <Foo>{}'),
+            (REF_ERR, with_mod + 'SELECT <std::Foo>{}'),
+            (REF_ERR, with_mod + 'SELECT <dummy::Foo>{}'),
+            (NO_ERR, with_mod + 'SELECT <A::Foo>{}'),
+            (REF_ERR, with_mod + 'SELECT <s::Foo>{}'),
+        ]
+        with_mod = 'WITH std as MODULE A '
+        queries += [
+            (REF_ERR, with_mod + 'SELECT <Foo>{}'),
+            (NO_ERR, with_mod + 'SELECT <std::Foo>{}'),
+            (REF_ERR, with_mod + 'SELECT <dummy::Foo>{}'),
+            (NO_ERR, with_mod + 'SELECT <A::Foo>{}'),
+        ]
+        with_mod = 'WITH A as MODULE std '
+        queries += [
+            (REF_ERR, with_mod + 'SELECT <Foo>{}'),
+            (REF_ERR, with_mod + 'SELECT <std::Foo>{}'),
+            (REF_ERR, with_mod + 'SELECT <dummy::Foo>{}'),
+            (REF_ERR, with_mod + 'SELECT <A::Foo>{}'),
+        ]
+
+        self._check_valid_queries(
+            schema_text,
+            [query for error, query in queries if error == NO_ERR],
+        )
+        self._check_invalid_queries(
+            schema_text,
+            [query for error, query in queries if error == REF_ERR],
+            errors.InvalidReferenceError,
+            "Foo' does not exist",
+        )
+
+    def test_schema_with_module_02(self):
+        schema_text = f'''
+            module dummy {{}}
+            module A {{
+                function abs(x: int64) -> int64 using (x);
+            }}
+        '''
+        NO_ERR = 1
+        REF_ERR = 2
+
+        queries = []
+
+        with_mod = ''
+        queries += [
+            (REF_ERR, with_mod + 'SELECT abs(1)'),
+            (REF_ERR, with_mod + 'SELECT std::abs(1)'),
+            (REF_ERR, with_mod + 'SELECT dummy::abs(1)'),
+            (NO_ERR, with_mod + 'SELECT A::abs(1)'),
+        ]
+        with_mod = 'WITH MODULE dummy '
+        queries += [
+            (REF_ERR, with_mod + 'SELECT abs(1)'),
+            (REF_ERR, with_mod + 'SELECT std::abs(1)'),
+            (REF_ERR, with_mod + 'SELECT dummy::abs(1)'),
+            (NO_ERR, with_mod + 'SELECT A::abs(1)'),
+        ]
+        with_mod = 'WITH MODULE std '
+        queries += [
+            (REF_ERR, with_mod + 'SELECT abs(1)'),
+            (REF_ERR, with_mod + 'SELECT std::abs(1)'),
+            (REF_ERR, with_mod + 'SELECT dummy::abs(1)'),
+            (NO_ERR, with_mod + 'SELECT A::abs(1)'),
+        ]
+        with_mod = 'WITH MODULE A '
+        queries += [
+            (NO_ERR, with_mod + 'SELECT abs(1)'),
+            (REF_ERR, with_mod + 'SELECT std::abs(1)'),
+            (REF_ERR, with_mod + 'SELECT dummy::abs(1)'),
+            (NO_ERR, with_mod + 'SELECT A::abs(1)'),
+        ]
+        with_mod = 'WITH dum as MODULE dummy '
+        queries += [
+            (REF_ERR, with_mod + 'SELECT abs(1)'),
+            (REF_ERR, with_mod + 'SELECT std::abs(1)'),
+            (REF_ERR, with_mod + 'SELECT dummy::abs(1)'),
+            (NO_ERR, with_mod + 'SELECT A::abs(1)'),
+            (REF_ERR, with_mod + 'SELECT dum::abs(1)'),
+        ]
+        with_mod = 'WITH AAA as MODULE A '
+        queries += [
+            (REF_ERR, with_mod + 'SELECT abs(1)'),
+            (REF_ERR, with_mod + 'SELECT std::abs(1)'),
+            (REF_ERR, with_mod + 'SELECT dummy::abs(1)'),
+            (NO_ERR, with_mod + 'SELECT A::abs(1)'),
+            (NO_ERR, with_mod + 'SELECT AAA::abs(1)'),
+        ]
+        with_mod = 'WITH s as MODULE std '
+        queries += [
+            (REF_ERR, with_mod + 'SELECT abs(1)'),
+            (REF_ERR, with_mod + 'SELECT std::abs(1)'),
+            (REF_ERR, with_mod + 'SELECT dummy::abs(1)'),
+            (NO_ERR, with_mod + 'SELECT A::abs(1)'),
+            (REF_ERR, with_mod + 'SELECT s::abs(1)'),
+        ]
+        with_mod = 'WITH std as MODULE A '
+        queries += [
+            (REF_ERR, with_mod + 'SELECT abs(1)'),
+            (NO_ERR, with_mod + 'SELECT std::abs(1)'),
+            (REF_ERR, with_mod + 'SELECT dummy::abs(1)'),
+            (NO_ERR, with_mod + 'SELECT A::abs(1)'),
+        ]
+        with_mod = 'WITH A as MODULE std '
+        queries += [
+            (REF_ERR, with_mod + 'SELECT abs(1)'),
+            (REF_ERR, with_mod + 'SELECT std::abs(1)'),
+            (REF_ERR, with_mod + 'SELECT dummy::abs(1)'),
+            (REF_ERR, with_mod + 'SELECT A::abs(1)'),
+        ]
+
+        self._check_valid_queries(
+            schema_text,
+            [query for error, query in queries if error == NO_ERR],
+        )
+        self._check_invalid_queries(
+            schema_text,
+            [query for error, query in queries if error == REF_ERR],
+            errors.InvalidReferenceError,
+            "abs' does not exist",
+        )
+
+    def test_schema_with_module_03(self):
+        schema_text = f'''
+            module dummy {{}}
+        '''
+        NO_ERR = 1
+        REF_ERR = 2
+
+        queries = []
+
+        with_mod = ''
+        queries += [
+            (NO_ERR, with_mod + 'SELECT <int64>{} = 1'),
+            (NO_ERR, with_mod + 'SELECT <std::int64>{} = 1'),
+            (REF_ERR, with_mod + 'SELECT <default::int64>{} = 1'),
+            (REF_ERR, with_mod + 'SELECT <dummy::int64>{} = 1'),
+        ]
+        with_mod = 'WITH MODULE dummy '
+        queries += [
+            (NO_ERR, with_mod + 'SELECT <int64>{} = 1'),
+            (NO_ERR, with_mod + 'SELECT <std::int64>{} = 1'),
+            (REF_ERR, with_mod + 'SELECT <default::int64>{} = 1'),
+            (REF_ERR, with_mod + 'SELECT <dummy::int64>{} = 1'),
+        ]
+        with_mod = 'WITH MODULE std '
+        queries += [
+            (NO_ERR, with_mod + 'SELECT <int64>{} = 1'),
+            (NO_ERR, with_mod + 'SELECT <std::int64>{} = 1'),
+            (REF_ERR, with_mod + 'SELECT <default::int64>{} = 1'),
+            (REF_ERR, with_mod + 'SELECT <dummy::int64>{} = 1'),
+        ]
+        with_mod = 'WITH dum as MODULE dummy '
+        queries += [
+            (NO_ERR, with_mod + 'SELECT <int64>{} = 1'),
+            (NO_ERR, with_mod + 'SELECT <std::int64>{} = 1'),
+            (REF_ERR, with_mod + 'SELECT <default::int64>{} = 1'),
+            (REF_ERR, with_mod + 'SELECT <dummy::int64>{} = 1'),
+            (REF_ERR, with_mod + 'SELECT <dum::int64>{} = 1'),
+        ]
+        with_mod = 'WITH def as MODULE default '
+        queries += [
+            (NO_ERR, with_mod + 'SELECT <int64>{} = 1'),
+            (NO_ERR, with_mod + 'SELECT <std::int64>{} = 1'),
+            (REF_ERR, with_mod + 'SELECT <default::int64>{} = 1'),
+            (REF_ERR, with_mod + 'SELECT <dummy::int64>{} = 1'),
+            (REF_ERR, with_mod + 'SELECT <def::int64>{} = 1'),
+        ]
+        with_mod = 'WITH s as MODULE std '
+        queries += [
+            (NO_ERR, with_mod + 'SELECT <int64>{} = 1'),
+            (NO_ERR, with_mod + 'SELECT <std::int64>{} = 1'),
+            (REF_ERR, with_mod + 'SELECT <default::int64>{} = 1'),
+            (REF_ERR, with_mod + 'SELECT <dummy::int64>{} = 1'),
+            (NO_ERR, with_mod + 'SELECT <s::int64>{} = 1'),
+        ]
+        with_mod = 'WITH std as MODULE dummy '
+        queries += [
+            (NO_ERR, with_mod + 'SELECT <int64>{} = 1'),
+            (REF_ERR, with_mod + 'SELECT <std::int64>{} = 1'),
+            (REF_ERR, with_mod + 'SELECT <default::int64>{} = 1'),
+            (REF_ERR, with_mod + 'SELECT <dummy::int64>{} = 1'),
+        ]
+
+        self._check_valid_queries(
+            schema_text,
+            [query for error, query in queries if error == NO_ERR],
+        )
+        self._check_invalid_queries(
+            schema_text,
+            [query for error, query in queries if error == REF_ERR],
+            errors.InvalidReferenceError,
+            "int64' does not exist",
+        )
+
+    def test_schema_with_module_04(self):
+        schema_text = f'''
+            module dummy {{}}
+            module default {{ type int64; }}
+        '''
+
+        NO_ERR = 1
+        REF_ERR = 2
+        TYPE_ERR = 3
+
+        queries = []
+
+        with_mod = ''
+        queries += [
+            (TYPE_ERR, with_mod + 'SELECT <int64>{} = 1'),
+            (NO_ERR, with_mod + 'SELECT <std::int64>{} = 1'),
+            (TYPE_ERR, with_mod + 'SELECT <default::int64>{} = 1'),
+            (REF_ERR, with_mod + 'SELECT <dummy::int64>{} = 1'),
+        ]
+        with_mod = 'WITH MODULE dummy '
+        queries += [
+            (NO_ERR, with_mod + 'SELECT <int64>{} = 1'),
+            (NO_ERR, with_mod + 'SELECT <std::int64>{} = 1'),
+            (TYPE_ERR, with_mod + 'SELECT <default::int64>{} = 1'),
+            (REF_ERR, with_mod + 'SELECT <dummy::int64>{} = 1'),
+        ]
+        with_mod = 'WITH MODULE std '
+        queries += [
+            (NO_ERR, with_mod + 'SELECT <int64>{} = 1'),
+            (NO_ERR, with_mod + 'SELECT <std::int64>{} = 1'),
+            (TYPE_ERR, with_mod + 'SELECT <default::int64>{} = 1'),
+            (REF_ERR, with_mod + 'SELECT <dummy::int64>{} = 1'),
+        ]
+        with_mod = 'WITH dum as MODULE dummy '
+        queries += [
+            (TYPE_ERR, with_mod + 'SELECT <int64>{} = 1'),
+            (NO_ERR, with_mod + 'SELECT <std::int64>{} = 1'),
+            (TYPE_ERR, with_mod + 'SELECT <default::int64>{} = 1'),
+            (REF_ERR, with_mod + 'SELECT <dummy::int64>{} = 1'),
+            (REF_ERR, with_mod + 'SELECT <dum::int64>{} = 1'),
+        ]
+        with_mod = 'WITH def as MODULE default '
+        queries += [
+            (TYPE_ERR, with_mod + 'SELECT <int64>{} = 1'),
+            (NO_ERR, with_mod + 'SELECT <std::int64>{} = 1'),
+            (TYPE_ERR, with_mod + 'SELECT <default::int64>{} = 1'),
+            (REF_ERR, with_mod + 'SELECT <dummy::int64>{} = 1'),
+            (TYPE_ERR, with_mod + 'SELECT <def::int64>{} = 1'),
+        ]
+        with_mod = 'WITH s as MODULE std '
+        queries += [
+            (TYPE_ERR, with_mod + 'SELECT <int64>{} = 1'),
+            (NO_ERR, with_mod + 'SELECT <std::int64>{} = 1'),
+            (TYPE_ERR, with_mod + 'SELECT <default::int64>{} = 1'),
+            (REF_ERR, with_mod + 'SELECT <dummy::int64>{} = 1'),
+            (NO_ERR, with_mod + 'SELECT <s::int64>{} = 1'),
+        ]
+        with_mod = 'WITH std as MODULE dummy '
+        queries += [
+            (TYPE_ERR, with_mod + 'SELECT <int64>{} = 1'),
+            (REF_ERR, with_mod + 'SELECT <std::int64>{} = 1'),
+            (TYPE_ERR, with_mod + 'SELECT <default::int64>{} = 1'),
+            (REF_ERR, with_mod + 'SELECT <dummy::int64>{} = 1'),
+        ]
+        with_mod = 'WITH std as MODULE default '
+        queries += [
+            (TYPE_ERR, with_mod + 'SELECT <int64>{} = 1'),
+            (TYPE_ERR, with_mod + 'SELECT <std::int64>{} = 1'),
+            (TYPE_ERR, with_mod + 'SELECT <default::int64>{} = 1'),
+            (REF_ERR, with_mod + 'SELECT <dummy::int64>{} = 1'),
+        ]
+
+        self._check_valid_queries(
+            schema_text,
+            [query for error, query in queries if error == NO_ERR],
+        )
+        self._check_invalid_queries(
+            schema_text,
+            [query for error, query in queries if error == REF_ERR],
+            errors.InvalidReferenceError,
+            "int64' does not exist",
+        )
+        self._check_invalid_queries(
+            schema_text,
+            [query for error, query in queries if error == TYPE_ERR],
+            errors.InvalidTypeError,
+            "operator '=' cannot be applied",
+        )
+
+    def test_schema_with_module_05(self):
+        schema_text = f'''
+            module dummy {{}}
+        '''
+
+        NO_ERR = 1
+        REF_ERR = 2
+
+        queries = []
+
+        with_mod = ''
+        queries += [
+            (REF_ERR, with_mod + 'select abs(1)'),
+            (NO_ERR, with_mod + 'select _test::abs(1)'),
+            (NO_ERR, with_mod + 'select std::_test::abs(1)'),
+        ]
+        with_mod = 'with module dummy '
+        queries += [
+            (REF_ERR, with_mod + 'select abs(1)'),
+            (NO_ERR, with_mod + 'select _test::abs(1)'),
+            (NO_ERR, with_mod + 'select std::_test::abs(1)'),
+        ]
+        with_mod = 'with module _test '
+        queries += [
+            (NO_ERR, with_mod + 'select abs(1)'),
+            (NO_ERR, with_mod + 'select _test::abs(1)'),
+            (NO_ERR, with_mod + 'select std::_test::abs(1)'),
+        ]
+        with_mod = 'with module std '
+        queries += [
+            (REF_ERR, with_mod + 'select abs(1)'),
+            (NO_ERR, with_mod + 'select _test::abs(1)'),
+            (NO_ERR, with_mod + 'select std::_test::abs(1)'),
+        ]
+        with_mod = 'with module std::_test '
+        queries += [
+            (NO_ERR, with_mod + 'select abs(1)'),
+            (NO_ERR, with_mod + 'select _test::abs(1)'),
+            (NO_ERR, with_mod + 'select std::_test::abs(1)'),
+        ]
+        with_mod = 'with t as module _test '
+        queries += [
+            (REF_ERR, with_mod + 'select abs(1)'),
+            (NO_ERR, with_mod + 'select _test::abs(1)'),
+            (NO_ERR, with_mod + 'select std::_test::abs(1)'),
+            (NO_ERR, with_mod + 'select t::abs(1)'),
+        ]
+        with_mod = 'with s as module std '
+        queries += [
+            (REF_ERR, with_mod + 'select abs(1)'),
+            (NO_ERR, with_mod + 'select _test::abs(1)'),
+            (NO_ERR, with_mod + 'select std::_test::abs(1)'),
+            (REF_ERR, with_mod + 'select s::abs(1)'),
+        ]
+        with_mod = 'with st as module std::_test '
+        queries += [
+            (REF_ERR, with_mod + 'select abs(1)'),
+            (NO_ERR, with_mod + 'select _test::abs(1)'),
+            (NO_ERR, with_mod + 'select std::_test::abs(1)'),
+            (NO_ERR, with_mod + 'select st::abs(1)'),
+        ]
+        with_mod = 'with std as module _test '
+        queries += [
+            (REF_ERR, with_mod + 'select abs(1)'),
+            (NO_ERR, with_mod + 'select _test::abs(1)'),
+            (REF_ERR, with_mod + 'select std::_test::abs(1)'),
+            (NO_ERR, with_mod + 'select std::abs(1)'),
+        ]
+
+        self._check_valid_queries(
+            schema_text,
+            [query for error, query in queries if error == NO_ERR],
+        )
+        self._check_invalid_queries(
+            schema_text,
+            [query for error, query in queries if error == REF_ERR],
+            errors.InvalidReferenceError,
+            "abs' does not exist",
+        )
+
+    def test_schema_with_module_06(self):
+        schema_text = f'''
+            module dummy {{}}
+            module _test {{}}
+        '''
+
+        NO_ERR = 1
+        REF_ERR = 2
+
+        queries = []
+
+        with_mod = ''
+        queries += [
+            (REF_ERR, with_mod + 'select abs(1)'),
+            (REF_ERR, with_mod + 'select _test::abs(1)'),
+            (NO_ERR, with_mod + 'select std::_test::abs(1)'),
+        ]
+        with_mod = 'with module dummy '
+        queries += [
+            (REF_ERR, with_mod + 'select abs(1)'),
+            (REF_ERR, with_mod + 'select _test::abs(1)'),
+            (NO_ERR, with_mod + 'select std::_test::abs(1)'),
+        ]
+        with_mod = 'with module _test '
+        queries += [
+            (REF_ERR, with_mod + 'select abs(1)'),
+            (REF_ERR, with_mod + 'select _test::abs(1)'),
+            (NO_ERR, with_mod + 'select std::_test::abs(1)'),
+        ]
+        with_mod = 'with module std '
+        queries += [
+            (REF_ERR, with_mod + 'select abs(1)'),
+            (REF_ERR, with_mod + 'select _test::abs(1)'),
+            (NO_ERR, with_mod + 'select std::_test::abs(1)'),
+        ]
+        with_mod = 'with module std::_test '
+        queries += [
+            (NO_ERR, with_mod + 'select abs(1)'),
+            (REF_ERR, with_mod + 'select _test::abs(1)'),
+            (NO_ERR, with_mod + 'select std::_test::abs(1)'),
+        ]
+        with_mod = 'with t as module _test '
+        queries += [
+            (REF_ERR, with_mod + 'select abs(1)'),
+            (REF_ERR, with_mod + 'select _test::abs(1)'),
+            (NO_ERR, with_mod + 'select std::_test::abs(1)'),
+            (REF_ERR, with_mod + 'select t::abs(1)'),
+        ]
+        with_mod = 'with s as module std '
+        queries += [
+            (REF_ERR, with_mod + 'select abs(1)'),
+            (REF_ERR, with_mod + 'select _test::abs(1)'),
+            (NO_ERR, with_mod + 'select std::_test::abs(1)'),
+            (REF_ERR, with_mod + 'select s::abs(1)'),
+        ]
+        with_mod = 'with st as module std::_test '
+        queries += [
+            (REF_ERR, with_mod + 'select abs(1)'),
+            (REF_ERR, with_mod + 'select _test::abs(1)'),
+            (NO_ERR, with_mod + 'select std::_test::abs(1)'),
+            (NO_ERR, with_mod + 'select st::abs(1)'),
+        ]
+        with_mod = 'with std as module _test '
+        queries += [
+            (REF_ERR, with_mod + 'select abs(1)'),
+            (REF_ERR, with_mod + 'select _test::abs(1)'),
+            (REF_ERR, with_mod + 'select std::_test::abs(1)'),
+            (REF_ERR, with_mod + 'select std::abs(1)'),
+        ]
+        with_mod = 'with std as module std::_test '
+        queries += [
+            (REF_ERR, with_mod + 'select abs(1)'),
+            (REF_ERR, with_mod + 'select _test::abs(1)'),
+            (REF_ERR, with_mod + 'select std::_test::abs(1)'),
+            (NO_ERR, with_mod + 'select std::abs(1)'),
+        ]
+
+        self._check_valid_queries(
+            schema_text,
+            [query for error, query in queries if error == NO_ERR],
+        )
+        self._check_invalid_queries(
+            schema_text,
+            [query for error, query in queries if error == REF_ERR],
+            errors.InvalidReferenceError,
+            "abs' does not exist",
+        )
+
 
 class TestGetMigration(tb.BaseSchemaLoadTest):
     """Test migration deparse consistency.
@@ -2065,9 +3696,9 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
     def _assert_migration_consistency(
         self,
         schema_text: str,
-        multi_module: bool = False,
+        explicit_modules: bool = False,
     ) -> s_schema.Schema:
-        if multi_module:
+        if explicit_modules:
             migration_text = f'''
                 START MIGRATION TO {{
                     {schema_text}
@@ -2161,6 +3792,7 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
         # different evolution branches.
         base_schema = self.load_schema('')
 
+        schemas = []
         # Evolve a schema in a series of migrations.
         multi_migration = base_schema
         for i, state in enumerate(migrations):
@@ -2180,6 +3812,7 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
 
             # Perform incremental migration.
             multi_migration = self.run_ddl(multi_migration, mig_text, 'test')
+            schemas.append(multi_migration)
 
             diff = s_ddl.delta_schemas(multi_migration, cur_state)
 
@@ -2192,6 +3825,8 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
                     f'incremental migration on step {i + 1}{note}:\n'
                     f'{markup.dumps(diff)}\n'
                 )
+
+        return schemas
 
     def test_schema_get_migration_01(self):
         schema = r'''
@@ -3152,6 +4787,40 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
 
         self._assert_migration_consistency(schema)
 
+    def test_schema_get_migration_54(self):
+        schema = r'''
+            type Venue {
+                multi link meta_bookings := .<venue[is MetaBooking];
+            }
+            abstract type MetaBooking {
+                link venue -> Venue;
+            }
+
+            type Booking extending MetaBooking;
+            type ExternalBooking extending MetaBooking {
+                overloaded link venue -> Venue;
+            }
+        '''
+
+        self._assert_migration_consistency(schema)
+
+    def test_schema_get_migration_55(self):
+        # In Bar, `.foo.b` refers to `.a`. Ensure that when tracing, `.a` is
+        # correctly `Foo.a`, otherwise a recurisve definition is found.
+        schema = r'''
+            type Foo {
+                property a -> str;
+                property b := .a;
+            }
+
+            type Bar {
+                property a := .foo.b;
+                link foo -> Foo;
+            }
+        '''
+
+        self._assert_migration_consistency(schema)
+
     def test_schema_get_migration_multi_module_01(self):
         schema = r'''
             # The two declared types declared are from different
@@ -3169,7 +4838,7 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
             }
         '''
 
-        self._assert_migration_consistency(schema, multi_module=True)
+        self._assert_migration_consistency(schema, explicit_modules=True)
 
     def test_schema_get_migration_multi_module_02(self):
         schema = r'''
@@ -3184,7 +4853,7 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
             };
         '''
 
-        self._assert_migration_consistency(schema, multi_module=True)
+        self._assert_migration_consistency(schema, explicit_modules=True)
 
     def test_schema_get_migration_multi_module_03(self):
         # Test abstract and concrete constraints order of declaration,
@@ -3203,7 +4872,7 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
         }
         '''
 
-        self._assert_migration_consistency(schema, multi_module=True)
+        self._assert_migration_consistency(schema, explicit_modules=True)
 
     def test_schema_get_migration_multi_module_04(self):
         # View and type from different modules
@@ -3215,7 +4884,7 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
             }
         '''
 
-        self._assert_migration_consistency(schema, multi_module=True)
+        self._assert_migration_consistency(schema, explicit_modules=True)
 
     def test_schema_get_migration_multi_module_05(self):
         # View and type from different modules
@@ -3227,7 +4896,7 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
             }
         '''
 
-        self._assert_migration_consistency(schema, multi_module=True)
+        self._assert_migration_consistency(schema, explicit_modules=True)
 
     def test_schema_get_migration_multi_module_06(self):
         # Type and annotation from different modules.
@@ -3240,7 +4909,7 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
         abstract annotation other::my_anno;
         '''
 
-        self._assert_migration_consistency(schema, multi_module=True)
+        self._assert_migration_consistency(schema, explicit_modules=True)
 
     def test_schema_get_migration_multi_module_07(self):
         # Type and annotation from different modules.
@@ -3254,7 +4923,7 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
         abstract annotation other::my_anno;
         '''
 
-        self._assert_migration_consistency(schema, multi_module=True)
+        self._assert_migration_consistency(schema, explicit_modules=True)
 
     def test_schema_get_migration_multi_module_08(self):
         schema = r'''
@@ -3268,7 +4937,7 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
         }
         '''
 
-        self._assert_migration_consistency(schema, multi_module=True)
+        self._assert_migration_consistency(schema, explicit_modules=True)
 
     def test_schema_get_migration_multi_module_09(self):
         schema = r'''
@@ -3284,7 +4953,7 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
         }
         '''
 
-        self._assert_migration_consistency(schema, multi_module=True)
+        self._assert_migration_consistency(schema, explicit_modules=True)
 
     def test_schema_get_migration_multi_module_10(self):
         # Test prop default and function order of definition.
@@ -3300,7 +4969,7 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
         }
         '''
 
-        self._assert_migration_consistency(schema, multi_module=True)
+        self._assert_migration_consistency(schema, explicit_modules=True)
 
     def test_schema_get_migration_multi_module_11(self):
         # Test prop default and function order of definition.
@@ -3317,7 +4986,7 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
         }
         '''
 
-        self._assert_migration_consistency(schema, multi_module=True)
+        self._assert_migration_consistency(schema, explicit_modules=True)
 
     def test_schema_get_migration_multi_module_12(self):
         # Test prop default and function order of definition.
@@ -3337,7 +5006,75 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
         }
         '''
 
-        self._assert_migration_consistency(schema, multi_module=True)
+        self._assert_migration_consistency(schema, explicit_modules=True)
+
+    def test_schema_get_migration_nested_module_01(self):
+        schema = r'''
+        type foo::bar::Y;
+        module foo {
+          module bar {
+            type X {
+                link y -> Y;
+            }
+          }
+        }
+        '''
+
+        self._assert_migration_consistency(schema, explicit_modules=True)
+
+    def test_schema_get_migration_nested_module_02(self):
+        schema = r'''
+        module foo {
+          type Z;
+          type Y {
+              link x1 -> foo::bar::X;
+              link x2 := foo::bar::X;
+              link z1 -> Z;
+              link z2 := Z;
+          };
+          module bar {
+            type X;
+          }
+        }
+        '''
+
+        self._assert_migration_consistency(schema, explicit_modules=True)
+
+    def test_schema_get_migration_nested_module_03(self):
+        schema = r'''
+        module default {
+            alias x := _test::abs(-1);
+        };
+        '''
+
+        self._assert_migration_consistency(schema, explicit_modules=True)
+
+    def test_schema_get_migration_nested_module_04(self):
+        schema = r'''
+        module _test { };
+        module default {
+            alias x := _test::abs(-1);
+        };
+        '''
+        with self.assertRaisesRegex(
+            errors.InvalidReferenceError,
+            "function '_test::abs' does not exist"
+        ):
+            self._assert_migration_consistency(schema, explicit_modules=True)
+
+    def test_schema_get_migration_nested_module_05(self):
+        schema = r'''
+        module foo {
+          module bar {
+            type X;
+          }
+        };
+        module default {
+          alias x := (with m as module foo select m::bar::X);
+        }
+        '''
+
+        self._assert_migration_consistency(schema, explicit_modules=True)
 
     def test_schema_get_migration_default_ptrs_01(self):
         schema = r'''
@@ -3413,6 +5150,171 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
         '''
 
         self._assert_migration_consistency(schema)
+
+    def test_schema_trigger_01(self):
+        schema = '''
+            type User {
+              trigger logInsert after insert for each do (
+                insert Log {
+                  user := __new__,
+                  action := 'Insert',
+                }
+              );
+            }
+
+            type Log {
+              required link user -> User;
+              required property action -> str;
+            }
+        '''
+
+        self._assert_migration_consistency(schema)
+
+    def test_schema_trigger_02(self):
+        schema = '''
+            type User {
+              trigger logInsert after insert for each do (
+                update Log set {
+                  user := __new__,
+                  action := 'Insert',
+                }
+              );
+            }
+
+            type Log {
+              required link user -> User;
+              required property action -> str;
+            }
+        '''
+
+        self._assert_migration_consistency(schema)
+
+    def test_schema_trigger_03(self):
+        schema = '''
+            type User {
+              trigger logInsert after insert for each do (
+                insert Log {
+                  user := __new__,
+                  action := 'Insert',
+                } unless conflict on .action else (
+                  update Log set { user := __new__ }
+                )
+              );
+            }
+
+            type Log {
+              required link user -> User;
+              required property action -> str { constraint exclusive; }
+            }
+        '''
+
+        self._assert_migration_consistency(schema)
+
+    def test_schema_trigger_04(self):
+        schema = '''
+            type User {
+              trigger logInsert after insert for each do (
+                insert Log {
+                  user := __new__,
+                  action := 'Insert',
+                } unless conflict on .action else (
+                  insert BackupLog { user := __new__, action := '???' }
+                )
+              );
+            }
+
+            type Log {
+              required link user -> User;
+              required property action -> str { constraint exclusive; }
+            }
+            type BackupLog {
+              required link user -> User;
+              required property action -> str;
+            }
+        '''
+
+        self._assert_migration_consistency(schema)
+
+    def test_schema_globals_funcs_01(self):
+        schema = '''
+            required global x1 -> int64 { default := 0 };
+            required global x2 -> int64 { default := 0 };
+            required global x3 -> int64 { default := 0 };
+            required global x4 -> int64 { default := 0 };
+
+            function f1() -> int64 using (
+              global x1 + global x2 + global x3 + global x4);
+            function f2() -> int64 using (f1());
+        '''
+
+        self._assert_migration_consistency(schema)
+
+    def test_schema_pointer_kind_infer_01(self):
+        tschema = r'''
+        type Bar;
+        scalar type scl extending str;
+        abstract link friendship {
+            property strength: float64;
+            index on (__subject__@strength);
+        };
+        type Foo {
+            name: str;
+            required address: str {
+                default := "n" ++ "/a";
+            }
+            foo: Foo;
+            multi foos: Foo;
+            bar: Bar;
+            bar2 extending friendship: Bar;
+            bar3: Bar {
+               lprop: str {
+                   default := "foo" ++ "bar";
+               }
+            };
+            or_: Foo | Bar;
+            array1: array<str>;
+            array2: array<scl>;
+
+            cprop1 := .name;
+            multi cprop2 := (
+              with us := .name,
+              select (select .foos filter .name != us).name
+            );
+            required cprop3 := assert_exists(.name);
+
+            clink1 := (select .foo filter .name != 'Elvis');
+        };
+        type Child extending Foo {
+            overloaded foo {
+                lprop: str;
+            };
+        }
+        '''
+
+        schema = self._assert_migration_consistency(tschema)
+
+        obj = schema.get('default::Foo')
+        obj.getptr(schema, s_name.UnqualName('name'), type=s_props.Property)
+        obj.getptr(schema, s_name.UnqualName('address'), type=s_props.Property)
+        obj.getptr(schema, s_name.UnqualName('array1'), type=s_props.Property)
+        obj.getptr(schema, s_name.UnqualName('array2'), type=s_props.Property)
+        obj.getptr(schema, s_name.UnqualName('foo'), type=s_links.Link)
+        obj.getptr(schema, s_name.UnqualName('bar'), type=s_links.Link)
+        obj.getptr(schema, s_name.UnqualName('bar2'), type=s_links.Link)
+        obj.getptr(schema, s_name.UnqualName('or_'), type=s_links.Link)
+
+        obj.getptr(schema, s_name.UnqualName('cprop1'), type=s_props.Property)
+        obj.getptr(schema, s_name.UnqualName('cprop2'), type=s_props.Property)
+        obj.getptr(schema, s_name.UnqualName('cprop3'), type=s_props.Property)
+
+        obj.getptr(schema, s_name.UnqualName('clink1'), type=s_links.Link)
+
+        ptr = obj.getptr(schema, s_name.UnqualName('bar3'), type=s_links.Link)
+        ptr.getptr(schema, s_name.UnqualName('lprop'), type=s_props.Property)
+
+        obj2 = schema.get('default::Child')
+        ptr = obj2.getptr(schema, s_name.UnqualName('foo'), type=s_links.Link)
+        ptr.getptr(schema, s_name.UnqualName('lprop'), type=s_props.Property)
 
     def test_schema_migrations_equivalence_01(self):
         self._assert_migration_equivalence([r"""
@@ -3825,12 +5727,6 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
             );
         """])
 
-    @test.xfail('''
-        This wants to transmute an object type into an alias. It
-        produces DDL, but the DDL doesn't really make any sense. We
-        are going to probably need to add DDL syntax to accomplish
-        this.
-    ''')
     def test_schema_migrations_equivalence_23(self):
         self._assert_migration_equivalence([r"""
             type Child {
@@ -4726,6 +6622,12 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
             global TwoUsers := (User);
         """])
 
+    def test_schema_migrations_equivalence_57c(self):
+        self._assert_migration_equivalence([r"""
+            type X;
+            alias Z := (with lol := X, select count(lol));
+        """])
+
     def test_schema_migrations_equivalence_58(self):
         self._assert_migration_equivalence([r"""
             abstract type C {
@@ -4745,6 +6647,111 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
             }
         """, r"""
         """])
+
+    def test_schema_migrations_equivalence_59(self):
+        self._assert_migration_equivalence([r"""
+            type User {
+                required property name -> str;
+                index pg::spgist on (.name);
+            };
+        """, r"""
+            type User {
+                required property name -> str;
+                index pg::spgist on (.name) {
+                    annotation description := 'test';
+                };
+            };
+        """, r"""
+            type User {
+                required property name -> str;
+            };
+        """])
+
+    def test_schema_migrations_equivalence_60(self):
+        self._assert_migration_equivalence(
+            [
+                r"""
+                type User {
+                    required property name -> str;
+                };
+                """,
+                r"""
+                type User {
+                    required property name -> str;
+                    index pg::spgist on (.name);
+                };
+                """,
+                r"""
+                type User {
+                    required property name -> str;
+                    index pg::spgist on (.name) {
+                        annotation description := 'test';
+                    };
+                };
+                """,
+            ]
+        )
+
+    def test_schema_migrations_equivalence_61(self):
+        self._assert_migration_equivalence(
+            [
+            r"""
+            type Child {
+                property foo -> str;
+            }
+
+            type Base {
+                link bar -> Child;
+            }
+            """,
+            r"""
+            type Child {
+                property foo -> str;
+            }
+
+            # exchange a type for an alias
+            alias Base := (
+                SELECT Child {
+                    # bar is the same as the root object
+                    bar := Child
+                }
+            );
+            """,
+            ]
+        )
+
+    def test_schema_migrations_equivalence_constr_rebase_01(self):
+        self._assert_migration_equivalence(
+            [
+            r"""
+            abstract type Foo;
+
+            type Bar {
+              required property baz -> str {
+                constraint max_len_value(280);
+              }
+            }
+            """,
+            r"""
+            abstract type Foo;
+
+            type Bar extending Foo {
+              required property baz -> str {
+                constraint max_len_value(280);
+              }
+            }
+            """,
+            r"""
+            abstract type Foo;
+
+            type Bar {
+              required property baz -> str {
+                constraint max_len_value(280);
+              }
+            }
+            """,
+            ]
+        )
 
     def test_schema_migrations_equivalence_compound_01(self):
         # Check that union types can be referenced in computables
@@ -5061,8 +7068,8 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
         with self.assertRaisesRegex(
             errors.InvalidDefinitionError,
             "definition dependency cycle between "
-            "property 'val' of object type 'default::Bar' and "
-            "property 'val' of object type 'default::Foo'"
+            "property 'val' of object type 'default::Foo' and "
+            "property 'val' of object type 'default::Bar'"
         ):
             self._assert_migration_equivalence([r"""
                 type Foo {
@@ -5769,21 +7776,28 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
         """])
 
     def test_schema_migrations_equivalence_index_04(self):
-        self._assert_migration_equivalence([r"""
-            type Base {
-                property first_name -> str;
-                property last_name -> str;
-                property name := .first_name ++ ' ' ++ .last_name;
-            }
-        """, r"""
-            type Base {
-                property first_name -> str;
-                property last_name -> str;
-                property name := .first_name ++ ' ' ++ .last_name;
-                # an index on a computable
-                index on (.name);
-            }
-        """])
+        self._assert_migration_equivalence(
+            [
+                r"""
+                type Base {
+                    property first_name -> str;
+                    property last_name -> str;
+                    property name := .first_name ++ ' ' ++ .last_name;
+                }
+                """,
+                r"""
+                type Base {
+                    property first_name -> str;
+                    property last_name -> str;
+                    property name := .first_name ++ ' ' ++ .last_name;
+                    # an index on a computable
+                    index fts::index on (
+                        fts::with_options(.name, language := fts::Language.eng)
+                    );
+                }
+                """,
+            ]
+        )
 
     def test_schema_migrations_equivalence_index_05(self):
         self._assert_migration_equivalence([r"""
@@ -5803,6 +7817,21 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
             type Base {
                 property first_name -> str;
                 # drop index
+            }
+        """])
+
+    def test_schema_migrations_equivalence_index_06(self):
+        self._assert_migration_equivalence([r"""
+            type Base {
+                required property name -> str;
+                required property year -> int64;
+                index on ((.name, .year));
+            }
+        """, r"""
+            type Base {
+                required property name -> str;
+                required property year -> int64;
+                index on ((.year, .name));
             }
         """])
 
@@ -6018,6 +8047,38 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
             }
         """])
 
+    def test_schema_migrations_equivalence_constraint_11(self):
+        self._assert_migration_equivalence([r"""
+            type Foo {
+              required property name -> str {
+                constraint max_len_value(200) {
+                  errmessage := "name is too long";
+                }
+              }
+              constraint exclusive on (.name) {
+                errmessage := "exclusivity!";
+              }
+            }
+        """, r"""
+            type Foo {
+              required property name -> str {
+                constraint max_len_value(201) {
+                  errmessage := "name is too long";
+                }
+              }
+              constraint exclusive on (.name) {
+                errmessage := "exclusivity!";
+              }
+            }
+        """, r"""
+            type Foo {
+              required property name -> str;
+              constraint exclusive on (.name) {
+                errmessage := "exclusivity!";
+              }
+            }
+        """])
+
     def test_schema_migrations_equivalence_policies_01(self):
         self._assert_migration_equivalence([r"""
             type X {
@@ -6145,6 +8206,27 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
             };
             alias CurFoo := (select Foo filter .id = global current_foo)
         """])
+
+    def test_schema_migrations_equivalence_globals_funcs_02(self):
+        schema1, schema2, _ = self._assert_migration_equivalence([r"""
+            required global foo -> int64 { default := 0};
+            required global bar -> int64 { default := 0};
+
+            function f1() -> int64 using (global foo);
+            function f2() -> int64 using (f1());
+        """, r"""
+            required global foo -> int64 { default := 0};
+            required global bar -> int64 { default := 0};
+
+            function f1() -> int64 using (global foo + global bar);
+            function f2() -> int64 using (f1());
+        """])
+
+        self.assertEqual(
+            schema1.get_functions('default::f2'),
+            schema2.get_functions('default::f2'),
+            "function got deleted/recreated and should have been altered",
+        )
 
     # NOTE: array<str>, array<int16>, array<json> already exist in std
     # schema, so it's better to use array<float32> or some other
@@ -6958,6 +9040,29 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
             };
         """])
 
+    def test_schema_migrations_deferred_index_01(self):
+        self._assert_migration_equivalence([r"""
+            abstract index test() {
+                code := ' ((__col__) NULLS FIRST)';
+                deferrability := 'Permitted';
+            };
+
+            type Foo {
+                property bar -> str;
+                deferred index test on (.bar);
+            };
+        """, r"""
+            abstract index test() {
+                code := ' ((__col__) NULLS FIRST)';
+                deferrability := 'Permitted';
+            };
+
+            type Foo {
+                property bar -> str;
+                index test on (.bar);
+            };
+        """])
+
     def test_schema_migrations_drop_parent_01(self):
         self._assert_migration_equivalence([r"""
             type Parent {
@@ -7471,6 +9576,118 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
             """
         ])
 
+    def test_schema_migrations_rename_and_modify_01(self):
+        self._assert_migration_equivalence([
+            r"""
+                type Branch{
+                  property branchURL: std::str {
+                    constraint max_len_value(500);
+                    constraint min_len_value(5);
+                  };
+                };
+            """,
+            r"""
+                type Branch{
+                  property email: std::str {
+                    constraint max_len_value(50);
+                    constraint min_len_value(5);
+                  };
+                };
+            """
+        ])
+
+    def test_schema_migrations_rename_and_modify_02(self):
+        self._assert_migration_equivalence([
+            r"""
+                type X {
+                    obj: Object {
+                        foo: str;
+                    };
+                };
+            """,
+            r"""
+                type X {
+                    obj2: Object {
+                        bar: int64;
+                    };
+                };
+            """
+        ])
+
+    def test_schema_migrations_rename_and_modify_03(self):
+        self._assert_migration_equivalence([
+            r"""
+                type Branch{
+                  property branchName: std::str {
+                    constraint min_len_value(0);
+                    constraint max_len_value(255);
+                  };
+                  property branchCode: std::int64;
+                  property branchURL: std::str {
+                    constraint max_len_value(500);
+                    constraint regexp("url");
+                    constraint min_len_value(5);
+                  };
+                };
+            """,
+            r"""
+                type Branch{
+                  property branchName: std::str {
+                    constraint min_len_value(0);
+                    constraint max_len_value(255);
+                  };
+                  property branchCode: std::int64;
+                  property phoneNumber: std::str {
+                    constraint min_len_value(5);
+                    constraint max_len_value(50);
+                    constraint regexp(r"phone");
+                  };
+                  property email: std::str {
+                    constraint min_len_value(5);
+                    constraint max_len_value(50);
+                    constraint regexp(r"email");
+                  };
+                };
+            """
+        ])
+
+    def test_schema_migrations_rename_and_modify_04(self):
+        self._assert_migration_equivalence([
+            r"""
+                type Branch{
+                  property branchName: std::str {
+                    constraint min_len_value(0);
+                    constraint max_len_value(255);
+                  };
+                  property branchCode: std::int64;
+                  property branchURL: std::str {
+                    constraint max_len_value(500);
+                    constraint regexp("url");
+                    constraint min_len_value(5);
+                  };
+                };
+            """,
+            r"""
+                type Branch2 {
+                  property branchName: std::str {
+                    constraint min_len_value(0);
+                    constraint max_len_value(255);
+                  };
+                  property branchCode: std::int64;
+                  property phoneNumber: std::str {
+                    constraint min_len_value(5);
+                    constraint max_len_value(50);
+                    constraint regexp(r"phone");
+                  };
+                  property email: std::str {
+                    constraint min_len_value(5);
+                    constraint max_len_value(50);
+                    constraint regexp(r"email");
+                  };
+                };
+            """
+        ])
+
     def test_schema_migrations_except_01(self):
         self._assert_migration_equivalence([
             r"""
@@ -7489,14 +9706,355 @@ class TestGetMigration(tb.BaseSchemaLoadTest):
             """,
         ])
 
+    def test_schema_migrations_half_diamonds_00(self):
+        self._assert_migration_equivalence([
+            r"""
+                abstract type A;
 
-class TestDescribe(tb.BaseSchemaLoadTest):
-    """Test the DESCRIBE command."""
+                abstract type B {
+                    link z -> G {
+                        constraint exclusive;
+                    }
+                }
 
-    DEFAULT_MODULE = 'test'
+                abstract type C extending B {
+                    link y -> H {
+                        constraint exclusive;
+                    }
+                }
+
+                abstract type D;
+
+                type E extending D;
+
+                type F extending C, B, D;
+
+                type G extending D, A {
+                    link x := assert_single(.<z[IS B]);
+                }
+
+                type H extending B, D, A {
+                    link w := assert_single(.<y[IS C]);
+                }
+            """,
+            r"""
+            """,
+        ])
+
+    def test_schema_migrations_half_diamonds_01(self):
+        self._assert_migration_equivalence([
+            r"""
+                abstract type A;
+                abstract type B {
+                    link z -> A;
+                };
+                abstract type C extending B;
+                abstract type D;
+                type F extending C, B;
+            """,
+            r"""
+            """,
+        ])
+
+    def test_schema_migrations_half_diamonds_02(self):
+        self._assert_migration_equivalence([
+            r"""
+                abstract type A;
+                abstract type B {
+                    link z -> A;
+                };
+                abstract type C extending B;
+                abstract type C2 extending B;
+                abstract type D;
+                type F extending C, C2, B;
+            """,
+            r"""
+            """,
+        ])
+
+    def test_schema_migrations_half_diamonds_03(self):
+        self._assert_migration_equivalence([
+            r"""
+                abstract type A;
+                abstract type B {
+                    link z -> A;
+                };
+                abstract type C extending B;
+                abstract type C2 extending C;
+                abstract type D;
+                type F extending C2, C, B;
+            """,
+            r"""
+            """,
+        ])
+
+    def test_schema_migrations_half_diamonds_04(self):
+        self._assert_migration_equivalence([
+            r"""
+                abstract type A;
+                abstract type B {
+                    link z -> A;
+                };
+                abstract type C extending B;
+                abstract type C2 extending C;
+                abstract type D;
+                type F extending C2, B;
+            """,
+            r"""
+            """,
+        ])
+
+    def test_schema_migrations_half_diamonds_05(self):
+        self._assert_migration_equivalence([
+            r"""
+                abstract type A;
+                abstract type B {
+                    link z -> A;
+                };
+                abstract type C extending B;
+                abstract type C2 extending C;
+                abstract type D;
+                type F extending C2, C, B;
+                type F2 extending F, C2, C, B;
+            """,
+            r"""
+            """,
+        ])
+
+    def test_schema_migrations_equivalence_nested_module_01(self):
+        self._assert_migration_equivalence([r"""
+            module foo { module bar {} }
+        """, r"""
+            module foo { module bar { module baz {} } }
+        """])
+
+    def test_schema_migrations_property_aliases(self):
+        self._assert_migration_equivalence([
+            r"""
+                abstract type NamedObject {
+                    required property name: std::str;
+                };
+                type Person extending default::User;
+                type User extending default::NamedObject {
+                    multi link fav_users := (.favorites[is default::User]);
+                    multi link favorites: default::NamedObject;
+                };
+            """,
+            r"""
+            """,
+        ])
+
+    def test_schema_migrations_rewrites_01(self):
+        self._assert_migration_equivalence([
+            r"""
+                type User {
+                    name: str {
+                        rewrite update, insert using (.name ++ "!")
+                    }
+                };
+            """,
+            r"""
+            """,
+        ])
+
+    def test_schema_migrations_rewrites_02(self):
+        self._assert_migration_equivalence([
+            r"""
+                type User {
+                    property foo -> bool;
+                    property bar -> bool;
+                };
+            """,
+            r"""
+                type User {
+                    property foo -> bool {
+                        rewrite insert using (
+                            __specified__.bar and __specified__.baz
+                        );
+                    };
+                    property bar -> bool {
+                        rewrite insert using (
+                            __specified__.foo and __specified__.baz
+                        );
+                    };
+                    property baz -> bool {
+                        rewrite insert using (
+                            __specified__.foo and __specified__.bar
+                        );
+                    };
+                };
+            """,
+            r"""
+                type User {
+                    property foo -> bool;
+                    property bar -> bool;
+                    property baz -> bool;
+                };
+            """,
+            r"""
+            """,
+        ])
+
+    def test_schema_migrations_implicit_type_01(self):
+        self._assert_migration_equivalence([
+            r"""
+                abstract type Pinnable {
+                    property pinned := __source__ in <Pinnable>{};
+                }
+            """,
+            r"""
+                abstract type Pinnable {
+                    property pinned := __source__ in <Pinnable>{};
+                }
+                type Foo extending Pinnable {}
+            """,
+        ])
+
+    def test_schema_migrations_implicit_type_02(self):
+        self._assert_migration_equivalence([
+            r"""
+                abstract type Person {
+                    multi link friends : Person{
+                        constraint expression on (
+                                __subject__ != __subject__@source
+                            );
+                    };
+
+                }
+            """,
+            r"""
+                abstract type Person {
+                    multi link friends : Person{
+                        constraint expression on (
+                                __subject__ != __subject__@source
+                            );
+                    };
+
+                }
+
+                type Employee extending Person{
+                    department: str;
+                }
+            """,
+        ])
+
+    def test_schema_migrations_inh_ordering_01(self):
+        self._assert_migration_equivalence([
+            r"""
+            type Tag extending Named {
+              index on (.name);
+              constraint expression on (.name != "");
+              constraint max_value(10) on (.cnt);
+            }
+
+            abstract type Named  {
+              required property name -> str;
+              required property cnt -> int64;
+              index on (.name);
+              constraint expression on (.name != "");
+              constraint max_value(10) on (.cnt);
+            }
+            """,
+            r"""
+            abstract type Named  {
+              required property name -> str;
+              required property cnt -> int64;
+              index on (.name);
+              constraint expression on (.name != "");
+              constraint max_value(10) on (.cnt);
+            }
+
+            type Tag extending Named {
+              index on (.name);
+              constraint expression on (.name != "");
+              constraint max_value(10) on (.cnt);
+            }
+            """,
+        ])
+
+    def test_schema_migrations_alias_alter_01(self):
+        self._assert_migration_equivalence([
+            r"""
+            alias X := '0';
+            alias Y := X;
+            alias Z := Y;
+            """,
+            r"""
+            alias X := '1';
+            alias Y := X;
+            alias Z := Y;
+            """,
+        ])
+
+    def test_schema_migrations_union_ptrs_01(self):
+        self._assert_migration_equivalence([
+            r"""
+            type A;
+            type A_ extending A;
+            type B;
+            type C {
+                # link of type and base type
+                link foo -> A | A_;
+            };
+            """,
+            r"""
+            type A;
+            type A_ extending A;
+            type B;
+            type C {
+                # link of type, base type, and other type
+                link foo -> A | A_ | B;
+            };
+            """,
+            r"""
+            type A;
+            type A_ extending A;
+            type B;
+            type C {
+                # remove link
+            };
+            """,
+        ])
+        schema = r'''
+        '''
+
+        self._assert_migration_consistency(schema)
+
+
+class BaseDescribeTest(tb.BaseSchemaLoadTest):
 
     re_filter = re.compile(r'[\s]+|(,(?=\s*[})]))')
     maxDiff = 10000
+
+    def _load_schema(
+        self,
+        schema_text,
+        *,
+        as_ddl,
+        default_module,
+        explicit_modules,
+    ):
+        if as_ddl:
+            schema = tb._load_std_schema()
+            schema = self.run_ddl(schema, schema_text, default_module)
+        elif explicit_modules:
+            sdl_schema = qlparser.parse_sdl(schema_text)
+            schema = tb._load_std_schema()
+            schema, _ = s_ddl.apply_sdl(
+                sdl_schema,
+                base_schema=schema,
+                current_schema=schema,
+            )
+        else:
+            schema = self.load_schema(schema_text, modname=default_module)
+
+        return schema
+
+
+class TestDescribe(BaseDescribeTest):
+    """Test the DESCRIBE command."""
+
+    DEFAULT_MODULE = 'test'
 
     def _assert_describe(
         self,
@@ -7506,24 +10064,18 @@ class TestDescribe(tb.BaseSchemaLoadTest):
         default_module='test',
         explicit_modules=False,
     ):
-        if as_ddl:
-            schema = tb._load_std_schema()
-            schema = self.run_ddl(schema, schema_text, default_module)
-        elif explicit_modules:
-            sdl_schema = qlparser.parse_sdl(schema_text)
-            schema = tb._load_std_schema()
-            schema = s_ddl.apply_sdl(
-                sdl_schema,
-                base_schema=schema,
-                current_schema=schema,
-            )
-        else:
-            schema = self.load_schema(schema_text, modname=default_module)
+        schema = self._load_schema(
+            schema_text,
+            as_ddl=as_ddl,
+            default_module=default_module,
+            explicit_modules=explicit_modules,
+        )
 
         tests = [iter(tests)] * 2
 
         for stmt_text, expected_output in zip(*tests):
-            qltree = qlparser.parse(stmt_text, {None: 'test'})
+            qltrees = qlparser.parse_block(stmt_text, {None: 'test'})
+            [qltree,] = qltrees
             stmt = qlcompiler.compile_ast_to_ir(
                 qltree,
                 schema,
@@ -7592,7 +10144,8 @@ class TestDescribe(tb.BaseSchemaLoadTest):
             """
             type test::Child extending test::Parent, test::Parent2 {
                 annotation test::anno := 'annotated';
-                overloaded link foo extending test::f -> test::Foo {
+                overloaded link foo: test::Foo {
+                    extending test::f;
                     annotation test::anno := 'annotated link';
                     constraint std::exclusive {
                         annotation test::anno := 'annotated constraint';
@@ -7607,23 +10160,24 @@ class TestDescribe(tb.BaseSchemaLoadTest):
             type test::Child extending test::Parent, test::Parent2 {
                 annotation test::anno := 'annotated';
                 index on (.foo);
-                required single link __type__ -> schema::ObjectType {
+                required single link __type__: schema::ObjectType {
                     readonly := true;
                 };
-                overloaded single link foo extending test::f -> test::Foo {
+                overloaded single link foo: test::Foo {
+                    extending test::f;
                     annotation test::anno := 'annotated link';
                     constraint std::exclusive {
                         annotation test::anno := 'annotated constraint';
                     };
-                    optional single property p -> test::int_t {
+                    optional single property p: test::int_t {
                         constraint std::max_value(10);
                     };
                 };
-                required single property id -> std::uuid {
+                required single property id: std::uuid {
                     readonly := true;
                     constraint std::exclusive;
                 };
-                optional multi property name -> std::str;
+                optional multi property name: std::str;
             };
             """,
 
@@ -7631,16 +10185,17 @@ class TestDescribe(tb.BaseSchemaLoadTest):
 
             """
             type test::Child extending test::Parent, test::Parent2 {
-                required single link __type__ -> schema::ObjectType {
+                required single link __type__: schema::ObjectType {
                     readonly := true;
                 };
-                overloaded single link foo extending test::f -> test::Foo {
-                    optional single property p -> test::int_t;
+                overloaded single link foo: test::Foo {
+                    extending test::f;
+                    optional single property p: test::int_t;
                 };
-                required single property id -> std::uuid {
+                required single property id: std::uuid {
                     readonly := true;
                 };
-                optional multi property name -> std::str;
+                optional multi property name: std::str;
             };
             """,
 
@@ -7710,12 +10265,12 @@ class TestDescribe(tb.BaseSchemaLoadTest):
             [
                 """
                 type test::Spam {
-                    link foobar -> (test::Foo | test::Bar);
+                    link foobar: (test::Foo | test::Bar);
                 };
                 """,
                 """
                 type test::Spam {
-                    link foobar -> (test::Bar | test::Foo);
+                    link foobar: (test::Bar | test::Foo);
                 };
                 """,
             ]
@@ -7772,13 +10327,13 @@ class TestDescribe(tb.BaseSchemaLoadTest):
 
             """
             type test::Foo {
-                required single link __type__ -> schema::ObjectType {
+                required single link __type__: schema::ObjectType {
                     readonly := true;
                 };
-                required single property id -> std::uuid {
+                required single property id: std::uuid {
                     readonly := true;
                 };
-                required single property middle_name -> std::str {
+                required single property middle_name: std::str {
                     default := 'abc';
                     readonly := true;
                 };
@@ -7789,14 +10344,14 @@ class TestDescribe(tb.BaseSchemaLoadTest):
 
             """
             type test::Foo {
-                required single link __type__ -> schema::ObjectType {
+                required single link __type__: schema::ObjectType {
                     readonly := true;
                 };
-                required single property id -> std::uuid {
+                required single property id: std::uuid {
                     readonly := true;
                     constraint std::exclusive;
                 };
-                required single property middle_name -> std::str {
+                required single property middle_name: std::str {
                     default := 'abc';
                     readonly := true;
                 };
@@ -7807,14 +10362,14 @@ class TestDescribe(tb.BaseSchemaLoadTest):
 
             """
             type test::Bar extending test::Foo {
-                required single link __type__ -> schema::ObjectType {
+                required single link __type__: schema::ObjectType {
                     readonly := true;
                 };
-                required single property id -> std::uuid {
+                required single property id: std::uuid {
 
                     readonly := true;
                 };
-                required single property middle_name -> std::str {
+                required single property middle_name: std::str {
                     default := 'abc';
                     readonly := true;
                 };
@@ -7825,7 +10380,7 @@ class TestDescribe(tb.BaseSchemaLoadTest):
 
             '''
             type test::Foo {
-                required single property middle_name -> std::str {
+                required single property middle_name: std::str {
                     default := 'abc';
                     readonly := true;
                 };
@@ -7857,15 +10412,15 @@ class TestDescribe(tb.BaseSchemaLoadTest):
             """
             type test::User extending test::HasImage {
                 index on (__subject__.image);
-                required single link __type__ -> schema::ObjectType {
+                required single link __type__: schema::ObjectType {
                     readonly := true;
                 };
-                required single property id -> std::uuid {
+                required single property id: std::uuid {
                     readonly := true;
                     constraint std::exclusive;
                 };
-                required single property image -> std::str;
-                optional single property name -> std::str;
+                required single property image: std::str;
+                optional single property name: std::str;
             };
             """,
 
@@ -7873,14 +10428,14 @@ class TestDescribe(tb.BaseSchemaLoadTest):
 
             """
             type test::User extending test::HasImage {
-                required single link __type__ -> schema::ObjectType {
+                required single link __type__: schema::ObjectType {
                     readonly := true;
                 };
-                required single property id -> std::uuid {
+                required single property id: std::uuid {
                     readonly := true;
                 };
-                required single property image -> std::str;
-                optional single property name -> std::str;
+                required single property image: std::str;
+                optional single property name: std::str;
             };
             """,
 
@@ -7888,7 +10443,7 @@ class TestDescribe(tb.BaseSchemaLoadTest):
 
             '''
             type test::User extending test::HasImage {
-                property name -> std::str;
+                property name: std::str;
             };
             ''',
 
@@ -7897,14 +10452,14 @@ class TestDescribe(tb.BaseSchemaLoadTest):
             '''
             abstract type test::HasImage {
                 index on (__subject__.image);
-                required single link __type__ -> schema::ObjectType {
+                required single link __type__: schema::ObjectType {
                     readonly := true;
                 };
-                required single property id -> std::uuid {
+                required single property id: std::uuid {
                     readonly := true;
                     constraint std::exclusive;
                 };
-                required single property image -> std::str;
+                required single property image: std::str;
             };
             ''',
 
@@ -7912,13 +10467,13 @@ class TestDescribe(tb.BaseSchemaLoadTest):
 
             '''
             abstract type test::HasImage {
-                required single link __type__ -> schema::ObjectType {
+                required single link __type__: schema::ObjectType {
                     readonly := true;
                 };
-                required single property id -> std::uuid {
+                required single property id: std::uuid {
                     readonly := true;
                 };
-                required single property image -> std::str;
+                required single property image: std::str;
             };
             ''',
 
@@ -7927,7 +10482,7 @@ class TestDescribe(tb.BaseSchemaLoadTest):
             '''
             abstract type test::HasImage {
                 index on (__subject__.image);
-                required property image -> std::str;
+                required property image: std::str;
             };
             ''',
 
@@ -7935,7 +10490,7 @@ class TestDescribe(tb.BaseSchemaLoadTest):
 
             '''
             CREATE ABSTRACT TYPE test::HasImage {
-                CREATE REQUIRED PROPERTY image -> std::str;
+                CREATE REQUIRED PROPERTY image: std::str;
                 CREATE INDEX ON (__subject__.image);
             };
             '''
@@ -7997,12 +10552,12 @@ class TestDescribe(tb.BaseSchemaLoadTest):
 
             '''
             type test::UniqueName {
-                link translated_label extending test::translated_label
-                        -> test::Label {
-                    constraint std::exclusive on (__subject__@prop1);
+                link translated_label: test::Label {
+                    extending test::translated_label;
                     constraint std::exclusive on (
                         (__subject__@source, __subject__@lang)
                     );
+                    constraint std::exclusive on (__subject__@prop1);
                 };
             };
             ''',
@@ -8011,17 +10566,15 @@ class TestDescribe(tb.BaseSchemaLoadTest):
 
             '''
             type test::UniqueName {
-                required single link __type__ -> schema::ObjectType {
+                required single link __type__: schema::ObjectType {
                     readonly := true;
                 };
-                optional single link translated_label
-                extending test::translated_label
-                    -> test::Label
-                {
-                    optional single property lang -> std::str;
-                    optional single property prop1 -> std::str;
+                optional single link translated_label: test::Label {
+                    extending test::translated_label;
+                    optional single property lang: std::str;
+                    optional single property prop1: std::str;
                 };
-                required single property id -> std::uuid {
+                required single property id: std::uuid {
                     readonly := true;
                 };
             };
@@ -8031,20 +10584,18 @@ class TestDescribe(tb.BaseSchemaLoadTest):
 
             '''
             type test::UniqueName {
-                required single link __type__ -> schema::ObjectType {
+                required single link __type__: schema::ObjectType {
                     readonly := true;
                 };
-                optional single link translated_label
-                extending test::translated_label
-                    -> test::Label
-                {
-                    constraint std::exclusive on (__subject__@prop1);
+                optional single link translated_label: test::Label {
+                    extending test::translated_label;
                     constraint std::exclusive on (
                         (__subject__@source, __subject__@lang));
-                    optional single property lang -> std::str;
-                    optional single property prop1 -> std::str;
+                    constraint std::exclusive on (__subject__@prop1);
+                    optional single property lang: std::str;
+                    optional single property prop1: std::str;
                 };
-                required single property id -> std::uuid {
+                required single property id: std::uuid {
                     readonly := true;
                     constraint std::exclusive;
                 };
@@ -8109,7 +10660,7 @@ class TestDescribe(tb.BaseSchemaLoadTest):
 
             """
             CREATE TYPE test::Foo {
-                CREATE PROPERTY bar -> std::str {
+                CREATE PROPERTY bar: std::str {
                     SET readonly := false;
                 };
             };
@@ -8118,7 +10669,7 @@ class TestDescribe(tb.BaseSchemaLoadTest):
 
             """
             type test::Foo {
-                property bar -> std::str {
+                property bar: std::str {
                     readonly := false;
                 };
             };
@@ -8159,7 +10710,7 @@ class TestDescribe(tb.BaseSchemaLoadTest):
             '''
             abstract constraint test::my_constr0(val: std::int64) {
                 using (SELECT
-                    (math::abs((__subject__ + val)) > 2)
+                    (std::math::abs((__subject__ + val)) > 2)
                 );
             };
             ''',
@@ -8168,9 +10719,9 @@ class TestDescribe(tb.BaseSchemaLoadTest):
 
             '''
             abstract constraint test::my_constr1(val: std::int64) {
-                using (WITH m AS MODULE math
+                using (
                     SELECT
-                        (m::abs((__subject__ + val)) > 2)
+                        (std::math::abs((__subject__ + val)) > 2)
                 );
             };
             ''',
@@ -8183,7 +10734,7 @@ class TestDescribe(tb.BaseSchemaLoadTest):
                         x :=
                             (__subject__ + val)
                     SELECT
-                        (math::abs(x) > 2)
+                        (std::math::abs(x) > 2)
                     );
                 };
             ''',
@@ -8256,7 +10807,7 @@ class TestDescribe(tb.BaseSchemaLoadTest):
 
             '''
             type test::Bar0 {
-                link insert_foo -> test::Foo {
+                link insert_foo: test::Foo {
                     default := (INSERT
                         test::Foo
                         {
@@ -8269,7 +10820,7 @@ class TestDescribe(tb.BaseSchemaLoadTest):
 
             '''
             type test::Bar1 {
-                multi link update_foo -> test::Foo {
+                multi link update_foo: test::Foo {
                     default := (UPDATE
                         test::Foo
                     FILTER
@@ -8284,7 +10835,7 @@ class TestDescribe(tb.BaseSchemaLoadTest):
 
             '''
             type test::Bar2 {
-                multi link for_foo -> test::Foo {
+                multi link for_foo: test::Foo {
                     default := (FOR x IN {2, 3}
                     UNION
                         (SELECT
@@ -8299,7 +10850,7 @@ class TestDescribe(tb.BaseSchemaLoadTest):
 
             '''
             type test::Bar3 {
-                property delete_foo -> std::int64 {
+                property delete_foo: std::int64 {
                     default := (SELECT
                         ((DELETE
                             test::Foo
@@ -8328,7 +10879,7 @@ class TestDescribe(tb.BaseSchemaLoadTest):
 
             """
             CREATE TYPE test::Foo {
-                CREATE PROPERTY name -> std::str;
+                CREATE PROPERTY name: std::str;
             };
             CREATE ALIAS test::Bar := (
                 SELECT test::Foo {
@@ -8356,7 +10907,7 @@ class TestDescribe(tb.BaseSchemaLoadTest):
 
             """
             CREATE TYPE test::Foo {
-                CREATE PROPERTY name -> std::str;
+                CREATE PROPERTY name: std::str;
             };
             CREATE ALIAS test::Bar {
                 USING (
@@ -8422,7 +10973,7 @@ class TestDescribe(tb.BaseSchemaLoadTest):
 
             """
             CREATE TYPE test::Foo {
-                CREATE PROPERTY name -> std::str;
+                CREATE PROPERTY name: std::str;
             };
             CREATE ALIAS test::Bar := (
                 SELECT test::Foo {
@@ -8522,7 +11073,7 @@ class TestDescribe(tb.BaseSchemaLoadTest):
 
             """
             CREATE TYPE test::Foo {
-                CREATE PROPERTY name -> std::str;
+                CREATE PROPERTY name: std::str;
                 CREATE PROPERTY comp := (WITH
                     x :=
                         std::count(std::Object)
@@ -8543,19 +11094,19 @@ class TestDescribe(tb.BaseSchemaLoadTest):
             # the links order is non-deterministic
             """
             CREATE TYPE schema::ObjectType
-            EXTENDING schema::InheritingObject,
+            EXTENDING schema::Source,
                       schema::ConsistencySubject,
-                      schema::AnnotationSubject,
+                      schema::InheritingObject,
                       schema::Type,
-                      schema::Source
+                      schema::AnnotationSubject
             {
-                CREATE MULTI LINK access_policies
-                  EXTENDING schema::reference -> schema::AccessPolicy {
+                CREATE MULTI LINK access_policies: schema::AccessPolicy {
+                    EXTENDING schema::reference;
                     ON TARGET DELETE ALLOW;
                     CREATE CONSTRAINT std::exclusive;
                 };
-                CREATE MULTI LINK intersection_of -> schema::ObjectType;
-                CREATE MULTI LINK union_of -> schema::ObjectType;
+                CREATE MULTI LINK intersection_of: schema::ObjectType;
+                CREATE MULTI LINK union_of: schema::ObjectType;
                 CREATE PROPERTY compound_type := (
                     (EXISTS (.union_of) OR EXISTS (.intersection_of))
                 );
@@ -8566,30 +11117,40 @@ class TestDescribe(tb.BaseSchemaLoadTest):
                 CREATE MULTI LINK properties := (
                     .pointers[IS schema::Property]
                 );
+                CREATE MULTI LINK triggers: schema::Trigger {
+                    EXTENDING schema::reference;
+                    ON TARGET DELETE ALLOW;
+                    CREATE CONSTRAINT std::exclusive;
+                };
             };
             """,
 
             'DESCRIBE TYPE schema::ObjectType AS SDL',
 
             """
-            type schema::ObjectType extending
-                    schema::InheritingObject,
-                    schema::ConsistencySubject,
-                    schema::AnnotationSubject,
-                    schema::Type,
-                    schema::Source
+            type schema::ObjectType
+            extending schema::Source,
+                      schema::ConsistencySubject,
+                      schema::InheritingObject,
+                      schema::Type,
+                      schema::AnnotationSubject
             {
-                multi link access_policies
-                  extending schema::reference -> schema::AccessPolicy {
+                multi link access_policies: schema::AccessPolicy {
+                    extending schema::reference;
                     on target delete allow;
                     constraint std::exclusive;
                 };
-                multi link intersection_of -> schema::ObjectType;
+                multi link intersection_of: schema::ObjectType;
                 multi link links := (.pointers[IS schema::Link]);
                 multi link properties := (
                     .pointers[IS schema::Property]
                 );
-                multi link union_of -> schema::ObjectType;
+                multi link triggers: schema::Trigger {
+                    extending schema::reference;
+                    on target delete allow;
+                    constraint std::exclusive;
+                };
+                multi link union_of: schema::ObjectType;
                 property compound_type := (
                     (EXISTS (.union_of) OR EXISTS (.intersection_of))
                 );
@@ -8627,7 +11188,7 @@ class TestDescribe(tb.BaseSchemaLoadTest):
 
             """
             CREATE TYPE test::Foo {
-                CREATE LINK bar -> std::Object {
+                CREATE LINK bar: std::Object {
                     ON TARGET DELETE ALLOW;
                 };
             };
@@ -8637,7 +11198,7 @@ class TestDescribe(tb.BaseSchemaLoadTest):
 
             """
             type test::Foo {
-                link bar -> std::Object {
+                link bar: std::Object {
                     on target delete  allow;
                 };
             };
@@ -8647,13 +11208,13 @@ class TestDescribe(tb.BaseSchemaLoadTest):
 
             """
             type test::Foo {
-                required single link __type__ -> schema::ObjectType {
+                required single link __type__: schema::ObjectType {
                     readonly := true;
                 };
-                optional single link bar -> std::Object {
+                optional single link bar: std::Object {
                     on target delete  allow;
                 };
-                required single property id -> std::uuid {
+                required single property id: std::uuid {
                     readonly := true;
                 };
             };
@@ -8706,22 +11267,22 @@ class TestDescribe(tb.BaseSchemaLoadTest):
 
             """
             type test::Object {
-                required single link __type__ -> schema::ObjectType {
+                required single link __type__: schema::ObjectType {
                     readonly := true;
                 };
-                required single property id -> std::uuid {
+                required single property id: std::uuid {
                     readonly := true;
                 };
-                optional single property real -> std::bool;
+                optional single property real: std::bool;
             };
 
             # The following builtins are masked by the above:
 
             # abstract type std::Object extending std::BaseObject {
-            #     required single link __type__ -> schema::ObjectType {
+            #     required single link __type__: schema::ObjectType {
             #         readonly := true;
             #     };
-            #     required single property id -> std::uuid {
+            #     required single property id: std::uuid {
             #         readonly := true;
             #     };
             # };
@@ -8748,9 +11309,9 @@ class TestDescribe(tb.BaseSchemaLoadTest):
 
             """
             CREATE TYPE test::Tree {
-                CREATE LINK parent -> test::Tree;
+                CREATE LINK parent: test::Tree;
                 CREATE MULTI LINK children := (.<parent[IS test::Tree]);
-                CREATE REQUIRED PROPERTY val -> std::str {
+                CREATE REQUIRED PROPERTY val: std::str {
                     CREATE CONSTRAINT std::exclusive;
                 };
                 CREATE MULTI LINK test_comp := (
@@ -8813,17 +11374,17 @@ class TestDescribe(tb.BaseSchemaLoadTest):
                 CREATE CONSTRAINT std::max_value(15);
             };
             CREATE ABSTRACT LINK test::f {
-                CREATE PROPERTY p -> test::int_t {
+                CREATE PROPERTY p: test::int_t {
                     CREATE CONSTRAINT std::max_value(10);
                     CREATE ANNOTATION test::anno := 'annotated link property';
                 };
             };
             CREATE TYPE test::Foo;
             CREATE TYPE test::Parent {
-                CREATE MULTI PROPERTY name -> std::str;
+                CREATE MULTI PROPERTY name: std::str;
             };
             CREATE TYPE test::Parent2 {
-                CREATE LINK foo -> test::Foo;
+                CREATE LINK foo: test::Foo;
                 CREATE INDEX ON (.foo);
             };
             CREATE TYPE test::Child EXTENDING test::Parent, test::Parent2 {
@@ -8847,7 +11408,7 @@ class TestDescribe(tb.BaseSchemaLoadTest):
             module test {
                 abstract annotation anno;
                 abstract link f {
-                    property p -> test::int_t {
+                    property p: test::int_t {
                         annotation test::anno := 'annotated link property';
                         constraint std::max_value(10);
                     };
@@ -8858,7 +11419,8 @@ class TestDescribe(tb.BaseSchemaLoadTest):
                 };
                 type Child extending test::Parent, test::Parent2 {
                     annotation test::anno := 'annotated';
-                    overloaded link foo extending test::f -> test::Foo {
+                    overloaded link foo: test::Foo {
+                        extending test::f;
                         annotation test::anno := 'annotated link';
                         constraint std::exclusive {
                             annotation test::anno := 'annotated constraint';
@@ -8867,11 +11429,11 @@ class TestDescribe(tb.BaseSchemaLoadTest):
                 };
                 type Foo;
                 type Parent {
-                    multi property name -> std::str;
+                    multi property name: std::str;
                 };
                 type Parent2 {
                     index on (.foo);
-                    link foo -> test::Foo;
+                    link foo: test::Foo;
                 };
             };
             """,
@@ -8896,15 +11458,15 @@ class TestDescribe(tb.BaseSchemaLoadTest):
             'DESCRIBE SCHEMA AS DDL',
 
             """
+            CREATE EXTENSION NOTEBOOK VERSION '1.0';
             CREATE MODULE default IF NOT EXISTS;
             CREATE MODULE test IF NOT EXISTS;
-            CREATE EXTENSION NOTEBOOK VERSION '1.0';
             CREATE TYPE default::Foo;
             CREATE TYPE test::Bar {
-                CREATE LINK foo -> default::Foo;
+                CREATE LINK foo: default::Foo;
             };
             ALTER TYPE default::Foo {
-                CREATE LINK bar -> test::Bar;
+                CREATE LINK bar: test::Bar;
             };
             """,
 
@@ -8914,12 +11476,55 @@ class TestDescribe(tb.BaseSchemaLoadTest):
             using extension notebook version '1.0';
             module default {
                 type Foo {
-                    link bar -> test::Bar;
+                    link bar: test::Bar;
                 };
             };
             module test {
                 type Bar {
-                    link foo -> default::Foo;
+                    link foo: default::Foo;
+                };
+            };
+            """,
+            explicit_modules=True,
+        )
+
+    @test.xfail('''
+        describe command includes module pgvector
+
+        ... this *doesn't* happen when actually testing via the CLI, though?
+    ''')
+    def test_schema_describe_schema_03(self):
+        self._assert_describe(
+            """
+            using extension pgvector version '0.5';
+            module default {
+                scalar type v3 extending ext::pgvector::vector<3>;
+
+                type Foo {
+                    data: v3;
+                }
+            };
+            """,
+
+            'describe schema as ddl',
+
+            """
+            create extension vector version '0.5';
+            create module default if not exists;
+            create scalar type default::v3 extending ext::pgvector::vector<3>;
+            create type default::Foo {
+                create property data: default::v3;
+            };
+            """,
+
+            'describe schema as sdl',
+
+            r"""
+            using extension pgvector version '0.5';
+            module default {
+                scalar type v3 extending ext::pgvector::vector<3>;
+                type Foo {
+                    property data: default::v3;
                 };
             };
             """,
@@ -8946,7 +11551,7 @@ class TestDescribe(tb.BaseSchemaLoadTest):
 
             """
             create type test::ExceptTest {
-                create property e -> std::bool;
+                create property e: std::bool;
                 create constraint std::expression on (true) except (.e);
                 create constraint test::always_ok on (.e) except (.e);
                 create constraint test::always_ok on (.e);
@@ -9002,6 +11607,1530 @@ class TestDescribe(tb.BaseSchemaLoadTest):
                 """
                 # we'll error instead of checking this
                 """,
+            )
+
+    def test_schema_describe_name_override_01(self):
+        self._assert_describe(
+            """
+            type Other {
+                obj: Object;
+            }
+            type Object;
+            """,
+
+            'DESCRIBE MODULE test',
+
+            """
+            create type test::Object;
+            create type test::Other {
+                create link obj: test::Object;
+            };
+            """
+        )
+
+    def test_schema_describe_name_override_02(self):
+        self._assert_describe(
+            """
+            type Object;
+            type Other {
+                obj: test::Object;
+            }
+            """,
+
+            'DESCRIBE MODULE test',
+
+            """
+            create type test::Object;
+            create type test::Other {
+                create link obj: test::Object;
+            };
+            """
+        )
+
+    def test_schema_describe_name_override_03(self):
+        self._assert_describe(
+            """
+            type User {
+              single link identity: Identity;
+            }
+
+            abstract type BaseObject {}
+
+            type Identity extending BaseObject {
+              link user := .<identity[is User];
+            }
+
+            type IdentityCredential extending BaseObject {}
+            """,
+
+            'DESCRIBE MODULE test',
+
+            """
+            create abstract type test::BaseObject;
+            create type test::Identity extending test::BaseObject;
+            create type test::IdentityCredential extending test::BaseObject;
+            create type test::User {
+                create single link identity: test::Identity;
+            };
+            alter type test::Identity {
+                create link user := (.<identity[is test::User]);
+            };
+            """
+        )
+
+    def test_schema_describe_overload_01(self):
+        self._assert_describe(
+            """
+            abstract type Animal {
+                name: str;
+                parent: Animal;
+            }
+            type Human extending Animal {
+                overloaded parent: Human;
+            }
+            """,
+
+            'describe type test::Human as sdl',
+
+            """
+            type test::Human extending test::Animal {
+                overloaded link parent: test::Human;
+            };
+            """,
+        )
+
+    def test_schema_describe_with_module_01(self):
+        schema_text = f'''
+            module dummy {{}}
+            module A {{
+                type Foo;
+            }}
+        '''
+
+        queries = []
+
+        with_mod = ''
+        queries += [
+            with_mod + 'SELECT <A::Foo>{}',
+        ]
+        with_mod = 'WITH MODULE dummy '
+        queries += [
+            with_mod + 'SELECT <A::Foo>{}',
+        ]
+        with_mod = 'WITH MODULE std '
+        queries += [
+            with_mod + 'SELECT <A::Foo>{}',
+        ]
+        with_mod = 'WITH MODULE A '
+        queries += [
+            with_mod + 'SELECT <Foo>{}',
+            with_mod + 'SELECT <A::Foo>{}',
+        ]
+        with_mod = 'WITH dum as MODULE dummy '
+        queries += [
+            with_mod + 'SELECT <A::Foo>{}',
+        ]
+        with_mod = 'WITH AAA as MODULE A '
+        queries += [
+            with_mod + 'SELECT <A::Foo>{}',
+            with_mod + 'SELECT <AAA::Foo>{}',
+        ]
+        with_mod = 'WITH s as MODULE std '
+        queries += [
+            with_mod + 'SELECT <A::Foo>{}',
+        ]
+        with_mod = 'WITH std as MODULE A '
+        queries += [
+            with_mod + 'SELECT <std::Foo>{}',
+            with_mod + 'SELECT <A::Foo>{}',
+        ]
+        with_mod = 'WITH A as MODULE std '
+        queries += []
+
+        normalized = 'SELECT <A::Foo>{}'
+        for query in queries:
+            self._assert_describe(
+                schema_text + f'''
+                    module default {{ alias query := ({query}); }}
+                ''',
+
+                'describe module default as sdl',
+
+                f'''
+                    alias default::query := ({normalized});
+                ''',
+                explicit_modules=True,
+            )
+
+    def test_schema_describe_with_module_02(self):
+        schema_text = f'''
+            module dummy {{}}
+            module A {{
+                function abs(x: int64) -> int64 using (x);
+            }}
+        '''
+
+        queries = []
+
+        with_mod = ''
+        queries += [
+            with_mod + 'SELECT A::abs(1)',
+        ]
+        with_mod = 'WITH MODULE dummy '
+        queries += [
+            with_mod + 'SELECT A::abs(1)',
+        ]
+        with_mod = 'WITH MODULE std '
+        queries += [
+            with_mod + 'SELECT A::abs(1)',
+        ]
+        with_mod = 'WITH MODULE A '
+        queries += [
+            with_mod + 'SELECT abs(1)',
+            with_mod + 'SELECT A::abs(1)',
+        ]
+        with_mod = 'WITH dum as MODULE dummy '
+        queries += [
+            with_mod + 'SELECT A::abs(1)',
+        ]
+        with_mod = 'WITH AAA as MODULE A '
+        queries += [
+            with_mod + 'SELECT A::abs(1)',
+            with_mod + 'SELECT AAA::abs(1)',
+        ]
+        with_mod = 'WITH s as MODULE std '
+        queries += [
+            with_mod + 'SELECT A::abs(1)',
+        ]
+        with_mod = 'WITH std as MODULE A '
+        queries += [
+            with_mod + 'SELECT std::abs(1)',
+            with_mod + 'SELECT A::abs(1)',
+        ]
+        with_mod = 'WITH A as MODULE std '
+        queries += []
+
+        normalized = 'SELECT A::abs(1)'
+        for query in queries:
+            self._assert_describe(
+                schema_text + f'''
+                    module default {{ alias query := ({query}); }}
+                ''',
+
+                'describe module default as sdl',
+
+                f'''
+                    alias default::query := ({normalized});
+                ''',
+                explicit_modules=True,
+            )
+
+    def test_schema_describe_with_module_03(self):
+        schema_text = f'''
+            module dummy {{}}
+        '''
+
+        queries = []
+
+        with_mod = ''
+        queries += [
+            with_mod + 'SELECT <int64>{} = 1',
+            with_mod + 'SELECT <std::int64>{} = 1',
+        ]
+        with_mod = 'WITH MODULE dummy '
+        queries += [
+            with_mod + 'SELECT <int64>{} = 1',
+            with_mod + 'SELECT <std::int64>{} = 1',
+        ]
+        with_mod = 'WITH MODULE std '
+        queries += [
+            with_mod + 'SELECT <int64>{} = 1',
+            with_mod + 'SELECT <std::int64>{} = 1',
+        ]
+        with_mod = 'WITH dum as MODULE dummy '
+        queries += [
+            with_mod + 'SELECT <int64>{} = 1',
+            with_mod + 'SELECT <std::int64>{} = 1',
+        ]
+        with_mod = 'WITH def as MODULE default '
+        queries += [
+            with_mod + 'SELECT <int64>{} = 1',
+            with_mod + 'SELECT <std::int64>{} = 1',
+        ]
+        with_mod = 'WITH s as MODULE std '
+        queries += [
+            with_mod + 'SELECT <int64>{} = 1',
+            with_mod + 'SELECT <std::int64>{} = 1',
+            with_mod + 'SELECT <s::int64>{} = 1',
+        ]
+        with_mod = 'WITH std as MODULE dummy '
+        queries += [
+            with_mod + 'SELECT <int64>{} = 1',
+        ]
+
+        normalized = 'SELECT (<std::int64>{} = 1)'
+        for query in queries:
+            self._assert_describe(
+                schema_text + f'''
+                    module default {{ alias query := ({query}); }}
+                ''',
+
+                'describe module default as sdl',
+
+                f'''
+                    alias default::query := ({normalized});
+                ''',
+                explicit_modules=True,
+            )
+
+    def test_schema_describe_with_module_04a(self):
+        schema_text = f'''
+            module dummy {{}}
+            module default {{ type int64; }}
+        '''
+
+        queries = []
+
+        with_mod = ''
+        queries += [
+            with_mod + 'SELECT <std::int64>{} = 1',
+        ]
+        with_mod = 'WITH MODULE dummy '
+        queries += [
+            with_mod + 'SELECT <int64>{} = 1',
+            with_mod + 'SELECT <std::int64>{} = 1',
+        ]
+        with_mod = 'WITH MODULE std '
+        queries += [
+            with_mod + 'SELECT <int64>{} = 1',
+            with_mod + 'SELECT <std::int64>{} = 1',
+        ]
+        with_mod = 'WITH dum as MODULE dummy '
+        queries += [
+            with_mod + 'SELECT <std::int64>{} = 1',
+        ]
+        with_mod = 'WITH def as MODULE default '
+        queries += [
+            with_mod + 'SELECT <std::int64>{} = 1',
+        ]
+        with_mod = 'WITH s as MODULE std '
+        queries += [
+            with_mod + 'SELECT <std::int64>{} = 1',
+            with_mod + 'SELECT <s::int64>{} = 1',
+        ]
+        with_mod = 'WITH std as MODULE dummy '
+        queries += []
+        with_mod = 'WITH std as MODULE default '
+        queries += []
+
+        normalized = 'SELECT (<std::int64>{} = 1)'
+        for query in queries:
+            self._assert_describe(
+                schema_text + f'''
+                    module default {{ alias query := ({query}); }}
+                ''',
+
+                'describe module default as sdl',
+
+                f'''
+                    alias default::query := ({normalized});
+                    type default::int64;
+                ''',
+                explicit_modules=True,
+            )
+
+    def test_schema_describe_with_module_04b(self):
+        schema_text = f'''
+            module dummy {{}}
+            module default {{ type int64; }}
+        '''
+
+        queries = []
+
+        with_mod = ''
+        queries += [
+            with_mod + 'SELECT <int64>{}',
+            with_mod + 'SELECT <default::int64>{}',
+        ]
+        with_mod = 'WITH MODULE dummy '
+        queries += [
+            with_mod + 'SELECT <default::int64>{}',
+        ]
+        with_mod = 'WITH MODULE std '
+        queries += [
+            with_mod + 'SELECT <default::int64>{}',
+        ]
+        with_mod = 'WITH dum as MODULE dummy '
+        queries += [
+            with_mod + 'SELECT <default::int64>{}',
+        ]
+        with_mod = 'WITH def as MODULE default '
+        queries += [
+            with_mod + 'SELECT <default::int64>{}',
+            with_mod + 'SELECT <def::int64>{}',
+        ]
+        with_mod = 'WITH s as MODULE std '
+        queries += [
+            with_mod + 'SELECT <default::int64>{}',
+        ]
+        with_mod = 'WITH std as MODULE dummy '
+        queries += []
+        with_mod = 'WITH std as MODULE default '
+        queries += []
+
+        normalized = 'SELECT <default::int64>{}'
+        for query in queries:
+            self._assert_describe(
+                schema_text + f'''
+                    module default {{ alias query := ({query}); }}
+                ''',
+
+                'describe module default as sdl',
+
+                f'''
+                    alias default::query := ({normalized});
+                    type default::int64;
+                ''',
+                explicit_modules=True,
+            )
+
+    def test_schema_describe_with_module_05(self):
+        schema_text = f'''
+            module dummy {{}}
+        '''
+
+        queries = []
+
+        with_mod = ''
+        queries += [
+            with_mod + 'select _test::abs(1)',
+            with_mod + 'select std::_test::abs(1)',
+        ]
+        with_mod = 'with module dummy '
+        queries += [
+            with_mod + 'select _test::abs(1)',
+            with_mod + 'select std::_test::abs(1)',
+        ]
+        with_mod = 'with module _test '
+        queries += [
+            with_mod + 'select abs(1)',
+            with_mod + 'select _test::abs(1)',
+            with_mod + 'select std::_test::abs(1)',
+        ]
+        with_mod = 'with module std '
+        queries += [
+            with_mod + 'select _test::abs(1)',
+            with_mod + 'select std::_test::abs(1)',
+        ]
+        with_mod = 'with module std::_test '
+        queries += [
+            with_mod + 'select abs(1)',
+            with_mod + 'select _test::abs(1)',
+            with_mod + 'select std::_test::abs(1)',
+        ]
+        with_mod = 'with t as module _test '
+        queries += [
+            with_mod + 'select _test::abs(1)',
+            with_mod + 'select std::_test::abs(1)',
+            with_mod + 'select t::abs(1)',
+        ]
+        with_mod = 'with s as module std '
+        queries += [
+            with_mod + 'select _test::abs(1)',
+            with_mod + 'select std::_test::abs(1)',
+        ]
+        with_mod = 'with st as module std::_test '
+        queries += [
+            with_mod + 'select _test::abs(1)',
+            with_mod + 'select std::_test::abs(1)',
+            with_mod + 'select st::abs(1)',
+        ]
+        with_mod = 'with std as module _test '
+        queries += [
+            with_mod + 'select _test::abs(1)',
+            with_mod + 'select std::abs(1)',
+        ]
+
+        normalized = 'SELECT std::_test::abs(1)'
+        for query in queries:
+            self._assert_describe(
+                schema_text + f'''
+                    module default {{ alias query := ({query}); }}
+                ''',
+
+                'describe module default as sdl',
+
+                f'''
+                    alias default::query := ({normalized});
+                ''',
+                explicit_modules=True,
+            )
+
+    def test_schema_describe_with_module_06(self):
+        schema_text = f'''
+            module dummy {{}}
+            module _test {{}}
+        '''
+
+        queries = []
+
+        with_mod = ''
+        queries += [
+            with_mod + 'select std::_test::abs(1)',
+        ]
+        with_mod = 'with module dummy '
+        queries += [
+            with_mod + 'select std::_test::abs(1)',
+        ]
+        with_mod = 'with module _test '
+        queries += [
+            with_mod + 'select std::_test::abs(1)',
+        ]
+        with_mod = 'with module std '
+        queries += [
+            with_mod + 'select std::_test::abs(1)',
+        ]
+        with_mod = 'with module std::_test '
+        queries += [
+            with_mod + 'select abs(1)',
+            with_mod + 'select std::_test::abs(1)',
+        ]
+        with_mod = 'with t as module _test '
+        queries += [
+            with_mod + 'select std::_test::abs(1)',
+        ]
+        with_mod = 'with s as module std '
+        queries += [
+            with_mod + 'select std::_test::abs(1)',
+        ]
+        with_mod = 'with st as module std::_test '
+        queries += [
+            with_mod + 'select std::_test::abs(1)',
+            with_mod + 'select st::abs(1)',
+        ]
+        with_mod = 'with std as module _test '
+        queries += []
+        with_mod = 'with std as module std::_test '
+        queries += [
+            with_mod + 'select std::abs(1)',
+        ]
+
+        normalized = 'SELECT std::_test::abs(1)'
+        for query in queries:
+            self._assert_describe(
+                schema_text + f'''
+                    module default {{ alias query := ({query}); }}
+                ''',
+
+                'describe module default as sdl',
+
+                f'''
+                    alias default::query := ({normalized});
+                ''',
+                explicit_modules=True,
+            )
+
+
+class TestSDLTextFromSchema(BaseDescribeTest):
+
+    def _load_schema(
+        self,
+        schema_text,
+        *,
+        as_ddl,
+        default_module,
+        explicit_modules,
+    ):
+        if as_ddl:
+            schema = tb._load_std_schema()
+            schema = self.run_ddl(schema, schema_text, default_module)
+        elif explicit_modules:
+            sdl_schema = qlparser.parse_sdl(schema_text)
+            schema = tb._load_std_schema()
+            schema, _ = s_ddl.apply_sdl(
+                sdl_schema,
+                base_schema=schema,
+                current_schema=schema,
+            )
+        else:
+            schema = self.load_schema(schema_text, modname=default_module)
+
+        return schema
+
+    def _assert_sdl_text_from_schema(
+        self,
+        schema_text,
+        expected_text,
+        default_module='default',
+        explicit_modules=False,
+    ):
+        schema = self._load_schema(
+            schema_text,
+            as_ddl=False,
+            default_module=default_module,
+            explicit_modules=explicit_modules,
+        )
+
+        sdl_text = s_ddl.sdl_text_from_schema(schema)
+
+        self.assert_equal(
+            expected_text,
+            sdl_text,
+        )
+
+    annotation_statements = [
+        "annotation default::AnnotationA := 'A';",
+        "annotation default::AnnotationB := 'B';",
+        "annotation default::AnnotationC := 'C';",
+        "annotation default::AnnotationD := 'D';",
+    ]
+    exclusive_constraint_statements = [
+        "constraint std::exclusive on ('A');",
+        "constraint std::exclusive on ('B');",
+        "constraint std::exclusive on ('C');",
+        "constraint std::exclusive on ('D');",
+        "constraint std::exclusive on (1);",
+        "constraint std::exclusive on (2);",
+        "constraint std::exclusive on (3);",
+        "constraint std::exclusive on (4);",
+        "constraint std::exclusive on (true) except (('A' = 'A'));",
+        "constraint std::exclusive on (true) except (('A' = 'B'));",
+        "constraint std::exclusive on (true) except (('B' = 'A'));",
+        "constraint std::exclusive on (true) except (('B' = 'B'));",
+    ]
+    expression_constraint_statements = [
+        "constraint std::expression on (('A' = 'A'));",
+        "constraint std::expression on (('A' = 'B'));",
+        "constraint std::expression on (('B' = 'A'));",
+        "constraint std::expression on (('B' = 'B'));",
+        "constraint std::expression on (NOT (false));",
+        "constraint std::expression on (std::contains([1], 1));",
+        "constraint std::expression on (true) except (('A' = 'A'));",
+        "constraint std::expression on (true) except (('A' = 'B'));",
+        "constraint std::expression on (true) except (('B' = 'A'));",
+        "constraint std::expression on (true) except (('B' = 'B'));",
+    ]
+    index_statements_caps = [
+        "index on ('A');",
+        "index on ('B');",
+        "index on ('C');",
+        "index on ('D');",
+    ]
+    index_statements_nums = [
+        "index on (1);",
+        "index on (2);",
+        "index on (3);",
+        "index on (4);",
+    ]
+    index_statements_except = [
+        "index on (true) except (('A' = 'A'));",
+        "index on (true) except (('A' = 'B'));",
+        "index on (true) except (('B' = 'A'));",
+        "index on (true) except (('B' = 'B'));",
+    ]
+    access_policy_statements = [
+        "access policy AccessPolicyA allow all;"
+        "access policy AccessPolicyB allow all;"
+        "access policy AccessPolicyC allow all;"
+        "access policy AccessPolicyD allow all;"
+    ]
+
+    def test_schema_sdl_text_order_alias_01(self):
+        # Test that alias contents are in order
+
+        ordered_statements = (
+            ["using (1);"]
+            + TestSDLTextFromSchema.annotation_statements
+        )
+        shuffled_statements = ordered_statements[:]
+        random.Random(1).shuffle(shuffled_statements)
+
+        self._assert_sdl_text_from_schema(
+            "abstract annotation AnnotationA;\n"
+            "abstract annotation AnnotationB;\n"
+            "abstract annotation AnnotationC;\n"
+            "abstract annotation AnnotationD;\n"
+            "alias Foo {\n"
+                + ''.join(
+                    ' ' * 4 + s + '\n'
+                    for s in shuffled_statements
+                ) +
+            "}",
+
+            "module default {\n"
+            "    alias Foo {\n"
+                    + ''.join(
+                        ' ' * 8 + s + '\n'
+                        for s in ordered_statements
+                    ) +
+            "    };\n"
+            "    abstract annotation AnnotationA;\n"
+            "    abstract annotation AnnotationB;\n"
+            "    abstract annotation AnnotationC;\n"
+            "    abstract annotation AnnotationD;\n"
+            "};",
+        )
+
+    def test_schema_sdl_text_order_annotation_01(self):
+        # Test that annotation contents are in order
+
+        ordered_statements = (
+            TestSDLTextFromSchema.annotation_statements
+        )
+        shuffled_statements = ordered_statements[:]
+        random.Random(1).shuffle(shuffled_statements)
+
+        self._assert_sdl_text_from_schema(
+            "abstract annotation AnnotationA;\n"
+            "abstract annotation AnnotationB;\n"
+            "abstract annotation AnnotationC;\n"
+            "abstract annotation AnnotationD;\n"
+            "abstract annotation Foo {\n"
+                + ''.join(
+                    ' ' * 4 + s + '\n'
+                    for s in shuffled_statements
+                ) +
+            "}",
+
+            "module default {\n"
+            "    abstract annotation AnnotationA;\n"
+            "    abstract annotation AnnotationB;\n"
+            "    abstract annotation AnnotationC;\n"
+            "    abstract annotation AnnotationD;\n"
+            "    abstract annotation Foo {\n"
+                    + ''.join(
+                        ' ' * 8 + s + '\n'
+                        for s in ordered_statements
+                    ) +
+            "    };\n"
+            "};",
+        )
+
+    def test_schema_sdl_text_order_constraint_01(self):
+        # Test that abstract constraint contents are in order
+
+        ordered_statements = (
+            [
+                "errmessage := 'Oh no!';",
+                "using (true);",
+            ]
+            + TestSDLTextFromSchema.annotation_statements
+        )
+        shuffled_statements = ordered_statements[:]
+        random.Random(1).shuffle(shuffled_statements)
+
+        self._assert_sdl_text_from_schema(
+            "abstract annotation AnnotationA;\n"
+            "abstract annotation AnnotationB;\n"
+            "abstract annotation AnnotationC;\n"
+            "abstract annotation AnnotationD;\n"
+            "abstract constraint Foo {\n"
+            + ''.join(
+                ' ' * 4 + s + '\n'
+                for s in shuffled_statements
+            ) +
+            "}",
+
+            "module default {\n"
+            "    abstract annotation AnnotationA;\n"
+            "    abstract annotation AnnotationB;\n"
+            "    abstract annotation AnnotationC;\n"
+            "    abstract annotation AnnotationD;\n"
+            "    abstract constraint Foo {\n"
+                    + ''.join(
+                        ' ' * 8 + s + '\n'
+                        for s in ordered_statements
+                    ) +
+            "    };\n"
+            "};",
+        )
+
+    def test_schema_sdl_text_order_constraint_02(self):
+        # Test that object constraint contents are in order
+
+        ordered_statements = (
+            [
+                "errmessage := 'Oh no!';",
+            ]
+            + TestSDLTextFromSchema.annotation_statements
+        )
+        shuffled_statements = ordered_statements[:]
+        random.Random(1).shuffle(shuffled_statements)
+
+        self._assert_sdl_text_from_schema(
+            "abstract annotation AnnotationA;\n"
+            "abstract annotation AnnotationB;\n"
+            "abstract annotation AnnotationC;\n"
+            "abstract annotation AnnotationD;\n"
+            "type Foo {\n"
+            "    property n -> int64;\n"
+            "    constraint expression on (true) {\n"
+                    + ''.join(
+                        ' ' * 8 + s + '\n'
+                        for s in shuffled_statements
+                    ) +
+            "    };"
+            "}",
+
+            "module default {\n"
+            "    abstract annotation AnnotationA;\n"
+            "    abstract annotation AnnotationB;\n"
+            "    abstract annotation AnnotationC;\n"
+            "    abstract annotation AnnotationD;\n"
+            "    type Foo {\n"
+            "        constraint std::expression on (true) {\n"
+                        + ''.join(
+                            ' ' * 12 + s + '\n'
+                            for s in ordered_statements
+                        ) +
+            "        };\n"
+            "        property n: std::int64;\n"
+            "    };\n"
+            "};",
+        )
+
+    def test_schema_sdl_text_order_constraint_03(self):
+        # Test that pointer constraint contents are in order
+
+        ordered_statements = (
+            [
+                "errmessage := 'Oh no!';",
+            ]
+            + TestSDLTextFromSchema.annotation_statements
+        )
+        shuffled_statements = ordered_statements[:]
+        random.Random(1).shuffle(shuffled_statements)
+
+        self._assert_sdl_text_from_schema(
+            "abstract annotation AnnotationA;\n"
+            "abstract annotation AnnotationB;\n"
+            "abstract annotation AnnotationC;\n"
+            "abstract annotation AnnotationD;\n"
+            "type Foo {\n"
+            "    property n -> int64 {\n"
+            "        constraint expression on (true) {\n"
+                        + ''.join(
+                            ' ' * 12 + s + '\n'
+                            for s in shuffled_statements
+                        ) +
+            "        };"
+            "    };"
+            "}",
+
+            "module default {\n"
+            "    abstract annotation AnnotationA;\n"
+            "    abstract annotation AnnotationB;\n"
+            "    abstract annotation AnnotationC;\n"
+            "    abstract annotation AnnotationD;\n"
+            "    type Foo {\n"
+            "        property n: std::int64 {\n"
+            "            constraint std::expression on (true) {\n"
+                            + ''.join(
+                                ' ' * 16 + s + '\n'
+                                for s in ordered_statements
+                            ) +
+            "            };\n"
+            "        };\n"
+            "    };\n"
+            "};",
+        )
+
+    def test_schema_sdl_text_order_function_01(self):
+        # Test that function contents are in order
+
+        ordered_statements = (
+            ["volatility := 'Immutable';"]
+            + TestSDLTextFromSchema.annotation_statements
+            + ["using (true);"]
+        )
+        shuffled_statements = ordered_statements[:]
+        random.Random(1).shuffle(shuffled_statements)
+
+        self._assert_sdl_text_from_schema(
+            "abstract annotation AnnotationA;\n"
+            "abstract annotation AnnotationB;\n"
+            "abstract annotation AnnotationC;\n"
+            "abstract annotation AnnotationD;\n"
+            "function Foo() -> std::bool {\n"
+                + ''.join(
+                    ' ' * 4 + s + '\n'
+                    for s in shuffled_statements
+                ) +
+            "}",
+
+            "module default {\n"
+            "    abstract annotation AnnotationA;\n"
+            "    abstract annotation AnnotationB;\n"
+            "    abstract annotation AnnotationC;\n"
+            "    abstract annotation AnnotationD;\n"
+            "    function Foo() -> std::bool {\n"
+                    + ''.join(
+                        ' ' * 8 + s + '\n'
+                        for s in ordered_statements
+                    ) +
+            "    };\n"
+            "};",
+        )
+
+    def test_schema_sdl_text_order_global_01(self):
+        # Test that function non-computed global are in order
+
+        ordered_statements = (
+            ["default := true;"]
+            + TestSDLTextFromSchema.annotation_statements
+        )
+        shuffled_statements = ordered_statements[:]
+        random.Random(1).shuffle(shuffled_statements)
+
+        self._assert_sdl_text_from_schema(
+            "abstract annotation AnnotationA;\n"
+            "abstract annotation AnnotationB;\n"
+            "abstract annotation AnnotationC;\n"
+            "abstract annotation AnnotationD;\n"
+            "global Foo -> std::bool {\n"
+                + ''.join(
+                    ' ' * 4 + s + '\n'
+                    for s in shuffled_statements
+                ) +
+            "}",
+
+            "module default {\n"
+            "    abstract annotation AnnotationA;\n"
+            "    abstract annotation AnnotationB;\n"
+            "    abstract annotation AnnotationC;\n"
+            "    abstract annotation AnnotationD;\n"
+            "    global Foo -> std::bool {\n"
+                    + ''.join(
+                        ' ' * 8 + s + '\n'
+                        for s in ordered_statements
+                    ) +
+            "    };\n"
+            "};",
+        )
+
+    def test_schema_sdl_text_order_global_02(self):
+        # Test that function computed global are in order
+
+        ordered_statements = (
+            ["using (true);"]
+            + TestSDLTextFromSchema.annotation_statements
+        )
+        shuffled_statements = ordered_statements[:]
+        random.Random(1).shuffle(shuffled_statements)
+
+        self._assert_sdl_text_from_schema(
+            "abstract annotation AnnotationA;\n"
+            "abstract annotation AnnotationB;\n"
+            "abstract annotation AnnotationC;\n"
+            "abstract annotation AnnotationD;\n"
+            "global Foo {\n"
+                + ''.join(
+                    ' ' * 4 + s + '\n'
+                    for s in shuffled_statements
+                ) +
+            "}",
+
+            "module default {\n"
+            "    abstract annotation AnnotationA;\n"
+            "    abstract annotation AnnotationB;\n"
+            "    abstract annotation AnnotationC;\n"
+            "    abstract annotation AnnotationD;\n"
+            "    global Foo {\n"
+                    + ''.join(
+                        ' ' * 8 + s + '\n'
+                        for s in ordered_statements
+                    ) +
+            "    };\n"
+            "};",
+        )
+
+    def test_schema_sdl_text_order_index_01(self):
+        # Test that index contents are in order
+
+        ordered_statements = (
+            TestSDLTextFromSchema.annotation_statements
+        )
+        shuffled_statements = ordered_statements[:]
+        random.Random(1).shuffle(shuffled_statements)
+
+        self._assert_sdl_text_from_schema(
+            "abstract annotation AnnotationA;\n"
+            "abstract annotation AnnotationB;\n"
+            "abstract annotation AnnotationC;\n"
+            "abstract annotation AnnotationD;\n"
+            "type Foo {\n"
+            "    index on (true) {\n"
+                    + ''.join(
+                        ' ' * 8 + s + '\n'
+                        for s in shuffled_statements
+                    ) +
+            "    };\n"
+            "}",
+
+            "module default {\n"
+            "    abstract annotation AnnotationA;\n"
+            "    abstract annotation AnnotationB;\n"
+            "    abstract annotation AnnotationC;\n"
+            "    abstract annotation AnnotationD;\n"
+            "    type Foo {\n"
+            "        index on (true) {\n"
+                        + ''.join(
+                            ' ' * 12 + s + '\n'
+                            for s in ordered_statements
+                        ) +
+            "        };\n"
+            "    };\n"
+            "};",
+        )
+
+    def test_schema_sdl_text_order_link_01(self):
+        # Test that abstract link contents are in order
+
+        ordered_statements = (
+            [
+                "extending default::Base;",
+                "readonly := true;",
+            ]
+            + TestSDLTextFromSchema.annotation_statements
+            + TestSDLTextFromSchema.exclusive_constraint_statements
+            + TestSDLTextFromSchema.expression_constraint_statements
+            + TestSDLTextFromSchema.index_statements_caps
+            + TestSDLTextFromSchema.index_statements_nums
+            + [
+                "index on (@a);",
+                "index on (@b);",
+                "index on (@c);",
+                "index on (@d);",
+            ]
+            + TestSDLTextFromSchema.index_statements_except
+            + [
+                "property a: std::int64;",
+                "property b := (1);",
+                "property c: std::int64;",
+                "property d := (1);",
+            ]
+        )
+        shuffled_statements = ordered_statements[:]
+        random.Random(1).shuffle(shuffled_statements)
+
+        self._assert_sdl_text_from_schema(
+            "abstract annotation AnnotationA;\n"
+            "abstract annotation AnnotationB;\n"
+            "abstract annotation AnnotationC;\n"
+            "abstract annotation AnnotationD;\n"
+            "abstract link Base;\n"
+            "abstract link Foo {\n"
+                + ''.join(
+                    ' ' * 4 + s + '\n'
+                    for s in shuffled_statements
+                ) +
+            "}",
+
+            "module default {\n"
+            "    abstract annotation AnnotationA;\n"
+            "    abstract annotation AnnotationB;\n"
+            "    abstract annotation AnnotationC;\n"
+            "    abstract annotation AnnotationD;\n"
+            "    abstract link Base;\n"
+            "    abstract link Foo {\n"
+                    + ''.join(
+                        ' ' * 8 + s + '\n'
+                        for s in ordered_statements
+                    ) +
+            "    };\n"
+            "};",
+        )
+
+    def test_schema_sdl_text_order_link_02(self):
+        # Test that non-computed concrete link contents are in order
+
+        ordered_statements = (
+            [
+                "extending default::Base;",
+                "on source delete allow;",
+                "on target delete restrict;",
+                "default := (select default::Bar limit 1);",
+                "readonly := true;",
+            ]
+            + TestSDLTextFromSchema.annotation_statements
+            + TestSDLTextFromSchema.exclusive_constraint_statements
+            + TestSDLTextFromSchema.expression_constraint_statements
+            + TestSDLTextFromSchema.index_statements_caps
+            + TestSDLTextFromSchema.index_statements_nums
+            + [
+                "index on (@a);",
+                "index on (@b);",
+                "index on (@c);",
+                "index on (@d);",
+            ]
+            + TestSDLTextFromSchema.index_statements_except
+            + [
+                "property a: std::int64;",
+                "property b := (1);",
+                "property c: std::int64;",
+                "property d := (1);",
+            ]
+        )
+        shuffled_statements = ordered_statements[:]
+        random.Random(1).shuffle(shuffled_statements)
+
+        self._assert_sdl_text_from_schema(
+            "abstract annotation AnnotationA;\n"
+            "abstract annotation AnnotationB;\n"
+            "abstract annotation AnnotationC;\n"
+            "abstract annotation AnnotationD;\n"
+            "abstract link Base;\n"
+            "type Bar;\n"
+            "type Foo {\n"
+            "    link bar -> Bar {\n"
+                    + ''.join(
+                        ' ' * 8 + s + '\n'
+                        for s in shuffled_statements
+                    ) +
+            "    };\n"
+            "}",
+
+            "module default {\n"
+            "    abstract annotation AnnotationA;\n"
+            "    abstract annotation AnnotationB;\n"
+            "    abstract annotation AnnotationC;\n"
+            "    abstract annotation AnnotationD;\n"
+            "    abstract link Base;\n"
+            "    type Bar;\n"
+            "    type Foo {\n"
+            "        link bar: default::Bar {\n"
+                        + ''.join(
+                            ' ' * 12 + s + '\n'
+                            for s in ordered_statements
+                        ) +
+            "        };\n"
+            "    };\n"
+            "};",
+        )
+
+    def test_schema_sdl_text_order_link_03(self):
+        # Test that computed concrete link contents are in order
+
+        ordered_statements = (
+            [
+                "on source delete allow;",
+                "on target delete restrict;",
+                "using (select default::Bar limit 1);",
+                "readonly := true;",
+            ]
+            + TestSDLTextFromSchema.annotation_statements
+            + TestSDLTextFromSchema.exclusive_constraint_statements
+            + TestSDLTextFromSchema.expression_constraint_statements
+            + TestSDLTextFromSchema.index_statements_caps
+            + TestSDLTextFromSchema.index_statements_nums
+            + [
+                "index on (@a);",
+                "index on (@b);",
+                "index on (@c);",
+                "index on (@d);",
+            ]
+            + TestSDLTextFromSchema.index_statements_except
+            + [
+                "property a: std::int64;",
+                "property b := (1);",
+                "property c: std::int64;",
+                "property d := (1);",
+            ]
+        )
+        shuffled_statements = ordered_statements[:]
+        random.Random(1).shuffle(shuffled_statements)
+
+        self._assert_sdl_text_from_schema(
+            "abstract annotation AnnotationA;\n"
+            "abstract annotation AnnotationB;\n"
+            "abstract annotation AnnotationC;\n"
+            "abstract annotation AnnotationD;\n"
+            "type Bar;\n"
+            "type Foo {\n"
+            "    link bar -> Bar {\n"
+                    + ''.join(
+                        ' ' * 8 + s + '\n'
+                        for s in shuffled_statements
+                    ) +
+            "    };\n"
+            "}",
+
+            "module default {\n"
+            "    abstract annotation AnnotationA;\n"
+            "    abstract annotation AnnotationB;\n"
+            "    abstract annotation AnnotationC;\n"
+            "    abstract annotation AnnotationD;\n"
+            "    type Bar;\n"
+            "    type Foo {\n"
+            "        link bar {\n"
+                        + ''.join(
+                            ' ' * 12 + s + '\n'
+                            for s in ordered_statements
+                        ) +
+            "        };\n"
+            "    };\n"
+            "};",
+        )
+
+    def test_schema_sdl_text_order_module_01(self):
+        # Test that module contents are in order
+
+        ordered_statements = [
+            "alias AliasA := (1);",
+            "alias AliasB := (1);",
+            "alias AliasC := (1);",
+            "alias AliasD := (1);",
+            "abstract annotation AnnotationA;",
+            "abstract annotation AnnotationB;",
+            "abstract annotation AnnotationC;",
+            "abstract annotation AnnotationD;",
+            "abstract constraint ConstraintA;",
+            "abstract constraint ConstraintB;",
+            "abstract constraint ConstraintC;",
+            "abstract constraint ConstraintD;",
+            "function FunctionA() -> std::bool using (true);",
+            "function FunctionB() -> std::bool using (true);",
+            "function FunctionC() -> std::bool using (true);",
+            "function FunctionD() -> std::bool using (true);",
+            "global GlobalA := (1);",
+            "global GlobalB := (1);",
+            "global GlobalC := (1);",
+            "global GlobalD := (1);",
+            "abstract link LinkA;",
+            "abstract link LinkB;",
+            "abstract link LinkC;",
+            "abstract link LinkD;",
+            "abstract property PropertyA;",
+            "abstract property PropertyB;",
+            "abstract property PropertyC;",
+            "abstract property PropertyD;",
+            "abstract scalar type AScalarA extending std::int64;",
+            "abstract scalar type AScalarB extending std::int64;",
+            "abstract scalar type AScalarC extending std::int64;",
+            "abstract scalar type AScalarD extending std::int64;",
+            "scalar type ScalarA extending std::int64;",
+            "scalar type ScalarB extending std::int64;",
+            "scalar type ScalarC extending std::int64;",
+            "scalar type ScalarD extending std::int64;",
+            "abstract type ATypeA;",
+            "abstract type ATypeB;",
+            "abstract type ATypeC;",
+            "abstract type ATypeD;",
+            "type TypeA;",
+            "type TypeB;",
+            "type TypeC;",
+            "type TypeD;",
+        ]
+        shuffled_statements = ordered_statements[:]
+        random.Random(1).shuffle(shuffled_statements)
+
+        self._assert_sdl_text_from_schema(
+            ''.join(
+                ' ' * 4 + s + '\n'
+                for s in shuffled_statements
+            ),
+
+            "module default {\n"
+                + ''.join(
+                    ' ' * 4 + s + '\n'
+                    for s in ordered_statements
+                ) +
+            "};",
+        )
+
+    def test_schema_sdl_text_order_module_02(self):
+        # Test that sdl text sorts sub modules.
+        ordered_names = [
+            chr(ord('A') + c)
+            for c in range(10)
+        ]
+        shuffled_names = ordered_names[:]
+        random.Random(1).shuffle(shuffled_names)
+
+        self._assert_sdl_text_from_schema(
+            ''.join(
+                'module ' + name + ' {};\n'
+                for name in shuffled_names
+            ),
+
+            'module default {};\n'
+            + ''.join(
+                'module default::' + name + ' {};\n'
+                for name in ordered_names
+            ),
+        )
+
+    def test_schema_sdl_text_order_property_01(self):
+        # Test that abstract property contents are in order
+
+        ordered_statements = (
+            [
+                "extending default::Base;",
+                "readonly := true;",
+            ]
+            + TestSDLTextFromSchema.annotation_statements
+        )
+        shuffled_statements = ordered_statements[:]
+        random.Random(1).shuffle(shuffled_statements)
+
+        self._assert_sdl_text_from_schema(
+            "abstract annotation AnnotationA;\n"
+            "abstract annotation AnnotationB;\n"
+            "abstract annotation AnnotationC;\n"
+            "abstract annotation AnnotationD;\n"
+            "abstract property Base;\n"
+            "abstract property Foo {\n"
+                + ''.join(
+                    ' ' * 4 + s + '\n'
+                    for s in shuffled_statements
+                ) +
+            "}",
+
+            "module default {\n"
+            "    abstract annotation AnnotationA;\n"
+            "    abstract annotation AnnotationB;\n"
+            "    abstract annotation AnnotationC;\n"
+            "    abstract annotation AnnotationD;\n"
+            "    abstract property Base;\n"
+            "    abstract property Foo {\n"
+                    + ''.join(
+                        ' ' * 8 + s + '\n'
+                        for s in ordered_statements
+                    ) +
+            "    };\n"
+            "};",
+        )
+
+    def test_schema_sdl_text_order_property_02(self):
+        # Test that non-computed concrete property contents are in order
+
+        ordered_statements = (
+            [
+                "extending default::Base;",
+                "default := 1;",
+                "readonly := true;",
+            ]
+            + TestSDLTextFromSchema.annotation_statements
+            + TestSDLTextFromSchema.exclusive_constraint_statements
+            + TestSDLTextFromSchema.expression_constraint_statements
+        )
+        shuffled_statements = ordered_statements[:]
+        random.Random(1).shuffle(shuffled_statements)
+
+        self._assert_sdl_text_from_schema(
+            "abstract annotation AnnotationA;\n"
+            "abstract annotation AnnotationB;\n"
+            "abstract annotation AnnotationC;\n"
+            "abstract annotation AnnotationD;\n"
+            "abstract property Base;\n"
+            "type Foo {\n"
+            "    property bar -> std::int64 {\n"
+                    + ''.join(
+                        ' ' * 8 + s + '\n'
+                        for s in shuffled_statements
+                    ) +
+            "    };\n"
+            "}",
+
+            "module default {\n"
+            "    abstract annotation AnnotationA;\n"
+            "    abstract annotation AnnotationB;\n"
+            "    abstract annotation AnnotationC;\n"
+            "    abstract annotation AnnotationD;\n"
+            "    abstract property Base;\n"
+            "    type Foo {\n"
+            "        property bar: std::int64 {\n"
+                        + ''.join(
+                            ' ' * 12 + s + '\n'
+                            for s in ordered_statements
+                        ) +
+            "        };\n"
+            "    };\n"
+            "};",
+        )
+
+    def test_schema_sdl_text_order_property_03(self):
+        # Test that computed concrete property contents are in order
+
+        ordered_statements = (
+            [
+                "using (1);",
+                "readonly := true;",
+            ]
+            + TestSDLTextFromSchema.annotation_statements
+            + TestSDLTextFromSchema.exclusive_constraint_statements
+            + TestSDLTextFromSchema.expression_constraint_statements
+        )
+        shuffled_statements = ordered_statements[:]
+        random.Random(1).shuffle(shuffled_statements)
+
+        self._assert_sdl_text_from_schema(
+            "abstract annotation AnnotationA;\n"
+            "abstract annotation AnnotationB;\n"
+            "abstract annotation AnnotationC;\n"
+            "abstract annotation AnnotationD;\n"
+            "type Foo {\n"
+            "    property bar -> std::int64 {\n"
+                    + ''.join(
+                        ' ' * 8 + s + '\n'
+                        for s in shuffled_statements
+                    ) +
+            "    };\n"
+            "}",
+
+            "module default {\n"
+            "    abstract annotation AnnotationA;\n"
+            "    abstract annotation AnnotationB;\n"
+            "    abstract annotation AnnotationC;\n"
+            "    abstract annotation AnnotationD;\n"
+            "    type Foo {\n"
+            "        property bar {\n"
+                        + ''.join(
+                            ' ' * 12 + s + '\n'
+                            for s in ordered_statements
+                        ) +
+            "        };\n"
+            "    };\n"
+            "};",
+        )
+
+    def test_schema_sdl_text_order_scalar_01(self):
+        # Test that type contents are in order
+
+        ordered_statements = (
+            TestSDLTextFromSchema.annotation_statements
+            + TestSDLTextFromSchema.expression_constraint_statements
+        )
+        shuffled_statements = ordered_statements[:]
+        random.Random(1).shuffle(shuffled_statements)
+
+        self._assert_sdl_text_from_schema(
+            "abstract annotation AnnotationA;\n"
+            "abstract annotation AnnotationB;\n"
+            "abstract annotation AnnotationC;\n"
+            "abstract annotation AnnotationD;\n"
+            "scalar type Foo extending std::int64 {\n"
+                + ''.join(
+                    ' ' * 4 + s + '\n'
+                    for s in shuffled_statements
+                ) +
+            "}",
+
+            "module default {\n"
+            "    abstract annotation AnnotationA;\n"
+            "    abstract annotation AnnotationB;\n"
+            "    abstract annotation AnnotationC;\n"
+            "    abstract annotation AnnotationD;\n"
+            "    scalar type Foo extending std::int64 {\n"
+                    + ''.join(
+                        ' ' * 8 + s + '\n'
+                        for s in ordered_statements
+                    ) +
+            "    };\n"
+            "};",
+        )
+
+    def test_schema_sdl_text_order_type_01(self):
+        # Test that type contents are in order
+
+        ordered_statements = (
+            TestSDLTextFromSchema.annotation_statements
+            + TestSDLTextFromSchema.access_policy_statements
+            + TestSDLTextFromSchema.exclusive_constraint_statements
+            + TestSDLTextFromSchema.expression_constraint_statements
+            + TestSDLTextFromSchema.index_statements_caps
+            + [
+                "index on (.a);",
+                "index on (.b);",
+                "index on (.c);",
+            ]
+            + TestSDLTextFromSchema.index_statements_nums
+            + TestSDLTextFromSchema.index_statements_except
+            + [
+                "link b: default::Bar;",
+                "link d := (select default::Bar limit 1);",
+                "link f: default::Bar;",
+                "link h := (select default::Bar limit 1);",
+                "property a: std::int64;",
+                "property c := (1);",
+                "property e: std::int64;",
+                "property g := (1);",
+            ]
+        )
+        shuffled_statements = ordered_statements[:]
+        random.Random(1).shuffle(shuffled_statements)
+
+        self._assert_sdl_text_from_schema(
+            "abstract annotation AnnotationA;\n"
+            "abstract annotation AnnotationB;\n"
+            "abstract annotation AnnotationC;\n"
+            "abstract annotation AnnotationD;\n"
+            "type Bar;\n"
+            "type Foo {\n"
+                + ''.join(
+                    ' ' * 4 + s + '\n'
+                    for s in shuffled_statements
+                ) +
+            "}",
+
+            "module default {\n"
+            "    abstract annotation AnnotationA;\n"
+            "    abstract annotation AnnotationB;\n"
+            "    abstract annotation AnnotationC;\n"
+            "    abstract annotation AnnotationD;\n"
+            "    type Bar;\n"
+            "    type Foo {\n"
+                    + ''.join(
+                        ' ' * 8 + s + '\n'
+                        for s in ordered_statements
+                    ) +
+            "    };\n"
+            "};",
+        )
+
+    def test_schema_sdl_text_order_type_02(self):
+        # Test that sdl text sorts pointers.
+        ordered_names = [
+            chr(ord('A') + c)
+            for c in range(10)
+        ]
+        shuffled_names = ordered_names[:]
+        random.Random(1).shuffle(shuffled_names)
+
+        statements = [
+            (
+                'type Foo {\n',
+                '    property X: std::int64;',
+                '};',
+            ),
+            (
+                'type Bar; type Foo {\n',
+                '    link X: default::Bar;',
+                '};',
+            ),
+            (
+                'type Bar; type Foo { link bar: default::Bar {\n',
+                '    property X: std::int64;',
+                '};};',
+            ),
+        ]
+
+        for prefix, statement, suffix in statements:
+            self._assert_sdl_text_from_schema(
+                prefix
+                + ''.join(
+                    statement.replace('X', name) + '\n'
+                    for name in shuffled_names
+                )
+                + suffix,
+                'module default {\n'
+                + prefix
+                + ''.join(
+                    ' ' * 4 + statement.replace('X', name) + '\n'
+                    for name in ordered_names
+                )
+                + suffix
+                + '};',
             )
 
 

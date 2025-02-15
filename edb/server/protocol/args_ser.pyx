@@ -23,6 +23,7 @@ from libc.stdint cimport int8_t, uint8_t, int16_t, uint16_t, \
 
 from edb import errors
 from edb.server.compiler import sertypes
+from edb.server.compiler import enums
 from edb.server.dbview cimport dbview
 
 from edb.server.pgproto cimport hton
@@ -36,6 +37,10 @@ from edb.server.pgproto.pgproto cimport (
     frb_slice_from,
 )
 
+cdef uint32_t SCALAR_TAG = int(enums.TypeTag.SCALAR)
+cdef uint32_t TUPLE_TAG = int(enums.TypeTag.TUPLE)
+cdef uint32_t ARRAY_TAG = int(enums.TypeTag.ARRAY)
+
 
 cdef recode_bind_args_for_script(
     dbview.DatabaseConnectionView dbv,
@@ -46,6 +51,9 @@ cdef recode_bind_args_for_script(
 ):
     cdef:
         WriteBuffer bind_data
+        ssize_t i
+        ssize_t oidx
+        ssize_t iidx
 
     unit_group = compiled.query_unit_group
 
@@ -71,8 +79,8 @@ cdef recode_bind_args_for_script(
         bind_data.write_int16(<int16_t>num_args)
 
         if query_unit.in_type_args:
-            for arg in query_unit.in_type_args:
-                oidx = arg.outer_idx
+            for iidx, arg in enumerate(query_unit.in_type_args):
+                oidx = arg.outer_idx if arg.outer_idx is not None else iidx
                 barg = recoded[positions[oidx]:positions[oidx+1]]
                 bind_data.write_bytes(barg)
 
@@ -94,6 +102,7 @@ cdef WriteBuffer recode_bind_args(
     bytes bind_args,
     # XXX do something better?!?
     list positions = None,
+    list data_types = None,
 ):
     cdef:
         FRBuffer in_buf
@@ -112,10 +121,6 @@ cdef WriteBuffer recode_bind_args(
         &in_buf,
         cpython.PyBytes_AS_STRING(bind_args),
         cpython.Py_SIZE(bind_args))
-
-    # all parameters are in binary
-    if live:
-        out_buf.write_int32(0x00010001)
 
     # number of elements in the tuple
     # for empty tuple it's okay to send zero-length arguments
@@ -147,10 +152,36 @@ cdef WriteBuffer recode_bind_args(
             f"argument count mismatch {recv_args} != {compiled.first_extra}"
         num_args += compiled.extra_counts[0]
 
-    num_args += _count_globals(qug)
+    num_globals = _count_globals(qug)
+    num_args += num_globals
 
     if live:
+        if not compiled.extra_formatted_as_text:
+            # all parameter values are in binary
+            out_buf.write_int32(0x00010001)
+        elif not recv_args and not num_globals:
+            # all parameter values are in text (i.e extracted SQL constants)
+            out_buf.write_int16(0x0000)
+        else:
+            # got a mix of binary and text, spell them out explicitly
+            out_buf.write_int16(<int16_t>num_args)
+            # explicit args are in binary
+            for _ in range(recv_args):
+                out_buf.write_int16(0x0001)
+            # and extracted SQL constants are in text
+            if compiled.extra_counts:
+                for _ in range(compiled.extra_counts[0]):
+                    out_buf.write_int16(0x0000)
+            # and injected globals are binary again
+            for _ in range(num_globals):
+                out_buf.write_int16(0x0001)
+
         out_buf.write_int16(<int16_t>num_args)
+
+    if data_types is not None and compiled.extra_type_oids:
+        data_types.extend([0] * recv_args)
+        data_types.extend(compiled.extra_type_oids)
+        data_types.extend([0] * num_globals)
 
     if qug.in_type_args:
         for param in qug.in_type_args:
@@ -184,7 +215,7 @@ cdef WriteBuffer recode_bind_args(
                 if param.array_type_id is not None:
                     array_tid = dbv.resolve_backend_type_id(
                         param.array_type_id)
-                    recode_array(dbv, &in_buf, out_buf, in_len, array_tid)
+                    recode_array(dbv, &in_buf, out_buf, in_len, array_tid, None)
                 else:
                     data = frb_read(&in_buf, in_len)
                     out_buf.write_cstr(data, in_len)
@@ -202,20 +233,118 @@ cdef WriteBuffer recode_bind_args(
         # All columns are in binary format
         out_buf.write_int32(0x00010001)
 
+    if frb_get_len(&in_buf):
+        raise errors.InputDataError('unexpected trailing data in buffer')
+
     return out_buf
 
 
-cdef WriteBuffer recode_array(
+cdef bytes recode_global(
+    dbv: dbview.DatabaseConnectionView,
+    glob: bytes,
+    glob_descriptor: object,
+):
+    cdef:
+        WriteBuffer out_buf
+        FRBuffer in_buf
+
+    if glob_descriptor is None:
+        return glob
+
+    out_buf = WriteBuffer.new()
+
+    assert cpython.PyBytes_CheckExact(glob)
+    frb_init(
+        &in_buf,
+        cpython.PyBytes_AS_STRING(glob),
+        cpython.Py_SIZE(glob))
+
+    _recode_global(dbv, &in_buf, out_buf, in_buf.len, glob_descriptor)
+
+    if frb_get_len(&in_buf):
+        raise errors.InputDataError('unexpected trailing data in buffer')
+
+    return bytes(memoryview(out_buf))
+
+
+cdef _recode_global(
+    dbv: dbview.DatabaseConnectionView,
+    FRBuffer* in_buf,
+    out_buf: WriteBuffer,
+    in_len: ssize_t,
+    glob_descriptor: object,
+):
+    if glob_descriptor is None:
+        data = frb_read(in_buf, in_len)
+        out_buf.write_cstr(data, in_len)
+    elif glob_descriptor[0] == TUPLE_TAG:
+        _, el_tids, el_infos = glob_descriptor
+        recode_global_tuple(dbv, in_buf, out_buf, in_len, el_tids, el_infos)
+    elif glob_descriptor[0] == ARRAY_TAG:
+        _, el_tid, tuple_info = glob_descriptor
+        btid = dbv.resolve_backend_type_id(el_tid)
+        recode_array(dbv, in_buf, out_buf, in_len, btid, tuple_info)
+
+
+cdef recode_global_tuple(
+    dbv: dbview.DatabaseConnectionView,
+    FRBuffer* in_buf,
+    out_buf: WriteBuffer,
+    in_len: ssize_t,
+    el_tids: tuple,
+    el_infos: tuple,
+):
+    """
+    Tuples in globals need to have NULLs checked and oids injected,
+    like arrays do.
+
+    Annoyingly this is a *totally separate* code path than tuple query
+    parameters go through. This is because global tuples actually can
+    get passed as postgres composite types, since they are declared in
+    the schema.
+    """
+    cdef:
+        WriteBuffer buf
+        ssize_t cnt
+        ssize_t idx
+        ssize_t num
+        ssize_t tag
+        FRBuffer sub_buf
+
+    frb_slice_from(&sub_buf, in_buf, in_len)
+
+    cnt = <uint32_t>hton.unpack_int32(frb_read(&sub_buf, 4))
+    out_buf.write_int32(cnt)
+    num = len(el_tids)
+    if cnt != num:
+        raise errors.InputDataError(
+            f"tuple length mismatch: {cnt} vs {num}")
+    for idx in range(num):
+        frb_read(&sub_buf, 4)
+        el_btid = dbv.resolve_backend_type_id(el_tids[idx])
+        out_buf.write_int32(<int32_t>el_btid)
+
+        in_len = hton.unpack_int32(frb_read(&sub_buf, 4))
+        if in_len < 0:
+            raise errors.InputDataError("invalid NULL inside type")
+        out_buf.write_int32(in_len)
+        _recode_global(dbv, &sub_buf, out_buf, in_len, el_infos[idx])
+
+    if frb_get_len(&sub_buf):
+        raise errors.InputDataError('unexpected trailing data in buffer')
+
+
+cdef recode_array(
     dbv: dbview.DatabaseConnectionView,
     FRBuffer* in_buf,
     out_buf: WriteBuffer,
     in_len: ssize_t,
     array_tid: int32_t,
+    tuple_info: object,
 ):
     # For a standalone array, we still need to inject oids and reject
     # NULL elements.
     cdef:
-        WriteBuffer buf
         ssize_t cnt
         ssize_t idx
         ssize_t num
@@ -249,13 +378,16 @@ cdef WriteBuffer recode_array(
             if in_len < 0:
                 raise errors.InputDataError("invalid NULL inside type")
             out_buf.write_int32(in_len)
-            data = frb_read(&sub_buf, in_len)
-            out_buf.write_cstr(data, in_len)
+            if tuple_info is None:
+                data = frb_read(&sub_buf, in_len)
+                out_buf.write_cstr(data, in_len)
+            else:
+                _recode_global(dbv, &sub_buf, out_buf, in_len, tuple_info)
         if frb_get_len(&sub_buf):
             raise errors.InputDataError('unexpected trailing data in buffer')
 
 
-cdef WriteBuffer _decode_tuple_args_core(
+cdef _decode_tuple_args_core(
     FRBuffer* in_buf,
     out_bufs: tuple[WriteBuffer],
     counts: list[int],
@@ -288,14 +420,14 @@ cdef WriteBuffer _decode_tuple_args_core(
 
     frb_slice_from(&sub_buf, in_buf, in_len)
 
-    if tag == 0:  # scalar
+    if tag == SCALAR_TAG:
         buf.write_int32(in_len)
         data = frb_read(&sub_buf, in_len)
         buf.write_cstr(data, in_len)
         if in_array:
             counts[idx] += 1
 
-    elif tag == 1:  # tuple
+    elif tag == TUPLE_TAG:
         cnt = <uint32_t>hton.unpack_int32(frb_read(&sub_buf, 4))
         num = len(trans_typ) - 2
         if cnt != num:
@@ -307,7 +439,7 @@ cdef WriteBuffer _decode_tuple_args_core(
             _decode_tuple_args_core(
                 &sub_buf, out_bufs, counts, acounts, typ, in_array)
 
-    elif tag == 2:  # array
+    elif tag == ARRAY_TAG:
         val = hton.unpack_int32(frb_read(&sub_buf, 4)) # ndims
         if val != 1 and val != 0:
             raise errors.InputDataError("unsupported array dimensions")
@@ -357,10 +489,15 @@ cdef WriteBuffer _decode_tuple_args(
         list acounts
         WriteBuffer buf
 
+    # N.B: We have peeked at in_len, but the size is still in the buffer, for
+    # more convenient processing by _decode_tuple_args_core
+
     if in_len < 0:
         # For a NULL argument, fill out *every* one of our args with NULL
         for _ in tids:
             out_buf.write_int32(in_len)
+        # We only peeked at in_len before, so consume it now
+        frb_read(in_buf, 4)
         return
 
     buffers = []
@@ -433,3 +570,30 @@ cdef uint64_t _count_globals(
                 num_args += 1
 
     return num_args
+
+
+cdef WriteBuffer combine_raw_args(
+    args: tuple[bytes, ...] | list[bytes] = (),
+):
+    cdef:
+        int arg_len
+        WriteBuffer bind_data = WriteBuffer.new()
+
+    if len(args) > 32767:
+        raise AssertionError(
+            'the number of query arguments cannot exceed 32767')
+
+    bind_data.write_int32(0x00010001)
+    bind_data.write_int16(<int16_t> len(args))
+    for arg in args:
+        if arg is None:
+            bind_data.write_int32(-1)
+        else:
+            arg_len = len(arg)
+            if arg_len > 0x7fffffff:
+                raise ValueError("argument too long")
+            bind_data.write_int32(<int32_t> arg_len)
+            bind_data.write_bytes(arg)
+    bind_data.write_int32(0x00010001)
+
+    return bind_data

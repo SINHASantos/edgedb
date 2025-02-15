@@ -54,7 +54,7 @@ class FlagsMeta(type):
                 continue
             flag.name = flagname
             flags[flagname] = flag
-            dct[flagname] = False
+            dct[flagname] = flag.default
 
         dct['_items'] = flags
         return super().__new__(mcls, name, bases, dct)
@@ -64,9 +64,10 @@ class FlagsMeta(type):
 
 
 class Flag:
-    def __init__(self, *, doc: str):
+    def __init__(self, *, doc: str, default: bool=False):
         self.name = None
         self.doc = doc
+        self.default = default
 
 
 class flags(metaclass=FlagsMeta):
@@ -109,11 +110,17 @@ class flags(metaclass=FlagsMeta):
     edgeql_compile_sql_reordered_text = Flag(
         doc="Dump generated SQL-like text that might better reflect scoping.")
 
+    edgeql_explain = Flag(
+        doc="Dump extra debug info when doing EXPLAIN")
+
     edgeql_disable_normalization = Flag(
         doc="Disable EdgeQL normalization (constant extraction etc)")
 
     graphql_compile = Flag(
         doc="Debug GraphQL compiler.")
+
+    sdl_loading = Flag(
+        doc="Print applied DDL when loading SDL.")
 
     delta_plan = Flag(
         doc="Print expanded delta command tree prior to processing.")
@@ -121,11 +128,14 @@ class flags(metaclass=FlagsMeta):
     delta_pgsql_plan = Flag(
         doc="Print delta command tree annortated with DB ops.")
 
-    delta_plan_input = Flag(
-        doc="Print delta command tree produced from DDL.")
-
     delta_execute = Flag(
         doc="Output SQL commands as executed during migration.")
+
+    delta_execute_ddl = Flag(
+        doc="Output just the DDL commands as executed during migration.")
+
+    delta_validate_reflection = Flag(
+        doc="Whether to do expensive validation of reflection correctness.")
 
     server = Flag(
         doc="Print server errors.")
@@ -133,8 +143,11 @@ class flags(metaclass=FlagsMeta):
     server_proto = Flag(
         doc="Print server protocol querying messages.")
 
-    http_inject_cors = Flag(
-        doc="Inject 'Access-Control-Allow-Origin: *' header in HTTP ports.")
+    server_clobber_pg_conns = Flag(
+        doc="Discard Postgres connections when releasing them to the pool.")
+
+    edgeql_text_in_sql = Flag(
+        doc="Include the EdgeQL query text in the SQL sent to Postgres.")
 
     print_locals = Flag(
         doc="Include values of local variables in tracebacks.")
@@ -153,6 +166,22 @@ class flags(metaclass=FlagsMeta):
 
     disable_docs_edgeql_validation = Flag(
         doc="Disable validation of edgeql in docs (for site build)")
+
+    pydebug_listen = Flag(
+        doc="Enable listening for Debug Adapter Protocol connections. "
+            "Requires pydebug to be installed."
+    )
+
+    sql_input = Flag(
+        doc="Enable logging of SQL incoming requests (pg compiler input)."
+    )
+
+    sql_output = Flag(
+        doc="Enable logging of SQL requests, compiled to the internal SQL"
+            "(pg compiler output)."
+    )
+
+    zombodb = Flag(doc="Enabled zombodb and disables postgres FTS")
 
 
 @contextlib.contextmanager
@@ -173,6 +202,11 @@ def header(*args):
 def dump(*args, **kwargs):
     from . import markup as _markup
     _markup.dump(*args, **kwargs)
+
+
+def dumps(*args, **kwargs):
+    from . import markup as _markup
+    return _markup.dumps(*args, **kwargs)
 
 
 def dump_code(*args, **kwargs):
@@ -223,10 +257,8 @@ def init_debug_flags():
             warnings.warn(f'Unknown debug flag: {env_name!r}', stacklevel=2)
             continue
 
-        if env_val.strip() in {'', '0'}:
-            continue
-
-        setattr(flags, name, True)
+        value = env_val.strip() not in {'', '0'}
+        setattr(flags, name, value)
 
 
 init_debug_flags()

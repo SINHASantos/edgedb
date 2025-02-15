@@ -811,6 +811,83 @@ class TestEdgeQLCoalesce(tb.QueryTestCase):
             ],
         )
 
+        await self.assert_query_result(
+            r'''
+                WITH
+                    I := (
+                        SELECT Issue
+                        FILTER Issue.status.name = 'Open'
+                    )
+                # `I.time_estimate` is now a LCP
+                SELECT I.time_estimate ?= (I.time_estimate,).0;
+            ''',
+            [
+                True,
+            ],
+        )
+
+        await self.assert_query_result(
+            r'''
+                WITH
+                    I := (
+                        SELECT Issue
+                        FILTER Issue.status.name = 'Open'
+                    )
+                # `I.time_estimate` is now a LCP
+                SELECT (I.time_estimate,).0 ?= (I.time_estimate,).0;
+            ''',
+            [
+                True,
+            ],
+        )
+
+        await self.assert_query_result(
+            r'''
+                WITH
+                    I := (
+                        SELECT Issue
+                        FILTER Issue.status.name = 'Open'
+                    )
+                # `I.time_estimate` is now a LCP
+                SELECT ((I.time_estimate,).0,).0 ?= (I.time_estimate,).0;
+            ''',
+            [
+                True,
+            ],
+        )
+
+        await self.assert_query_result(
+            r'''
+                WITH
+                    I := (
+                        SELECT Issue
+                        FILTER Issue.status.name = 'Open'
+                    )
+                # `I.time_estimate` is now a LCP
+                SELECT
+                  ({I.time_estimate} = 0) ?=
+                  (({I.time_estimate} = 0) = (I.time_estimate = 0));
+            ''',
+            [
+                True,
+            ],
+        )
+
+        await self.assert_query_result(
+            r'''
+                WITH
+                    I := (
+                        SELECT Issue
+                        FILTER Issue.status.name = 'Open'
+                    )
+                # `I.time_estimate` is now a LCP
+                SELECT {I.time_estimate} ?= (I.time_estimate,).0;
+            ''',
+            [
+                True,
+            ],
+        )
+
     async def test_edgeql_coalesce_dependent_21(self):
         await self.assert_query_result(
             r'''
@@ -1744,3 +1821,151 @@ class TestEdgeQLCoalesce(tb.QueryTestCase):
                 {"z": None}, {"z": None}, {"z": None}
             ]),
         )
+
+    async def test_edgeql_coalesce_single_links_01(self):
+        await self.con.execute(
+            '''
+            CREATE TYPE default::Content;
+            CREATE TYPE default::Noob {
+                CREATE LINK primary: default::Content;
+                CREATE LINK secondary: default::Content;
+            };
+            insert Noob {
+              primary := (insert Content)
+            };
+            insert Noob {
+              secondary := (insert Content)
+            };
+            '''
+        )
+
+        await self.assert_query_result(
+            r'''
+            select Noob {
+              coalesce := (.primary ?? .secondary),
+            };
+            ''',
+            [
+                {'coalesce': {'id': str}},
+                {'coalesce': {'id': str}},
+            ],
+            implicit_limit=100,
+        )
+
+        await self.assert_query_result(
+            r'''
+            select Noob {
+              coalesce := (select (.primary ?? .secondary) limit 100),
+            };
+            ''',
+            [
+                {'coalesce': {'id': str}},
+                {'coalesce': {'id': str}},
+            ],
+        )
+
+        await self.assert_query_result(
+            r'''
+            select Noob {
+              coalesce := {.primary ?? .secondary},
+            };
+            ''',
+            [
+                {'coalesce': {'id': str}},
+                {'coalesce': {'id': str}},
+            ],
+        )
+
+    async def test_edgeql_optional_leakage_01(self):
+        await self.con.execute(
+            r'''
+                insert Comment {
+                    body := "a",
+                    owner := assert_single(User),
+                    issue := (select Issue limit 1),
+                };
+            '''
+        )
+
+        await self.assert_query_result(
+            '''
+            select (
+              Comment,
+              (select (
+                <str>Comment.parent.id ?= '',
+                Comment.body
+              )),
+            );
+            ''',
+            [({}, (False, 'a'))],
+        )
+
+        await self.assert_query_result(
+            r'''
+                select (
+                  Comment.body,
+                  (select (
+                    <str>Comment.parent.id ?= '' or
+                    Comment.id ?= <uuid>{}
+                  )),
+                ) filter .1;
+            ''',
+            [],
+        )
+
+    async def test_edgeql_optional_ensure_source_01(self):
+        await self.assert_query_result(
+            r'''
+                with x := array_unpack(<array<Issue>>[])
+                select (x.name ?= x.body);
+            ''',
+            [True],
+        )
+
+        await self.assert_query_result(
+            r'''
+                with user := array_unpack(<array<Object>>[])
+                select
+                    (<str>user.id ?? "") ++ <str>(exists user);
+            ''',
+            ["false"],
+        )
+
+    async def test_edgeql_optional_ensure_source_02(self):
+        await self.con.execute('''
+            create function test(x: optional Issue) -> bool using (
+                (x.name ?= x.body)
+            )
+        ''')
+
+        await self.assert_query_result(
+            r'''
+                select test(<Issue>{})
+            ''',
+            [True],
+        )
+
+    async def test_edgeql_optional_array_cast_01(self):
+        await self.assert_query_result(
+            '''
+            select <array<str>>to_json('null') ?? [];
+            ''',
+            [[]],
+        )
+
+    async def test_edgeql_optional_array_cast_02(self):
+        await self.assert_query_result(
+            '''
+            select {<array<str>>to_json('null')} ?? [];
+            ''',
+            [[]],
+        )
+
+    async def test_edgeql_coalesce_policy_link_01(self):
+        await self.con.query('''
+            with module schema
+            select Type {
+              range_element_type_id := [is Range].element_type.id
+                  ?? [is MultiRange].element_type.id,
+            };
+        ''')

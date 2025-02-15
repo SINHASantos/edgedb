@@ -17,6 +17,8 @@
 #
 
 
+from __future__ import annotations
+from typing import Type, TYPE_CHECKING
 import http
 import json
 
@@ -26,8 +28,17 @@ from edb.common import markup
 
 from . import scram
 
+if TYPE_CHECKING:
+    from edb.server import tenant as edbtenant
+    from edb.server.protocol import protocol
 
-async def handle_request(request, response, path_parts, server):
+
+async def handle_request(
+    request: protocol.HttpRequest,
+    response: protocol.HttpResponse,
+    path_parts: list[str],
+    tenant: edbtenant.Tenant,
+) -> None:
     try:
         if path_parts == ["token"]:
             if not request.authorization:
@@ -40,7 +51,7 @@ async def handle_request(request, response, path_parts, server):
             ).partition(" ")
 
             if scheme.lower().startswith("scram"):
-                scram.handle_request(scheme, auth_str, response, server)
+                scram.handle_request(scheme, auth_str, response, tenant)
             else:
                 response.body = b"Unsupported authentication scheme"
                 response.status = http.HTTPStatus.UNAUTHORIZED
@@ -68,7 +79,12 @@ async def handle_request(request, response, path_parts, server):
         )
 
 
-def _response_error(response, status, message, ex_type):
+def _response_error(
+    response: protocol.HttpResponse,
+    status: http.HTTPStatus,
+    message: str,
+    ex_type: Type[errors.EdgeDBError],
+) -> None:
     err_dct = {
         "message": message,
         "type": str(ex_type.__name__),

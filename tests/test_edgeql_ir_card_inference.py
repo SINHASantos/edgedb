@@ -35,7 +35,7 @@ class TestEdgeQLCardinalityInference(tb.BaseEdgeQLCompilerTest):
                           'cards_ir_inference.esdl')
 
     def run_test(self, *, source, spec, expected):
-        qltree = qlparser.parse(source)
+        qltree = qlparser.parse_query(source)
         ir = compiler.compile_ast_to_ir(
             qltree,
             self.schema,
@@ -68,7 +68,7 @@ class TestEdgeQLCardinalityInference(tb.BaseEdgeQLCompilerTest):
             shape = ir.expr.expr.result.shape
             for el, _ in shape:
                 if str(el.path_id.rptr_name()).endswith(field):
-                    card = el.rptr.ptrref.out_cardinality
+                    card = el.expr.ptrref.out_cardinality
                     self.assertEqual(card, expected_cardinality,
                                      'unexpected cardinality:\n' + source)
                     break
@@ -364,6 +364,33 @@ class TestEdgeQLCardinalityInference(tb.BaseEdgeQLCompilerTest):
         }
 % OK %
         parent: AT_MOST_ONE
+        """
+
+    def test_edgeql_ir_card_inference_36b(self):
+        """
+        SELECT Eert {
+            asdf := .<children[is Eert]
+        }
+% OK %
+        asdf: AT_MOST_ONE
+        """
+
+    def test_edgeql_ir_card_inference_36c(self):
+        """
+        SELECT Eert {
+            asdf := .<children[is Asdf]
+        }
+% OK %
+        asdf: MANY
+        """
+
+    def test_edgeql_ir_card_inference_36d(self):
+        """
+        SELECT Eert {
+            asdf := .<children[is Object]
+        }
+% OK %
+        asdf: MANY
         """
 
     def test_edgeql_ir_card_inference_37(self):
@@ -1062,4 +1089,256 @@ class TestEdgeQLCardinalityInference(tb.BaseEdgeQLCompilerTest):
         update X filter .name = 'Alice' set { }
 % OK %
         MANY
+        """
+
+    def test_edgeql_ir_card_inference_123(self):
+        """
+        select Card { req_awards }
+% OK %
+        req_awards: AT_LEAST_ONE
+        """
+
+    def test_edgeql_ir_card_inference_124(self):
+        """
+        select Card { x := .req_awards }
+% OK %
+        x: AT_LEAST_ONE
+        """
+
+    def test_edgeql_ir_card_inference_125(self):
+        """
+        select Card { required x := .req_awards }
+% OK %
+        x: AT_LEAST_ONE
+        """
+
+    def test_edgeql_ir_card_inference_126(self):
+        """
+        select Card { req_tags }
+% OK %
+        req_tags: AT_LEAST_ONE
+        """
+
+    def test_edgeql_ir_card_inference_127(self):
+        """
+        select Card { x := .req_tags }
+% OK %
+        x: AT_LEAST_ONE
+        """
+
+    def test_edgeql_ir_card_inference_128(self):
+        """
+        select Card { required x := .req_tags }
+% OK %
+        x: AT_LEAST_ONE
+        """
+
+    def test_edgeql_ir_card_inference_129(self):
+        """
+        select assert(<bool>{})
+% OK %
+        AT_MOST_ONE
+        """
+
+    def test_edgeql_ir_card_inference_130(self):
+        """
+        select assert(<bool>{}, message := {'uh', 'oh'})
+% OK %
+        MANY
+        """
+
+    def test_edgeql_ir_card_inference_131(self):
+        """
+        select assert(true, message := {'uh', 'oh'})
+% OK %
+        AT_LEAST_ONE
+        """
+
+    def test_edgeql_ir_card_inference_132(self):
+        """
+        select distinct <str>{}
+% OK %
+        AT_MOST_ONE
+        """
+
+    def test_edgeql_ir_card_inference_133(self):
+        """
+        select distinct 1
+% OK %
+        ONE
+        """
+
+    def test_edgeql_ir_card_inference_134(self):
+        """
+        select distinct {1, 2}
+% OK %
+        AT_LEAST_ONE
+        """
+
+    def test_edgeql_ir_card_inference_135(self):
+        """
+        <str>{} if true else {'foo', 'bar'}
+% OK %
+        MANY
+        """
+
+    def test_edgeql_ir_card_inference_136(self):
+        """
+        <str>{} if true else 'foo'
+% OK %
+        AT_MOST_ONE
+        """
+
+    def test_edgeql_ir_card_inference_137(self):
+        """
+        'bar' if true else 'foo'
+% OK %
+        ONE
+        """
+
+    def test_edgeql_ir_card_inference_138(self):
+        """
+        assert_exists(1, message := {"uh", "oh"})
+% OK %
+        AT_LEAST_ONE
+        """
+
+    def test_edgeql_ir_card_inference_139(self):
+        """
+        if <bool>$0 then
+            (insert User { name := "test" })
+        else
+            (insert User { name := "???" })
+% OK %
+        ONE
+        """
+
+    def test_edgeql_ir_card_inference_140(self):
+        """
+        if <bool>$0 then
+            (insert User { name := "test" })
+        else
+            {(insert User { name := "???" }), (insert User { name := "!!!" })}
+% OK %
+        AT_LEAST_ONE
+        """
+
+    def test_edgeql_ir_card_inference_141(self):
+        """
+        if <bool>$0 then
+            (insert User { name := "test" })
+        else
+            <User>{}
+% OK %
+        AT_MOST_ONE
+        """
+
+    def test_edgeql_ir_card_inference_142(self):
+        """
+        select Named { [is Card].element }
+% OK %
+        element: AT_MOST_ONE
+        """
+
+    def test_edgeql_ir_card_inference_143(self):
+        """
+        select Named { element := [is Card].element }
+% OK %
+        element: AT_MOST_ONE
+        """
+
+    def test_edgeql_ir_card_inference_144(self):
+        """
+        select (
+          select assert_exists(Named) { [is Card].element } limit 1).element
+% OK %
+        AT_MOST_ONE
+        """
+
+    def test_edgeql_ir_card_inference_145(self):
+        """
+        select Named { [is Named].name }
+% OK %
+        name: ONE
+        """
+
+    def test_edgeql_ir_card_inference_146(self):
+        """
+        select User { [is Named].name }
+% OK %
+        name: ONE
+        """
+
+    @tb.must_fail(errors.QueryError,
+                  "possibly an empty set returned")
+    def test_edgeql_ir_card_inference_147(self):
+        """
+        select Named { [is User].name }
+        """
+
+    @tb.must_fail(errors.QueryError,
+                  "possibly an empty set returned")
+    def test_edgeql_ir_card_inference_148(self):
+        """
+        select Named { name := [is User].name }
+        """
+
+    @tb.must_fail(errors.QueryError,
+                  "possibly an empty set returned")
+    def test_edgeql_ir_card_inference_149(self):
+        """
+        select Named { [is schema::Object].name }
+        """
+
+    @tb.must_fail(errors.QueryError,
+                  "possibly an empty set returned")
+    def test_edgeql_ir_card_inference_150(self):
+        """
+        select User { [is schema::Object].name }
+        """
+
+    def test_edgeql_ir_card_inference_151(self):
+        # lnk has a *delegated* constraint
+        """
+        select Tgt { back := .<lnk[is Src] }
+% OK %
+        back: MANY
+        """
+
+    def test_edgeql_ir_card_inference_152(self):
+        """
+        select Tgt { back := .<lnk[is SrcSub1] }
+% OK %
+        back: AT_MOST_ONE
+        """
+
+    def test_edgeql_ir_card_inference_153(self):
+        # Constraint is delegated, shouldn't apply here
+        """
+        select Named filter .name = ''
+% OK %
+        MANY
+        """
+
+    def test_edgeql_ir_card_inference_154(self):
+        # Constraint is delegated, shouldn't apply here
+        """
+        select Named2 filter .name = ''
+% OK %
+        MANY
+        """
+
+    def test_edgeql_ir_card_inference_155(self):
+        # But should apply to this subtype
+        """
+        select Named2Sub filter .name = ''
+% OK %
+        AT_MOST_ONE
+        """
+
+    def test_edgeql_ir_card_inference_156(self):
+        """
+        select global Alice
+% OK %
+        AT_MOST_ONE
         """

@@ -7,27 +7,75 @@ The ``insert`` command is used to create instances of object types. The code
 samples on this page assume the following schema:
 
 .. code-block:: sdl
+    :version-lt: 3.0
 
-  module default {
-    abstract type Person {
-      required property name -> str { constraint exclusive };
+    module default {
+      abstract type Person {
+        required property name -> str { constraint exclusive };
+      }
+
+      type Hero extending Person {
+        property secret_identity -> str;
+        multi link villains := .<nemesis[is Villain];
+      }
+
+      type Villain extending Person {
+        link nemesis -> Hero;
+      }
+
+      type Movie {
+        required property title -> str { constraint exclusive };
+        required property release_year -> int64;
+        multi link characters -> Person;
+      }
     }
 
-    type Hero extending Person {
-      property secret_identity -> str;
-      multi link villains := .<nemesis[is Villain];
+.. code-block:: sdl
+    :version-lt: 4.0
+
+    module default {
+      abstract type Person {
+        required name: str { constraint exclusive };
+      }
+
+      type Hero extending Person {
+        secret_identity: str;
+        multi link villains := .<nemesis[is Villain];
+      }
+
+      type Villain extending Person {
+        nemesis: Hero;
+      }
+
+      type Movie {
+        required title: str { constraint exclusive };
+        required release_year: int64;
+        multi characters: Person;
+      }
     }
 
-    type Villain extending Person {
-      link nemesis -> Hero;
-    }
+.. code-block:: sdl
 
-    type Movie {
-      required property title -> str { constraint exclusive };
-      required property release_year -> int64;
-      multi link characters -> Person;
+    module default {
+      abstract type Person {
+        required name: str { constraint exclusive };
+      }
+
+      type Hero extending Person {
+        secret_identity: str;
+        multi villains := .<nemesis[is Villain];
+      }
+
+      type Villain extending Person {
+        nemesis: Hero;
+      }
+
+      type Movie {
+        required title: str { constraint exclusive };
+        required release_year: int64;
+        multi characters: Person;
+      }
     }
-  }
 
 
 .. _ref_eql_insert_basic:
@@ -69,19 +117,58 @@ You can only ``insert`` instances of concrete (non-abstract) object types.
   ... };
   error: QueryError: cannot insert into abstract object type 'default::Person'
 
+By default, ``insert`` returns only the inserted object's ``id`` as seen in the
+examples above. If you want to get additional data back, you may wrap your
+``insert`` with a ``select`` and apply a shape specifying any properties and
+links you want returned:
+
+.. code-block:: edgeql-repl
+
+  db> select (insert Hero {
+  ...   name := "Spider-Man"
+  ...   # secret_identity is omitted
+  ... }) {id, name};
+  {
+    default::Hero {
+      id: b0fbe9de-3e90-11ec-8c12-ffa2d5f0176a,
+      name: "Spider-Man"
+    }
+  }
+
+You can use :ref:`ref_eql_with` to tidy this up if you prefer:
+
+.. code-block:: edgeql-repl
+
+  db> with NewHero := (insert Hero {
+  ...   name := "Spider-Man"
+  ...   # secret_identity is omitted
+  ... })
+  ... select NewHero {
+  ...   id,
+  ...   name,
+  ... }
+  {
+    default::Hero {
+      id: b0fbe9de-3e90-11ec-8c12-ffa2d5f0176a,
+      name: "Spider-Man"
+    }
+  }
+
+
 .. _ref_eql_insert_links:
 
 Inserting links
 ---------------
 
 EdgeQL's composable syntax makes link insertion painless. Below, we insert
-"Avengers: Endgame" and include all known heroes and villains as
+"Spider-Man: No Way Home" and include all known heroes and villains as
 ``characters`` (which is basically true).
 
 .. code-block:: edgeql-repl
 
   db> insert Movie {
   ...   title := "Spider-Man: No Way Home",
+  ...   release_year := 2021,
   ...   characters := (
   ...     select Person
   ...     filter .name in {
@@ -95,10 +182,9 @@ EdgeQL's composable syntax makes link insertion painless. Below, we insert
   {default::Movie {id: 9b1cf9e6-3e95-11ec-95a2-138eeb32759c}}
 
 To assign to the ``Movie.characters`` link, we're using a *subquery*. This
-subquery is executed and resolves to a singleton set of type ``Person``, which
-is assignable to ``characters``.  Note that the inner ``select Person``
-statement is wrapped in parentheses; this is required for all subqueries in
-EdgeQL.
+subquery is executed and resolves to a set of type ``Person``, which is
+assignable to ``characters``.  Note that the inner ``select Person`` statement
+is wrapped in parentheses; this is required for all subqueries in EdgeQL.
 
 Now let's assign to a *single link*.
 
@@ -153,6 +239,7 @@ Now let's write a nested insert for a ``multi`` link.
 
   db> insert Movie {
   ...   title := "Black Widow",
+  ...   release_year := 2021,
   ...   characters := {
   ...     (select Hero filter .name = "Black Widow"),
   ...     (insert Hero { name := "Yelena Belova"}),
@@ -189,13 +276,15 @@ With block
 
 In the previous query, we selected Black Widow twice: once in the
 ``characters`` set and again as the ``nemesis`` of Dreykov. In circumstances
-like this, you should pull that subquery into a ``with`` block.
+like this, pulling a subquery into a ``with`` block lets you avoid
+duplication.
 
 .. code-block:: edgeql-repl
 
   db> with black_widow := (select Hero filter .name = "Black Widow")
   ... insert Movie {
   ...   title := "Black Widow",
+  ...   release_year := 2021,
   ...   characters := {
   ...     black_widow,
   ...     (insert Hero { name := "Yelena Belova"}),
@@ -219,6 +308,7 @@ can reference earlier ones.
   ...  dreykov := (insert Villain {name := "Dreykov", nemesis := black_widow})
   ... insert Movie {
   ...   title := "Black Widow",
+  ...   release_year := 2021,
   ...   characters := { black_widow, yelena, dreykov }
   ... };
   {default::Movie {id: af706c7c-3e98-11ec-abb3-4bbf3f18a61a}}
@@ -237,7 +327,8 @@ in the database.
 .. code-block:: edgeql-repl
 
   db> insert Movie {
-  ...   title := "Eternals"
+  ...   title := "Eternals",
+  ...   release_year := 2021
   ... }
   ... unless conflict on .title
   ... else (select Movie);
@@ -254,6 +345,11 @@ conflicts and provide a fallback expression.
   Note that the ``else`` clause is simply ``select Movie``. There's no need to
   apply additional filters on ``Movie``; in the context of the ``else`` clause,
   ``Movie`` is bound to the conflicting object.
+
+.. note::
+
+    Using ``unless conflict`` on :ref:`multi properties
+    <ref_datamodel_props_cardinality>` is only supported in 2.10 and later.
 
 .. _ref_eql_upsert:
 
@@ -282,6 +378,81 @@ lets you express *upsert* logic in a single EdgeQL query.
 When a conflict occurs during the initial ``insert``, the statement falls back
 to the ``update`` statement in the ``else`` clause. This updates the
 ``release_year`` of the conflicting object.
+
+To learn to use upserts by trying them yourself, see `our interactive upserts
+tutorial </tutorial/data-mutations/upsert>`_.
+
+.. note::
+
+    It can be useful to know the outcome of an upsert. Here's an example
+    showing how you can return that:
+
+    .. code-block:: edgeql-repl
+
+      db> with
+      ...   title := "Eternals",
+      ...   release_year := 2021,
+      ...   movie := (
+      ...     insert Movie {
+      ...       title := title,
+      ...       release_year := release_year
+      ...     }
+      ...     unless conflict on .title
+      ...     else (
+      ...       update Movie set { release_year := release_year }
+      ...     )
+      ...   )
+      ... select movie {
+      ...   is_new := (movie not in Movie)
+      ... };
+      {default::Movie {is_new: true}}
+
+    This technique exploits the fact that a ``select`` will not return an
+    object inserted in the same query. We know that, if the record exists, we
+    updated it. If it does not, we inserted it.
+
+    By wrapping your upsert in a ``select`` and putting a shape on it that
+    queries for the object and returns whether or not it exists (as ``is_new``,
+    in this example), you can easily see whether the object was inserted or
+    updated.
+
+    If you want to also return some of the ``Movie`` object's data, drop
+    additional property names into the shape alongside ``is_new``. If you're on
+    3.0+, you can add ``Movie.*`` to the shape alongside ``is_new`` to get back
+    all of the ``Movie`` object's properties. You could even silo the data off,
+    keeping it separate from the ``is_new`` computed value like this:
+
+    .. code-block:: edgeql-repl
+
+      db> with
+      ...   title := "Eternals",
+      ...   release_year := 2021,
+      ...   movie := (
+      ...     insert Movie {
+      ...       title := title,
+      ...       release_year := release_year
+      ...     }
+      ...     unless conflict on .title
+      ...     else (
+      ...       update Movie set { release_year := release_year }
+      ...     )
+      ...   )
+      ... select {
+      ...   data := (select movie {*}),
+      ...   is_new := (movie not in Movie)
+      ... };
+      {
+        {
+          data: {
+            default::Movie {
+              id: 6880d0ba-62ca-11ee-9608-635818746433,
+              release_year: 2021,
+              title: 'Eternals'
+            }
+          },
+          is_new: false
+        }
+      }
 
 
 Suppressing failures
@@ -331,3 +502,7 @@ using a :ref:`for loop <ref_eql_for>` to insert the objects.
   * - **See also**
   * - :ref:`Reference > Commands > Insert <ref_eql_statements_insert>`
   * - :ref:`Cheatsheets > Inserting data <ref_cheatsheet_insert>`
+  * - `Tutorial > Data Mutations > Insert
+      </tutorial/data-mutations/insert>`_
+  * - `Tutorial > Data Mutations > Upsert
+      </tutorial/data-mutations/upsert>`_

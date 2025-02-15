@@ -21,7 +21,7 @@
 
 
 from __future__ import annotations
-from typing import *
+from typing import Any, Optional, Type, Mapping, Collection, Dict, TYPE_CHECKING
 
 from dataclasses import dataclass, field as dc_field
 
@@ -31,9 +31,13 @@ if TYPE_CHECKING:
     from edb.schema import name as s_name
     from edb.schema import types as s_types
     from edb.schema import pointers as s_pointers
+    from edb.ir import pathid
+    from edb.edgeql import qltypes
+
+    SourceOrPathId = s_types.Type | s_pointers.Pointer | pathid.PathId
 
 
-@dataclass
+@dataclass(kw_only=True)
 class GlobalCompilerOptions:
     """Compiler toggles that affect compilation as a whole."""
 
@@ -48,9 +52,6 @@ class GlobalCompilerOptions:
 
     #: Whether to allow specifying 'id' explicitly in INSERT
     allow_user_specified_id: bool = False
-
-    #: Enables constant folding optimization (enabled by default).
-    constant_folding: bool = True
 
     #: Force types of all parameters to std::json
     json_parameters: bool = False
@@ -69,22 +70,39 @@ class GlobalCompilerOptions:
     #: this contains the type of the schema object.
     schema_object_context: Optional[Type[s_obj.Object]] = None
 
+    #: When compiling a function body, the function name.
+    func_name: Optional[s_name.QualName] = None
+
     #: When compiling a function body, specifies function parameter
     #: definitions.
     func_params: Optional[s_func.ParameterLikeList] = None
+
+    #: Should the backend compiler expand inheritance CTEs in place.
+    #: This is needed by EXPLAIN to maintain alias names in
+    #: the query plan.
+    is_explain: bool = False
 
     #: The name that can be used in a "DML is disallowed in ..."
     #: error. When this is not None, any DML should cause an error.
     in_ddl_context_name: Optional[str] = None
 
-    #: Is this a dev instance of the compiler
-    devmode: bool = False
+    #: Whether to just treat all globals as empty instead of compiling them
+    make_globals_empty: bool = False
 
     #: Is the compiler running in testmode
     testmode: bool = False
 
+    # Is the compiler running in the server's schema reflection mode
+    schema_reflection_mode: bool = False
 
-@dataclass
+    # are we invoking the compiler from inside a CONFIGURE?
+    in_server_config_op: bool = False
+
+    # This this restoring a dump?
+    dump_restore_mode: bool = False
+
+
+@dataclass(kw_only=True)
 class CompilerOptions(GlobalCompilerOptions):
 
     #: Module name aliases.
@@ -116,13 +134,28 @@ class CompilerOptions(GlobalCompilerOptions):
 
     #: A set of schema types and links that should be treated
     #: as singletons in the context of this compilation.
-    singletons: Collection[Union[s_types.Type, s_pointers.Pointer]] = (
-        frozenset())
+    #: If a tuple is provided, the boolean argument indicates it is optional.
+    singletons: Collection[
+        SourceOrPathId | tuple[SourceOrPathId, bool]
+    ] = frozenset()
 
     #: Type references that should be remaped to another type.  This
     #: is for dealing with remapping explicit type names in schema
     #: expressions to their subtypes when necessary.
-    type_remaps: Dict[s_types.Type, s_types.Type] = (
-        dc_field(default_factory=dict))
+    type_remaps: Dict[s_obj.Object, s_obj.Object] = dc_field(
+        default_factory=dict
+    )
 
     detached: bool = False
+
+    #: In order to prevent recursive triggers, these fields are used to track
+    #: the sources of a given trigger. These will only be present if
+    #: schema_object_context is set to Trigger.
+    trigger_type: Optional[s_types.Type] = None
+    trigger_kinds: Optional[Collection[qltypes.TriggerKind]] = None
+
+    #: These represent the *configured* values of
+    #: simple_scoping/warn_old_scoping. If they are None, we check the
+    #: presence of the futures in the schema.
+    simple_scoping: Optional[bool] = None
+    warn_old_scoping: Optional[bool] = None

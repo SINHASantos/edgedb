@@ -19,17 +19,19 @@
 
 from __future__ import annotations
 
-from typing import *
+from typing import Optional, AbstractSet, List
 
 from edb.edgeql import ast as qlast
 from edb.edgeql import desugar_group
 from edb.ir import ast as irast
+from edb.ir import utils as irutils
 from edb.pgsql import ast as pgast
 
 from . import astutils
 from . import clauses
 from . import context
 from . import dispatch
+from . import enums as pgce
 from . import output
 from . import pathctx
 from . import relctx
@@ -83,19 +85,24 @@ def _compile_grouping_value(
     assert stmt.grouping_binding
     grouprel = ctx.rel
 
-    # If there is only one thing grouped on, just output the hardcoded
-    if len(used_args) == 1:
+    # If there is only one grouping set, hardcode the output
+    if all(isinstance(b, qlast.GroupingSimple) for b in stmt.by):
         return pgast.ArrayExpr(
             elements=[
-                pgast.StringConstant(
-                    val=desugar_group.key_name(list(used_args)[0]))]
+                pgast.StringConstant(val=desugar_group.key_name(arg))
+                for arg in used_args
+            ],
         )
 
     using = {k: stmt.using[k] for k in used_args}
 
     args = [
         pathctx.get_path_var(
-            grouprel, alias_set.path_id, aspect='value', env=ctx.env)
+            grouprel,
+            alias_set.path_id,
+            aspect=pgce.PathAspect.VALUE,
+            env=ctx.env,
+        )
         for alias_set, _ in using.values()
     ]
 
@@ -126,7 +133,6 @@ def _compile_grouping_value(
 
         els.append(pgast.CaseExpr(
             arg=pgast.Expr(
-                kind=pgast.ExprKind.OP,
                 name='&',
                 lexpr=grouping_ref,
                 rexpr=pgast.LiteralExpr(expr=str(mask))
@@ -155,9 +161,11 @@ def _compile_grouping_binding(
         ctx: context.CompilerContextLevel) -> None:
     assert stmt.grouping_binding
     pathctx.put_path_var(
-        ctx.rel, stmt.grouping_binding.path_id,
+        ctx.rel,
+        stmt.grouping_binding.path_id,
         _compile_grouping_value(stmt, used_args=used_args, ctx=ctx),
-        aspect='value', env=ctx.env)
+        aspect=pgce.PathAspect.VALUE,
+    )
 
 
 def _compile_group(
@@ -165,7 +173,7 @@ def _compile_group(
         ctx: context.CompilerContextLevel,
         parent_ctx: context.CompilerContextLevel) -> pgast.BaseExpr:
 
-    clauses.compile_dml_bindings(stmt, ctx=ctx)
+    clauses.compile_volatile_bindings(stmt, ctx=ctx)
 
     query = ctx.stmt
 
@@ -187,8 +195,7 @@ def _compile_group(
 
         subj_rvar = relctx.rvar_for_rel(
             subjctx.rel, ctx=groupctx, lateral=True)
-        aspects = pathctx.list_path_aspects(
-            subjctx.rel, stmt.subject.path_id, env=ctx.env)
+        aspects = pathctx.list_path_aspects(subjctx.rel, stmt.subject.path_id)
 
         pathctx.put_path_id_map(
             subjctx.rel,
@@ -208,6 +215,8 @@ def _compile_group(
         # Now we compile the bindings
         groupctx.path_scope = subjctx.path_scope.new_child()
         groupctx.path_scope[stmt.group_binding.path_id] = None
+        if stmt.grouping_binding:
+            groupctx.path_scope[stmt.grouping_binding.path_id] = None
 
         # Compile all the 'using' items
         for _alias, (value, using_card) in stmt.using.items():
@@ -232,14 +241,18 @@ def _compile_group(
             with groupctx.subrel() as hoistctx:
                 hoistctx.skippable_sources |= skippable
 
+                assert irutils.is_set_instance(group_use, irast.FunctionCall)
                 relgen.process_set_as_agg_expr_inner(
                     group_use,
-                    aspect='value', wrapper=None, for_group_by=True,
-                    ctx=hoistctx)
+                    aspect=pgce.PathAspect.VALUE,
+                    wrapper=None,
+                    for_group_by=True,
+                    ctx=hoistctx,
+                )
                 pathctx.get_path_value_output(
                     rel=hoistctx.rel, path_id=group_use.path_id, env=ctx.env)
                 pathctx.put_path_value_var(
-                    grouprel, group_use.path_id, hoistctx.rel, env=ctx.env
+                    grouprel, group_use.path_id, hoistctx.rel
                 )
 
         packed = False
@@ -249,7 +262,7 @@ def _compile_group(
             # TODO: Be able to directly output the final serialized version
             # if it is consumed directly.
             with context.output_format(ctx, context.OutputFormat.NATIVE), (
-                    ctx.new()) as matctx:
+                    groupctx.new()) as matctx:
                 matctx.materializing |= {stmt}
                 matctx.expr_exposed = True
 
@@ -271,9 +284,11 @@ def _compile_group(
                     mat_qry, stmt.group_binding.path_id, ref)
 
                 pathctx.put_path_var(
-                    grouprel, stmt.group_binding.path_id, mat_qry,
-                    aspect='value',
-                    flavor='packed', env=ctx.env
+                    grouprel,
+                    stmt.group_binding.path_id,
+                    mat_qry,
+                    aspect=pgce.PathAspect.VALUE,
+                    flavor='packed',
                 )
 
         used_args = desugar_group.collect_grouping_atoms(stmt.by)
@@ -294,17 +309,33 @@ def _compile_group(
         using = {k: stmt.using[k] for k in used_args}
         for using_val, _ in using.values():
             uvar = pathctx.get_path_var(
-                grouprel, using_val.path_id, aspect='value', env=ctx.env)
+                grouprel,
+                using_val.path_id,
+                aspect=pgce.PathAspect.VALUE,
+                env=ctx.env,
+            )
             if isinstance(uvar, pgast.TupleVarBase):
                 uvar = output.output_as_value(uvar, env=ctx.env)
                 pathctx.put_path_var(
-                    grouprel, using_val.path_id, uvar,
-                    aspect='value', force=True, env=ctx.env)
+                    grouprel,
+                    using_val.path_id,
+                    uvar,
+                    aspect=pgce.PathAspect.VALUE,
+                    force=True,
+                )
 
             uout = pathctx.get_path_output(
-                grouprel, using_val.path_id, aspect='value', env=ctx.env)
+                grouprel,
+                using_val.path_id,
+                aspect=pgce.PathAspect.VALUE,
+                env=ctx.env,
+            )
             pathctx._put_path_output_var(
-                grouprel, using_val.path_id, 'serialized', uout, env=ctx.env)
+                grouprel,
+                using_val.path_id,
+                pgce.PathAspect.SERIALIZED,
+                uout,
+            )
 
         grouprel.group_clause = [
             compile_grouping_el(el, stmt, ctx=groupctx) for el in stmt.by
@@ -315,7 +346,7 @@ def _compile_group(
         relctx.include_rvar(
             query, group_rvar, path_id=stmt.group_binding.path_id,
             flavor='packed', update_mask=False, pull_namespace=False,
-            aspects=('value',),
+            aspects=(pgce.PathAspect.VALUE,),
             ctx=ctx)
     else:
         # Not include_rvar because we don't actually provide the path id!
@@ -330,8 +361,11 @@ def _compile_group(
     ]:
         if group_use:
             pathctx.put_path_rvar(
-                query, group_use.path_id,
-                group_rvar, aspect='value', env=ctx.env)
+                query,
+                group_use.path_id,
+                group_rvar,
+                aspect=pgce.PathAspect.VALUE,
+            )
 
     vol_ref = None
 
@@ -352,6 +386,9 @@ def _compile_group(
         return vol_ref
 
     with ctx.new() as outctx:
+        # Inherit the path_scope we made earlier (with the GROUP bindings
+        # removed), so that we'll always look for those in the right place.
+        outctx.path_scope = groupctx.path_scope
 
         outctx.volatility_ref += (lambda stmt, xctx: _get_volatility_ref(),)
 
@@ -361,6 +398,8 @@ def _compile_group(
         clauses.compile_output(stmt.result, ctx=outctx)
 
     with ctx.new() as ictx:
+        ictx.path_scope = groupctx.path_scope
+
         # FILTER and ORDER BY need to have the base result as a
         # volatility ref.
         clauses.setup_iterator_volatility(stmt.result, ctx=ictx)
@@ -370,13 +409,13 @@ def _compile_group(
             query.where_clause = astutils.extend_binop(
                 query.where_clause,
                 clauses.compile_filter_clause(
-                    stmt.where, stmt.where_card, ctx=ctx))
+                    stmt.where, stmt.where_card, ctx=ictx))
 
         # The ORDER BY clause
         if stmt.orderby is not None:
-            with ctx.new() as ictx:
+            with ictx.new() as octx:
                 query.sort_clause = clauses.compile_orderby_clause(
-                    stmt.orderby, ctx=ictx)
+                    stmt.orderby, ctx=octx)
 
     return query
 

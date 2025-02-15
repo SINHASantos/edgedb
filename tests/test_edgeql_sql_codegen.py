@@ -27,6 +27,7 @@ from edb.edgeql import compiler
 from edb.edgeql import parser as qlparser
 from edb.pgsql import ast as pgast
 from edb.pgsql import compiler as pg_compiler
+from edb.pgsql import codegen as pg_codegen
 
 
 class TestEdgeQLSQLCodegen(tb.BaseEdgeQLCompilerTest):
@@ -38,8 +39,23 @@ class TestEdgeQLSQLCodegen(tb.BaseEdgeQLCompilerTest):
     SCHEMA = os.path.join(os.path.dirname(__file__), 'schemas',
                           'issues.esdl')
 
+    SCHEMA_cards = os.path.join(os.path.dirname(__file__), 'schemas',
+                                'cards.esdl')
+
+    @classmethod
+    def get_schema_script(cls):
+        script = super().get_schema_script()
+        # Setting internal params like is_inlined in the schema
+        # doesn't work right so we override the script to add DDL.
+        return script + '''
+            create function cards::ins_bot(name: str) -> cards::Bot {
+                set is_inlined := true;
+                using (insert cards::Bot { name := "asdf" });
+            };
+        '''
+
     def _compile_to_tree(self, source):
-        qltree = qlparser.parse(source)
+        qltree = qlparser.parse_query(source)
         ir = compiler.compile_ast_to_ir(
             qltree,
             self.schema,
@@ -47,14 +63,15 @@ class TestEdgeQLSQLCodegen(tb.BaseEdgeQLCompilerTest):
                 modaliases={None: 'default'},
             ),
         )
-        return pg_compiler.compile_ir_to_sql_tree(
+        sql_res = pg_compiler.compile_ir_to_sql_tree(
             ir,
             output_format=pg_compiler.OutputFormat.NATIVE,
         )
+        return sql_res.ast
 
     def _compile(self, source):
         qtree = self._compile_to_tree(source)
-        return pg_compiler.run_codegen(qtree, pretty=True)
+        return pg_codegen.generate_source(qtree, pretty=True)
 
     def no_self_join_test(self, query, tables):
         # Issue #2567: We generate a pointless self join
@@ -181,7 +198,7 @@ class TestEdgeQLSQLCodegen(tb.BaseEdgeQLCompilerTest):
             "update has unnecessary conflict check"
         )
 
-    def test_codegen_group_simple(self):
+    def test_codegen_group_simple_01(self):
         tree = self._compile_to_tree('''
         select (group Issue by .status) {
             name := .key.status.name,
@@ -194,7 +211,7 @@ class TestEdgeQLSQLCodegen(tb.BaseEdgeQLCompilerTest):
             lambda x: bool(x.group_clause),
             terminate_early=True
         )[0]
-        group_sql = pg_compiler.run_codegen(child, pretty=True)
+        group_sql = pg_codegen.generate_source(child, pretty=True)
 
         # We want no array_agg in the group - it should just be able
         # to do a count
@@ -207,6 +224,46 @@ class TestEdgeQLSQLCodegen(tb.BaseEdgeQLCompilerTest):
         self.assertNotIn(
             "uuid_generate", group_sql,
             "group has unnecessary uuid_generate",
+        )
+
+    def test_codegen_group_simple_02(self):
+        tree = self._compile_to_tree('''
+        for g in (group Issue by .status)
+        select (g.key.status.name, count(g.elements))
+        ''')
+        child = ast_visitor.find_children(
+            tree,
+            pgast.SelectStmt,
+            lambda x: bool(x.group_clause),
+            terminate_early=True
+        )[0]
+        group_sql = pg_codegen.generate_source(child, pretty=True)
+
+        # We want no array_agg in the group - it should just be able
+        # to do a count
+        self.assertNotIn(
+            "array_agg", group_sql,
+            "group has unnecessary array_agg",
+        )
+
+        # And we want no uuid generation, which is a huge perf killer
+        self.assertNotIn(
+            "uuid_generate", group_sql,
+            "group has unnecessary uuid_generate",
+        )
+
+    def test_codegen_group_binding(self):
+        sql = self._compile('''
+        with g := (group Issue by .status)
+        select g {
+            name := .key.status.name,
+            num := count(.elements),
+        } order by .name
+        ''')
+
+        self.assertNotIn(
+            "array_agg", sql,
+            "group has unnecessary array_agg",
         )
 
     def test_codegen_in_array_unpack_no_dupe(self):
@@ -244,3 +301,222 @@ class TestEdgeQLSQLCodegen(tb.BaseEdgeQLCompilerTest):
             " IN ", sql,
             "unexpected semi-join",
         )
+
+    def test_codegen_unless_conflict_link_no_semijoin(self):
+        sql = self._compile('''
+          with module cards
+          insert User {
+              name := "x",
+              avatar := (select Card filter .name = 'Dragon')
+          }
+          unless conflict on (.avatar) else (User)
+       ''')
+
+        self.assertNotIn(
+            " IN ", sql,
+            "unexpected semi-join",
+        )
+
+    def test_codegen_order_by_param_compare(self):
+        sql = self._compile('''
+            select Issue { name }
+            order by .name = <str>$0
+       ''')
+        count = sql.count('SELECT')
+        self.assertEqual(
+            count,
+            1,
+            f"ORDER BY subquery not optimized out")
+
+    def test_codegen_tuples_no_extra_serialized(self):
+        sql = self._compile('''
+            select (select (1, 'foo'))
+       ''')
+
+        self.assertNotIn(
+            "0_serialized~1", sql,
+            "pointless extra query outputs",
+        )
+
+    def test_codegen_fts_search_no_score(self):
+        sql = self._compile(
+            '''
+            select fts::search(Issue, 'spiced', language := 'eng').object
+            '''
+        )
+
+        self.assertNotIn(
+            "score_serialized",
+            sql,
+            "std::fts::search score should not be serialized when not needed",
+        )
+
+    def test_codegen_typeid_no_join(self):
+        sql = self._compile(
+            '''
+            select Issue { name, number, tid := .__type__.id }
+            '''
+        )
+
+        self.assertNotIn(
+            "edgedbstd",
+            sql,
+            "typeid injection shouldn't joining ObjectType table",
+        )
+
+    def test_codegen_nested_for_no_uuid(self):
+        sql = self._compile(
+            '''
+            for x in {1,2,3} union (for y in {3,4,5} union (x+y))
+            '''
+        )
+
+        self.assertNotIn(
+            "uuid_generate",
+            sql,
+            "unnecessary uuid_generate for FOR loop without volatility",
+        )
+
+    def test_codegen_linkprop_intersection_01(self):
+        # Should have no conflict check because it has no subtypes
+        sql = self._compile('''
+            with module cards
+            select User { deck[is SpecialCard]: { name, @count } }
+        ''')
+
+        card_obj = self.schema.get("cards::Card")
+        self.assertNotIn(
+            str(card_obj.id),
+            sql,
+            "Card being selected when SpecialCard should suffice"
+        )
+
+    def test_codegen_materialized_01(self):
+        sql = self._compile('''
+            with x := materialized(1 + 2)
+            select ({x}, {x})
+        ''')
+
+        count = sql.count('+')
+        self.assertEqual(
+            count,
+            1,
+            f"addition not materialized")
+
+    def test_codegen_materialized_02(self):
+        sql = self._compile('''
+            with x := materialized((
+              select User { x := (1 + 2) } filter .name = 'Alice'
+            ))
+            select ({x {x}}, {x {x}})
+        ''')
+
+        count = sql.count('+')
+        self.assertEqual(
+            count,
+            1,
+            f"addition not materialized")
+
+        count = sql.count('Alice')
+        self.assertEqual(
+            count,
+            1,
+            f"filter not materialized")
+
+    def test_codegen_unless_conflict_01(self):
+        # Should have no conflict check because it has no subtypes
+        sql = self._compile('''
+            insert User { name := "test" }
+            unless conflict
+        ''')
+
+        self.assertIn(
+            "ON CONFLICT", sql,
+            "insert unless conflict not using ON CONFLICT"
+        )
+
+    def test_codegen_unless_conflict_02(self):
+        # Should have no conflict check because it has no subtypes
+        sql = self._compile('''
+            insert User { name := "test" }
+            unless conflict on (.name)
+            else (User)
+        ''')
+
+        self.assertIn(
+            "ON CONFLICT", sql,
+            "insert unless conflict not using ON CONFLICT"
+        )
+
+    SCHEMA_asdf = r'''
+        type Tgt;
+        type Tgt2;
+        type Src {
+            name: str { constraint exclusive; }
+            tgt: Tgt;
+            multi tgts: Tgt2;
+        };
+    '''
+
+    def test_codegen_unless_conflict_03(self):
+        # Should have no conflict check because it has no subtypes
+        sql = self._compile('''
+        WITH MODULE asdf
+        INSERT Src {
+            name := 'asdf',
+            tgt := (select Tgt limit 1),
+            tgts := (insert Tgt2),
+        } UNLESS CONFLICT
+        ''')
+
+        self.assertIn(
+            "ON CONFLICT", sql,
+            "insert unless conflict not using ON CONFLICT"
+        )
+
+    def test_codegen_inlined_insert_01(self):
+        # Test that we don't use an overlay when selecting from a
+        # simple function that does an INSERT.
+        sql = self._compile('''
+            WITH MODULE cards
+            select ins_bot("asdf") { id, name }
+        ''')
+
+        table_obj = self.schema.get("cards::Bot")
+        count = sql.count(str(table_obj.id))
+        # The table should only be referenced once, in the INSERT.
+        # If we reference it more than that, we're probably selecting it.
+        self.assertEqual(
+            count,
+            1,
+            f"Bot selected from and not just inserted: {sql}")
+
+    def test_codegen_inlined_insert_02(self):
+        # Test that we don't use an overlay when selecting from a
+        # net::http::schedule_request
+        sql = self._compile('''
+            with
+                nh as module std::net::http,
+                url := <str>$url,
+                request := (
+                    nh::schedule_request(
+                        url,
+                        method := nh::Method.`GET`
+                    )
+                )
+            select request {
+                id,
+                state,
+                failure,
+                response,
+            }
+        ''')
+
+        table_obj = self.schema.get("std::net::http::ScheduledRequest")
+        count = sql.count(str(table_obj.id))
+        # The table should only be referenced once, in the INSERT.
+        # If we reference it more than that, we're probably selecting it.
+        self.assertEqual(
+            count,
+            1,
+            f"ScheduledRequest selected from and not just inserted: {sql}")

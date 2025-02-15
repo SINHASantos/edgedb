@@ -25,11 +25,9 @@ from libc.stdint cimport int8_t, uint8_t, int16_t, uint16_t, \
 
 from edb.server.pgproto.pgproto cimport (
     WriteBuffer,
-    ReadBuffer,
 )
 
 from edb.server.dbview cimport dbview
-from edb.server.pgcon cimport pgcon
 from edb.server.pgproto.debug cimport PG_DEBUG
 from edb.server.protocol cimport frontend
 
@@ -55,32 +53,15 @@ cdef class EdgeConnection(frontend.FrontendConnection):
 
     cdef:
         EdgeConnectionStatus _con_status
-        bint _external_auth
-        str _id
-        object _transport
 
-        object server
-
-        object loop
         readonly dbview.DatabaseConnectionView _dbview
-        str dbname
 
-        ReadBuffer buffer
-
-        object _msg_take_waiter
         object _startup_msg_waiter
-        object _write_waiter
-
-        object _main_task
 
         dbview.CompiledQuery _last_anon_compiled
-        int _last_anon_compiled_hash
-        WriteBuffer _write_buf
+        int64_t _last_anon_compiled_hash
 
-        bint debug
         bint query_cache_enabled
-
-        bint authed
 
         tuple protocol_version
         tuple max_protocol
@@ -89,38 +70,16 @@ cdef class EdgeConnection(frontend.FrontendConnection):
         object last_state
         int last_state_id
 
-        pgcon.PGConnection _pinned_pgcon
-        bint _pinned_pgcon_in_tx
-
-        int _get_pgcon_cc
-
-        bint _cancelled
-        bint _stop_requested
-        bint _pgcon_released_in_connection_lost
-
-        bint idling
-        object started_idling_at
-
         bint _in_dump_restore
-        bint _passive_mode
 
-        object _transport_proto
         bytes _auth_data
         dict  _conn_params
 
     cdef inline dbview.DatabaseConnectionView get_dbview(self)
 
-    cdef interpret_backend_error(self, exc)
-
-    cdef dbview.QueryRequestInfo parse_execute_request(self)
-    cdef parse_output_format(self, bytes mode)
+    cdef parse_execute_request(self)
     cdef parse_cardinality(self, bytes card)
     cdef char render_cardinality(self, query_unit) except -1
-
-    cdef write(self, WriteBuffer buf)
-    cdef flush(self)
-
-    cdef abort_pinned_pgcon(self)
 
     cdef fallthrough(self)
 
@@ -135,12 +94,14 @@ cdef class EdgeConnection(frontend.FrontendConnection):
     cdef WriteBuffer make_state_data_description_msg(self)
     cdef WriteBuffer make_command_complete_msg(self, capabilities, status)
 
-    cdef inline reject_headers(self)
     cdef inline ignore_headers(self)
     cdef dict parse_headers(self)
+    cdef dict parse_annotations(self)
+    cdef inline ignore_annotations(self)
+    cdef get_checked_tag(self, dict annotations)
 
     cdef write_status(self, bytes name, bytes value)
-    cdef write_error(self, exc)
+    cdef write_edgedb_error(self, exc)
 
     cdef write_log(self, EdgeSeverity severity, uint32_t code, str message)
 
@@ -150,6 +111,4 @@ cdef class VirtualTransport:
     cdef:
         WriteBuffer buf
         bint closed
-
-
-include "binary_v0.pxd"
+        object transport

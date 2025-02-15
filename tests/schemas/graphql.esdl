@@ -113,6 +113,10 @@ type ScalarTest {
 
     property p_tuple -> tuple<int64, str>;
     property p_array_tuple -> array<tuple<str, bool>>;
+
+    property p_short_str -> str {
+        constraint max_len_value(5);
+    }
 }
 type BigIntTest {
     property value -> bigint;
@@ -162,8 +166,78 @@ function get_glob() -> optional str using (global test_global_str);
 
 alias GlobalTest := {
     gstr := global test_global_str,
-	garray := global test_global_array,
-	gid := global test_global_id,
-	gdef := global test_global_def,
-	gdef2 := global test_global_def2,
+    garray := global test_global_array,
+    gid := global test_global_id,
+    gdef := global test_global_def,
+    gdef2 := global test_global_def2,
 };
+
+function id_func(s: str) -> str using (s);
+
+alias FuncTest := {
+    fstr := id_func('test'),
+};
+
+type Combo {
+    required property name -> str;
+    # Test type union, Setting and Profile share some inherited fields as well
+    # as non-inherited ones.
+    link data -> Setting | Profile;
+};
+
+abstract constraint error_test_constraint extending expression {
+    errmessage :=
+        '{__subject__} cannot have val equal to the length of text field.';
+}
+
+# Used to test run-time errors.
+type ErrorTest {
+    required property text -> str {
+        # rewrite empty string as empty set
+        rewrite update using (
+            .text if len(.text) > 0 else <str>{}
+        );
+    }
+    required property val -> int64 {
+        # force values of 10 or more cause an error
+        rewrite update using (
+            .val if .val < 10 else .val // 0
+        );
+    }
+
+    property div_by_val := 1 / .val;
+    property re_text := re_match(.text, 'test');
+
+    access policy access_all
+        allow all
+        using (true);
+    access policy deny_negative_val
+        deny update write
+        using (.val < 0);
+
+    constraint error_test_constraint on (len(.text) != .val);
+}
+
+type RangeTest {
+    required name: str;
+    rval: range<float64>;
+    mval: multirange<float64>;
+    rdate: range<cal::local_date>;
+    mdate: multirange<cal::local_date>;
+}
+
+type Fixed {
+    property computed := 123;
+}
+
+type NotEditable {
+    property computed := 'a computed value';
+    required once: str {
+        readonly := true;
+    }
+}
+
+function modifying_noop(x: str) -> str {
+    using (x);
+    volatility := 'Modifying';
+}

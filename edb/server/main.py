@@ -18,45 +18,61 @@
 
 
 from __future__ import annotations
-from typing import *
+from typing import (
+    Any,
+    Optional,
+    Tuple,
+    Union,
+    Iterator,
+    Mapping,
+    Dict,
+    NoReturn,
+    TYPE_CHECKING,
+)
+
+from edb.common.log import early_setup
+# ruff: noqa: E402
+early_setup()
 
 import asyncio
 import contextlib
-import dataclasses
-import datetime
+import json
 import logging
 import os
 import os.path
 import pathlib
+
+import immutables
 import resource
 import signal
 import sys
 import tempfile
-import uuid
 
 import click
-from jwcrypto import jwk
 import setproctitle
 import uvloop
 
-from . import logsetup
-logsetup.early_setup()
-
 from edb import buildmeta
+from edb import errors
+from edb.ir import statypes
 from edb.common import exceptions
 from edb.common import devmode
 from edb.common import signalctl
+from edb.common import debug
 
+from . import config
 from . import args as srvargs
+from . import compiler as edbcompiler
 from . import daemon
 from . import defines
-from . import pgconnparams
+from . import logsetup
 from . import pgcluster
 from . import service_manager
 
 
 if TYPE_CHECKING:
     from . import server
+    from edb.server import bootstrap
 else:
     # Import server lazily to make sure that most of imports happen
     # under coverage (if we're testing with it).  Otherwise
@@ -100,14 +116,8 @@ def _ensure_runstate_dir(
     runstate_dir = pathlib.Path(runstate_dir)
 
     if not runstate_dir.exists():
-        if not runstate_dir.parent.exists():
-            abort(
-                f'cannot create the runstate directory: '
-                f'{str(runstate_dir.parent)!r} does not exist; please use '
-                f'--runstate-dir to specify the correct location')
-
         try:
-            runstate_dir.mkdir()
+            runstate_dir.mkdir(parents=True)
         except PermissionError as ex:
             abort(
                 f'cannot create the runstate directory: '
@@ -126,35 +136,59 @@ def _ensure_runstate_dir(
 
 
 @contextlib.contextmanager
-def _internal_state_dir(runstate_dir):
+def _internal_state_dir(
+    runstate_dir: pathlib.Path, args: srvargs.ServerConfig
+) -> Iterator[Tuple[str, srvargs.ServerConfig]]:
     try:
         with tempfile.TemporaryDirectory(prefix="", dir=runstate_dir) as td:
-            yield td
+            if (
+                args.tls_cert_file
+                and '<runstate>' in str(args.tls_cert_file)
+            ):
+                args = args._replace(
+                    tls_cert_file=pathlib.Path(
+                        str(args.tls_cert_file).replace(
+                            '<runstate>', td)
+                    ),
+                    tls_key_file=pathlib.Path(
+                        str(args.tls_key_file).replace(
+                            '<runstate>', td)
+                    )
+                )
+            if (
+                args.jws_key_file
+                and '<runstate>' in str(args.jws_key_file)
+            ):
+                args = args._replace(
+                    jws_key_file=pathlib.Path(
+                        str(args.jws_key_file).replace(
+                            '<runstate>', td)
+                    ),
+                )
+            yield td, args
     except PermissionError as ex:
         abort(f'cannot write to the runstate directory: '
               f'{ex!s}; please fix the permissions or use '
               f'--runstate-dir to specify the correct location')
 
 
-async def _init_cluster(cluster, args: srvargs.ServerConfig) -> bool:
+async def _init_cluster(
+    cluster, args: srvargs.ServerConfig
+) -> tuple[bool, edbcompiler.Compiler]:
     from edb.server import bootstrap
 
-    need_restart = await bootstrap.ensure_bootstrapped(cluster, args)
+    new_instance = await bootstrap.ensure_bootstrapped(cluster, args)
     global _server_initialized
     _server_initialized = True
 
-    return need_restart
+    return new_instance
 
 
 def _init_parsers():
-    # Initialize all parsers, rebuilding grammars if
-    # necessary.  Do it earlier than later so that we don't
-    # end up in a situation where all our compiler processes
-    # are building parsers in parallel.
-
+    # Initialize parsers that are used in the server process.
     from edb.edgeql import parser as ql_parser
 
-    ql_parser.preload(allow_rebuild=devmode.is_in_dev_mode(), paralellize=True)
+    ql_parser.preload_spec()
 
 
 async def _run_server(
@@ -165,6 +199,8 @@ async def _run_server(
     *,
     do_setproctitle: bool,
     new_instance: bool,
+    compiler: edbcompiler.Compiler,
+    init_con_data: list[config.ConState],
 ):
 
     sockets = service_manager.get_activation_listen_sockets()
@@ -173,11 +209,27 @@ async def _run_server(
         logger.info("detected service manager socket activation")
 
     with signalctl.SignalController(signal.SIGINT, signal.SIGTERM) as sc:
+        from . import tenant as edbtenant
+
+        # max_backend_connections should've been calculated already by now
+        assert args.max_backend_connections is not None
+        tenant = edbtenant.Tenant(
+            cluster,
+            instance_name=args.instance_name,
+            max_backend_connections=args.max_backend_connections,
+            backend_adaptive_ha=args.backend_adaptive_ha,
+            extensions_dir=args.extensions_dir,
+        )
+        tenant.set_init_con_data(init_con_data)
+        tenant.set_reloadable_files(
+            readiness_state_file=args.readiness_state_file,
+            jwt_sub_allowlist_file=args.jwt_sub_allowlist_file,
+            jwt_revocation_list_file=args.jwt_revocation_list_file,
+            config_file=args.config_file,
+        )
         ss = server.Server(
-            cluster=cluster,
             runstate_dir=runstate_dir,
             internal_runstate_dir=internal_runstate_dir,
-            max_backend_connections=args.max_backend_connections,
             compiler_pool_size=args.compiler_pool_size,
             compiler_pool_mode=args.compiler_pool_mode,
             compiler_pool_addr=args.compiler_pool_addr,
@@ -190,54 +242,75 @@ async def _run_server(
             startup_script=args.startup_script,
             binary_endpoint_security=args.binary_endpoint_security,
             http_endpoint_security=args.http_endpoint_security,
-            backend_adaptive_ha=args.backend_adaptive_ha,
             default_auth_method=args.default_auth_method,
             testmode=args.testmode,
+            daemonized=args.background,
+            pidfile_dir=args.pidfile_dir,
             new_instance=new_instance,
             admin_ui=args.admin_ui,
-            instance_name=args.instance_name,
+            cors_always_allowed_origins=args.cors_always_allowed_origins,
+            disable_dynamic_system_config=args.disable_dynamic_system_config,
+            compiler_state=compiler.state,
+            tenant=tenant,
+            use_monitor_fs=args.reload_config_files in [
+                srvargs.ReloadTrigger.Default,
+                srvargs.ReloadTrigger.FileSystemEvent,
+            ],
+            net_worker_mode=args.net_worker_mode,
         )
+        magic_smtp = os.getenv('EDGEDB_MAGIC_SMTP_CONFIG')
+        if magic_smtp:
+            await tenant.load_sidechannel_configs(
+                json.loads(magic_smtp), compiler=compiler
+            )
+        if args.config_file:
+            await tenant.load_config_file(compiler)
+        # This coroutine runs as long as the server,
+        # and compiler(.state) is *heavy*, so make sure we don't
+        # keep a reference to it.
+        del compiler
         await sc.wait_for(ss.init())
 
-        tls_cert_newly_generated = False
-        if args.tls_cert_mode is srvargs.ServerTlsCertMode.SelfSigned:
-            assert args.tls_cert_file is not None
-            if not args.tls_cert_file.exists():
-                assert args.tls_key_file is not None
-                generate_tls_cert(
-                    args.tls_cert_file,
-                    args.tls_key_file,
-                    ss.get_listen_hosts(),
-                )
-                tls_cert_newly_generated = True
-
-        jws_keys_newly_generated = False
-        if args.jose_key_mode is srvargs.JOSEKeyMode.Generate:
-            assert args.jws_key_file is not None
-            if not args.jws_key_file.exists():
-                generate_jwk(args.jws_key_file)
-                jws_keys_newly_generated = True
+        (
+            tls_cert_newly_generated, jws_keys_newly_generated
+        ) = await ss.maybe_generate_pki(args, ss)
 
         if args.bootstrap_only:
             if args.startup_script and new_instance:
                 await sc.wait_for(ss.run_startup_script_and_exit())
             return
 
-        if args.readiness_state_file:
-            ss.init_readiness_state(args.readiness_state_file)
-
         ss.init_tls(
-            args.tls_cert_file, args.tls_key_file, tls_cert_newly_generated)
+            args.tls_cert_file,
+            args.tls_key_file,
+            tls_cert_newly_generated,
+            args.tls_client_ca_file,
+        )
 
         ss.init_jwcrypto(args.jws_key_file, jws_keys_newly_generated)
+        ss.start_watching_files()
 
         def load_configuration(_signum):
+            if args.reload_config_files not in [
+                srvargs.ReloadTrigger.Default,
+                srvargs.ReloadTrigger.Signal,
+            ]:
+                logger.info(
+                    "SIGHUP received, but reload on signal is disabled"
+                )
+                return
+
             logger.info("reloading configuration")
             try:
                 if args.readiness_state_file:
-                    ss.reload_readiness_state(args.readiness_state_file)
-                ss.reload_tls(args.tls_cert_file, args.tls_key_file)
+                    tenant.reload_readiness_state()
+                ss.reload_tls(
+                    args.tls_cert_file,
+                    args.tls_key_file,
+                    args.tls_client_ca_file,
+                )
                 ss.load_jwcrypto(args.jws_key_file)
+                tenant.reload_config_file.schedule()
             except Exception:
                 logger.critical(
                     "Unexpected error occurred during reload configuration; "
@@ -273,78 +346,6 @@ async def _run_server(
             await sc.wait_for(ss.stop())
 
 
-def generate_tls_cert(
-    tls_cert_file: pathlib.Path,
-    tls_key_file: pathlib.Path,
-    listen_hosts: Iterable[str]
-) -> None:
-    logger.info(f'generating self-signed TLS certificate in "{tls_cert_file}"')
-
-    from cryptography import x509
-    from cryptography.hazmat import backends
-    from cryptography.hazmat.primitives import hashes
-    from cryptography.hazmat.primitives import serialization
-    from cryptography.hazmat.primitives.asymmetric import rsa
-    from cryptography.x509 import oid
-
-    backend = backends.default_backend()
-    private_key = rsa.generate_private_key(
-        public_exponent=65537, key_size=2048, backend=backend
-    )
-    subject = x509.Name(
-        [x509.NameAttribute(oid.NameOID.COMMON_NAME, "EdgeDB Server")]
-    )
-    certificate = (
-        x509.CertificateBuilder()
-        .subject_name(subject)
-        .public_key(private_key.public_key())
-        .serial_number(int(uuid.uuid4()))
-        .issuer_name(subject)
-        .not_valid_before(
-            datetime.datetime.today() - datetime.timedelta(days=1)
-        )
-        .not_valid_after(
-            datetime.datetime.today() + datetime.timedelta(weeks=1000)
-        )
-        .add_extension(
-            x509.SubjectAlternativeName(
-                [
-                    x509.DNSName(name) for name in listen_hosts
-                    if name not in {'0.0.0.0', '::'}
-                ]
-            ),
-            critical=False,
-        )
-        .sign(
-            private_key=private_key,
-            algorithm=hashes.SHA256(),
-            backend=backend,
-        )
-    )
-    with tls_cert_file.open("wb") as f:
-        f.write(certificate.public_bytes(encoding=serialization.Encoding.PEM))
-    tls_cert_file.chmod(0o644)
-    with tls_key_file.open("wb") as f:
-        f.write(
-            private_key.private_bytes(
-                encoding=serialization.Encoding.PEM,
-                format=serialization.PrivateFormat.TraditionalOpenSSL,
-                encryption_algorithm=serialization.NoEncryption(),
-            )
-        )
-    tls_key_file.chmod(0o600)
-
-
-def generate_jwk(keys_file: pathlib.Path) -> None:
-    logger.info(f'generating JOSE key pair in "{keys_file}"')
-
-    key = jwk.JWK(generate='EC')
-    with keys_file.open("wb") as f:
-        f.write(key.export_to_pem(private_key=True, password=None))
-
-    keys_file.chmod(0o600)
-
-
 async def _get_local_pgcluster(
     args: srvargs.ServerConfig,
     runstate_dir: pathlib.Path,
@@ -370,14 +371,12 @@ async def _get_local_pgcluster(
         tenant_id=tenant_id,
         log_level=args.log_level,
     )
-    cluster.set_connection_params(
-        pgconnparams.ConnectionParameters(
-            user='postgres',
-            database='template1',
-            server_settings={
-                "application_name": f'edgedb_instance_{args.instance_name}',
-            }
-        ),
+    cluster.update_connection_params(
+        user='postgres',
+        database='template1',
+        server_settings={
+            "application_name": f'edgedb_instance_{args.instance_name}',
+        }
     )
     return cluster, args
 
@@ -390,6 +389,7 @@ async def _get_remote_pgcluster(
     cluster = await pgcluster.get_remote_pg_cluster(
         args.backend_dsn,
         tenant_id=tenant_id,
+        specified_capabilities=args.backend_capability_sets,
     )
 
     instance_params = cluster.get_runtime_params().instance_params
@@ -407,47 +407,74 @@ async def _get_remote_pgcluster(
         abort(f'--max-backend-connections is too large for this backend; '
               f'detected maximum available NUM: {max_conns}')
 
-    conn_params = cluster.get_connection_params()
-    conn_params = dataclasses.replace(
-        conn_params,
-        server_settings=dict(
-            conn_params.server_settings,
-            application_name=f'edgedb_instance_{args.instance_name}',
-        ),
-    )
-    cluster.set_connection_params(conn_params)
+    cluster.update_connection_params(server_settings={
+        'application_name': f'edgedb_instance_{args.instance_name}'
+    })
 
     return cluster, args
+
+
+def _patch_stdlib_testmode(
+    stdlib: bootstrap.StdlibBits
+) -> bootstrap.StdlibBits:
+    from edb import edgeql
+    from edb.pgsql import delta as delta_cmds
+    from edb.pgsql import params as pg_params
+    from edb.edgeql import ast as qlast
+    from edb.schema import ddl as s_ddl
+    from edb.schema import delta as sd
+    from edb.schema import schema as s_schema
+    from edb.schema import std as s_std
+
+    schema: s_schema.Schema = s_schema.ChainedSchema(
+        s_schema.EMPTY_SCHEMA,
+        stdlib.stdschema,
+        stdlib.global_schema,
+    )
+    reflschema = stdlib.reflschema
+    ctx = sd.CommandContext(
+        stdmode=True,
+        backend_runtime_params=pg_params.get_default_runtime_params(),
+    )
+
+    for modname in s_schema.TESTMODE_SOURCES:
+        ddl_text = s_std.get_std_module_text(modname)
+        for ddl_cmd in edgeql.parse_block(ddl_text):
+            assert isinstance(ddl_cmd, qlast.DDLCommand)
+            delta = s_ddl.delta_from_ddl(
+                ddl_cmd, modaliases={}, schema=schema, stdmode=True
+            )
+            if not delta.canonical:
+                sd.apply(delta, schema=schema)
+            delta = delta_cmds.CommandMeta.adapt(delta)
+            schema = sd.apply(delta, schema=schema, context=ctx)
+            reflschema = delta.apply(reflschema, ctx)
+
+    assert isinstance(schema, s_schema.ChainedSchema)
+    return stdlib._replace(
+        stdschema=schema.get_top_schema(),
+        global_schema=schema.get_global_schema(),
+        reflschema=reflschema,
+    )
 
 
 async def run_server(
     args: srvargs.ServerConfig,
     *,
     do_setproctitle: bool=False,
+    runstate_dir: pathlib.Path,
 ) -> None:
     from . import server as server_mod
     global server
     server = server_mod
 
-    ver_meta = buildmeta.get_version_metadata()
-    extras = []
-    source = ""
-    if build_date := ver_meta["build_date"]:
-        nice_date = build_date.strftime("%Y-%m-%dT%H:%MZ")
-        source += f" on {nice_date}"
-    if ver_meta["scm_revision"]:
-        source += f" from revision {ver_meta['scm_revision']}"
-        if source_date := ver_meta["source_date"]:
-            nice_date = source_date.strftime("%Y-%m-%dT%H:%MZ")
-            source += f" ({nice_date})"
-    if source:
-        extras.append(f", built{source}")
-    if ver_meta["target"]:
-        extras.append(f"for {ver_meta['target']}")
+    logsetup.setup_logging(args.log_level, args.log_to)
 
-    ver_line = buildmeta.get_version_string() + " ".join(extras)
-    logger.info(f"starting EdgeDB server {ver_line}")
-    logger.info(f'instance name: {args.instance_name!r}')
+    logger.info(f"starting Gel server {buildmeta.get_version_line()}")
+    if args.multitenant_config_file:
+        logger.info("configured as a multitenant instance")
+    else:
+        logger.info(f'instance name: {args.instance_name!r}')
     if devmode.is_in_dev_mode():
         logger.info(f'development mode active')
 
@@ -458,10 +485,22 @@ async def run_server(
             logger.info("Invalid EDGEDB_SERVER_EXTERNAL_LOCK_FD")
         else:
             os.set_inheritable(fd, False)
+    if fd_str := os.environ.get("GEL_SERVER_EXTERNAL_LOCK_FD"):
+        try:
+            fd = int(fd_str)
+        except ValueError:
+            logger.info("Invalid GEL_SERVER_EXTERNAL_LOCK_FD")
+        else:
+            os.set_inheritable(fd, False)
 
     logger.debug(
         f"defaulting to the '{args.default_auth_method}' authentication method"
     )
+
+    if debug.flags.pydebug_listen:
+        import debugpy
+
+        debugpy.listen(38782)
 
     _init_parsers()
 
@@ -473,180 +512,267 @@ async def run_server(
         tenant_id = f'C{args.tenant_id}'
 
     cluster: Union[pgcluster.Cluster, pgcluster.RemoteCluster]
-    default_runstate_dir: Optional[pathlib.Path]
 
-    if args.data_dir:
-        default_runstate_dir = args.data_dir
-    else:
-        default_runstate_dir = None
-
-    specified_runstate_dir: Optional[pathlib.Path]
-    if args.runstate_dir:
-        specified_runstate_dir = args.runstate_dir
-    elif args.bootstrap_only:
-        # When bootstrapping a new EdgeDB instance it is often necessary
-        # to avoid using the main runstate dir due to lack of permissions,
-        # possibility of conflict with another running instance, etc.
-        # The --bootstrap mode is also often runs unattended, i.e.
-        # as a post-install hook during package installation.
-        specified_runstate_dir = default_runstate_dir
-    else:
-        specified_runstate_dir = None
-
-    runstate_dir_mgr = _ensure_runstate_dir(
-        default_runstate_dir,
-        specified_runstate_dir,
+    runstate_dir_str = str(runstate_dir)
+    runstate_dir_str_len = len(
+        runstate_dir_str.encode(
+            sys.getfilesystemencoding(),
+            errors=sys.getfilesystemencodeerrors(),
+        ),
     )
-
-    with runstate_dir_mgr as runstate_dir:
-        runstate_dir_str = str(runstate_dir)
-        runstate_dir_str_len = len(
-            runstate_dir_str.encode(
-                sys.getfilesystemencoding(),
-                errors=sys.getfilesystemencodeerrors(),
-            ),
+    if runstate_dir_str_len > defines.MAX_RUNSTATE_DIR_PATH:
+        abort(
+            f'the length of the specified path for server run state '
+            f'exceeds the maximum of {defines.MAX_RUNSTATE_DIR_PATH} '
+            f'bytes: {runstate_dir_str!r} ({runstate_dir_str_len} bytes)',
+            exit_code=11,
         )
-        if runstate_dir_str_len > defines.MAX_RUNSTATE_DIR_PATH:
-            abort(
-                f'the length of the specified path for server run state '
-                f'exceeds the maximum of {defines.MAX_RUNSTATE_DIR_PATH} '
-                f'bytes: {runstate_dir_str!r} ({runstate_dir_str_len} bytes)',
-                exit_code=11,
+
+    if args.multitenant_config_file:
+        from edb.schema import reflection as s_refl
+        from . import bootstrap
+        from . import multitenant
+
+        try:
+            stdlib: bootstrap.StdlibBits | None
+            stdlib = bootstrap.read_data_cache(
+                bootstrap.STDLIB_CACHE_FILE_NAME, pickled=True
+            )
+            if stdlib is None:
+                abort(
+                    "Cannot run multi-tenant server "
+                    "without pre-compiled standard library"
+                )
+            if args.testmode:
+                # In multitenant mode, the server/compiler is started without a
+                # backend and will be connected to many backends. That means we
+                # cannot load the stdlib from a certain backend; instead, the
+                # pre-compiled stdlib is always in use. This means that we need
+                # to explicitly enable --testmode starting a multitenant server
+                # in order to handle backends with test-mode schema properly.
+                try:
+                    stdlib = _patch_stdlib_testmode(stdlib)
+                except errors.SchemaError:
+                    # The pre-compiled standard library already has test-mode
+                    # schema; ignore the patching error.
+                    pass
+
+            compiler = edbcompiler.new_compiler(
+                stdlib.stdschema,
+                stdlib.reflschema,
+                stdlib.classlayout,
+                config_spec=None,
+            )
+            reflection = s_refl.generate_structure(
+                stdlib.reflschema, make_funcs=False,
+            )
+            (
+                local_intro_sql, global_intro_sql
+            ) = bootstrap.compile_intro_queries_stdlib(
+                compiler=compiler,
+                user_schema=stdlib.reflschema,
+                reflection=reflection,
+            )
+            del reflection
+            compiler_state = edbcompiler.CompilerState(
+                std_schema=compiler.state.std_schema,
+                refl_schema=compiler.state.refl_schema,
+                schema_class_layout=stdlib.classlayout,
+                backend_runtime_params=(
+                    compiler.state.backend_runtime_params
+                ),
+                config_spec=compiler.state.config_spec,
+                local_intro_query=local_intro_sql,
+                global_intro_query=global_intro_sql,
+            )
+            del local_intro_sql, global_intro_sql
+            (
+                sys_queries,
+                report_configs_typedesc_1_0,
+                report_configs_typedesc_2_0,
+            ) = bootstrap.compile_sys_queries(
+                stdlib.reflschema,
+                compiler,
+                compiler_state.config_spec,
             )
 
-        try:
-            if args.data_dir:
-                cluster, args = await _get_local_pgcluster(
-                    args, runstate_dir, tenant_id)
-            elif args.backend_dsn:
-                cluster, args = await _get_remote_pgcluster(args, tenant_id)
-            else:
-                # This should have been checked by main() already,
-                # but be extra careful.
-                abort('neither the data directory nor the remote Postgres DSN '
-                      'have been specified')
-        except pgcluster.ClusterError as e:
-            abort(str(e))
-
-        try:
-            pg_cluster_init_by_us = await cluster.ensure_initialized()
-            cluster_status = await cluster.get_status()
-
-            if isinstance(cluster, pgcluster.Cluster):
-                if cluster_status == 'running':
-                    # Refuse to start local instance on an occupied datadir,
-                    # as it's very likely that Postgres was orphaned by an
-                    # earlier unclean exit of EdgeDB.
-                    main_pid = cluster.get_main_pid() or '<unknown>'
-                    abort(
-                        f'a PostgreSQL instance (PID {main_pid}) is already '
-                        f'running in data directory "{args.data_dir}", please '
-                        f'stop it to proceed'
-                    )
-                elif cluster_status == 'stopped':
-                    await cluster.start()
-                else:
-                    abort('could not initialize data directory "%s"',
-                          args.data_dir)
-            else:
-                # We expect the remote cluster to be running
-                if cluster_status != "running":
-                    abort('specified PostgreSQL instance is not running')
-
-            need_cluster_restart = await _init_cluster(cluster, args)
-
-            if need_cluster_restart:
-                logger.info('Restarting server to reload configuration...')
-                await cluster.stop()
-                await cluster.start()
-
-            if (
-                not args.bootstrap_only
-                or args.bootstrap_command_file
-                or args.bootstrap_command
-                or (
-                    args.tls_cert_mode
-                    is srvargs.ServerTlsCertMode.SelfSigned
+            sys_config, backend_settings, init_con_data = (
+                initialize_static_cfg(
+                    args,
+                    is_remote_cluster=True,
+                    compiler=compiler,
                 )
-                or (
-                    args.jose_key_mode
-                    is srvargs.JOSEKeyMode.Generate
+            )
+            del compiler
+            if backend_settings:
+                abort(
+                    'Static backend settings for remote backend are '
+                    'not supported'
                 )
+            with _internal_state_dir(runstate_dir, args) as (
+                int_runstate_dir,
+                args,
             ):
-                conn_params = cluster.get_connection_params()
-                instance_name = args.instance_name
-                conn_params = dataclasses.replace(
-                    conn_params,
-                    server_settings={
-                        **conn_params.server_settings,
-                        'application_name': f'edgedb_instance_{instance_name}',
-                        'edgedb.instance_name': instance_name,
-                        'edgedb.server_version': buildmeta.get_version_json(),
+                return await multitenant.run_server(
+                    args,
+                    sys_config=sys_config,
+                    sys_queries={
+                        key: sql.encode("utf-8")
+                        for key, sql in sys_queries.items()
                     },
+                    report_config_typedesc={
+                        (1, 0): report_configs_typedesc_1_0,
+                        (2, 0): report_configs_typedesc_2_0,
+                    },
+                    runstate_dir=runstate_dir,
+                    internal_runstate_dir=int_runstate_dir,
+                    do_setproctitle=do_setproctitle,
+                    compiler_state=compiler_state,
+                    init_con_data=init_con_data,
                 )
-                if args.data_dir:
-                    conn_params.database = pgcluster.get_database_backend_name(
-                        defines.EDGEDB_TEMPLATE_DB,
-                        tenant_id=tenant_id,
-                    )
-
-                cluster.set_connection_params(conn_params)
-
-                with _internal_state_dir(runstate_dir) as int_runstate_dir:
-                    if (
-                        args.tls_cert_file
-                        and '<runstate>' in str(args.tls_cert_file)
-                    ):
-                        args = args._replace(
-                            tls_cert_file=pathlib.Path(
-                                str(args.tls_cert_file).replace(
-                                    '<runstate>', int_runstate_dir)
-                            ),
-                            tls_key_file=pathlib.Path(
-                                str(args.tls_key_file).replace(
-                                    '<runstate>', int_runstate_dir)
-                            )
-                        )
-                    if (
-                        args.jws_key_file
-                        and '<runstate>' in str(args.jws_key_file)
-                    ):
-                        args = args._replace(
-                            jws_key_file=pathlib.Path(
-                                str(args.jws_key_file).replace(
-                                    '<runstate>', int_runstate_dir)
-                            ),
-                        )
-
-                    await _run_server(
-                        cluster,
-                        args,
-                        runstate_dir,
-                        int_runstate_dir,
-                        do_setproctitle=do_setproctitle,
-                        new_instance=need_cluster_restart,
-                    )
-
         except server.StartupError as e:
             abort(str(e))
 
-        except BaseException:
-            if pg_cluster_init_by_us and not _server_initialized:
-                logger.warning(
-                    'server bootstrap did not complete successfully, '
-                    'removing the data directory')
-                if await cluster.get_status() == 'running':
-                    await cluster.stop()
-                cluster.destroy()
-            raise
+    try:
+        if args.data_dir:
+            cluster, args = await _get_local_pgcluster(
+                args, runstate_dir, tenant_id)
+        elif args.backend_dsn:
+            cluster, args = await _get_remote_pgcluster(args, tenant_id)
+        else:
+            # This should have been checked by main() already,
+            # but be extra careful.
+            abort('neither the data directory nor the remote Postgres DSN '
+                  'have been specified')
+    except pgcluster.ClusterError as e:
+        abort(str(e))
 
-        finally:
-            if args.temp_dir:
-                if await cluster.get_status() == 'running':
-                    await cluster.stop()
-                cluster.destroy()
-            elif await cluster.get_status() == 'running':
+    try:
+        pg_cluster_init_by_us = await cluster.ensure_initialized()
+        cluster_status = await cluster.get_status()
+        logger.debug("postgres cluster status: %s", cluster_status)
+
+        if isinstance(cluster, pgcluster.Cluster):
+            is_local_cluster = True
+            if cluster_status == 'running':
+                # Refuse to start local instance on an occupied datadir,
+                # as it's very likely that Postgres was orphaned by an
+                # earlier unclean exit of EdgeDB.
+                main_pid = cluster.get_main_pid() or '<unknown>'
+                abort(
+                    f'a PostgreSQL instance (PID {main_pid}) is already '
+                    f'running in data directory "{args.data_dir}", please '
+                    f'stop it to proceed'
+                )
+            elif cluster_status == 'stopped':
+                await cluster.start()
+            else:
+                abort('could not initialize data directory "%s"',
+                      args.data_dir)
+        else:
+            # We expect the remote cluster to be running
+            is_local_cluster = False
+            if cluster_status != "running":
+                abort('specified PostgreSQL instance is not running')
+
+        logger.info("postgres cluster is running")
+
+        if (
+            args.inplace_upgrade_prepare
+            or args.inplace_upgrade_finalize
+            or args.inplace_upgrade_rollback
+        ):
+            from . import inplace_upgrade
+            await inplace_upgrade.inplace_upgrade(cluster, args)
+            return
+
+        new_instance, compiler = await _init_cluster(cluster, args)
+
+        _, backend_settings, init_con_data = initialize_static_cfg(
+            args,
+            is_remote_cluster=not is_local_cluster,
+            compiler=compiler,
+        )
+
+        if is_local_cluster:
+            if new_instance or backend_settings:
+                logger.info('Restarting server to reload configuration...')
                 await cluster.stop()
+                await cluster.start(server_settings=backend_settings)
+        elif backend_settings:
+            abort(
+                'Static backend settings for remote backend are not supported'
+            )
+        del backend_settings
+
+        if (
+            not args.bootstrap_only
+            or args.bootstrap_command_file
+            or args.bootstrap_command
+            or (
+                args.tls_cert_mode
+                is srvargs.ServerTlsCertMode.SelfSigned
+            )
+            or (
+                args.jose_key_mode
+                is srvargs.JOSEKeyMode.Generate
+            )
+        ):
+            instance_name = args.instance_name
+            database = pgcluster.get_database_backend_name(
+                defines.EDGEDB_TEMPLATE_DB,
+                tenant_id=tenant_id,
+            ) if args.data_dir else None
+            server_settings = {
+                'application_name': f'edgedb_instance_{instance_name}',
+                'edgedb.instance_name': instance_name,
+                'edgedb.server_version': buildmeta.get_version_json(),
+            }
+            if database:
+                cluster.update_connection_params(
+                    database=database,
+                    server_settings=server_settings
+                )
+            else:
+                cluster.update_connection_params(
+                    server_settings=server_settings
+                )
+
+            with _internal_state_dir(runstate_dir, args) as (
+                int_runstate_dir,
+                args,
+            ):
+                await _run_server(
+                    cluster,
+                    args,
+                    runstate_dir,
+                    int_runstate_dir,
+                    do_setproctitle=do_setproctitle,
+                    new_instance=new_instance,
+                    compiler=compiler,
+                    init_con_data=init_con_data,
+                )
+
+    except server.StartupError as e:
+        abort(str(e))
+
+    except BaseException:
+        if pg_cluster_init_by_us and not _server_initialized:
+            logger.warning(
+                'server bootstrap did not complete successfully, '
+                'removing the data directory')
+            if await cluster.get_status() == 'running':
+                await cluster.stop()
+            cluster.destroy()
+        raise
+
+    finally:
+        if args.temp_dir:
+            if await cluster.get_status() == 'running':
+                await cluster.stop()
+            cluster.destroy()
+        elif await cluster.get_status() == 'running':
+            await cluster.stop()
 
 
 def bump_rlimit_nofile() -> None:
@@ -665,7 +791,7 @@ def bump_rlimit_nofile() -> None:
                 logger.warning('could not set RLIMIT_NOFILE')
 
 
-def server_main(**kwargs):
+def server_main(**kwargs: Any) -> None:
     exceptions.install_excepthook()
 
     bump_rlimit_nofile()
@@ -680,36 +806,68 @@ def server_main(**kwargs):
     except srvargs.InvalidUsageError as e:
         abort(e.args[0], exit_code=e.args[1])
 
-    if kwargs['background']:
-        daemon_opts = {'detach_process': True}
-        pidfile = kwargs['pidfile_dir'] / f".s.EDGEDB.{kwargs['port']}.lock"
-        daemon_opts['pidfile'] = pidfile
-        if kwargs['daemon_user']:
-            daemon_opts['uid'] = kwargs['daemon_user']
-        if kwargs['daemon_group']:
-            daemon_opts['gid'] = kwargs['daemon_group']
-        with daemon.DaemonContext(**daemon_opts):
-            asyncio.run(run_server(server_args, setproctitle=True))
+    if server_args.data_dir:
+        default_runstate_dir = server_args.data_dir
     else:
-        with devmode.CoverageConfig.enable_coverage_if_requested():
-            asyncio.run(run_server(server_args))
+        default_runstate_dir = None
+
+    specified_runstate_dir: Optional[pathlib.Path]
+    if server_args.runstate_dir:
+        specified_runstate_dir = server_args.runstate_dir
+    elif server_args.bootstrap_only:
+        # When bootstrapping a new EdgeDB instance it is often necessary
+        # to avoid using the main runstate dir due to lack of permissions,
+        # possibility of conflict with another running instance, etc.
+        # The --bootstrap mode is also often runs unattended, i.e.
+        # as a post-install hook during package installation.
+        specified_runstate_dir = default_runstate_dir
+    else:
+        specified_runstate_dir = None
+
+    runstate_dir_mgr = _ensure_runstate_dir(
+        default_runstate_dir,
+        specified_runstate_dir,
+    )
+
+    with runstate_dir_mgr as runstate_dir:
+        if server_args.background:
+            daemon_opts: dict[str, Any] = {'detach_process': True}
+            if server_args.daemon_user:
+                daemon_opts['uid'] = server_args.daemon_user
+            if server_args.daemon_group:
+                daemon_opts['gid'] = server_args.daemon_group
+            with daemon.DaemonContext(**daemon_opts):
+                asyncio.run(run_server(
+                    server_args,
+                    runstate_dir=runstate_dir,
+                ))
+        else:
+            with devmode.CoverageConfig.enable_coverage_if_requested():
+                asyncio.run(run_server(
+                    server_args,
+                    runstate_dir=runstate_dir,
+                ))
 
 
 @click.group(
-    'EdgeDB Server',
+    'Gel Server',
     invoke_without_command=True,
-    context_settings=dict(help_option_names=['-h', '--help']))
+    context_settings=dict(help_option_names=['-h', '--help'])
+)
 @srvargs.server_options
 @click.pass_context
 def main(ctx, version=False, **kwargs):
-    if kwargs.get('testmode') and 'EDGEDB_TEST_CATALOG_VERSION' in os.environ:
+    if kwargs.get('testmode') and 'GEL_TEST_CATALOG_VERSION' in os.environ:
+        buildmeta.EDGEDB_CATALOG_VERSION = int(
+            os.environ['GEL_TEST_CATALOG_VERSION']
+        )
+    elif kwargs.get('testmode') and 'EDGEDB_TEST_CATALOG_VERSION' in os.environ:
         buildmeta.EDGEDB_CATALOG_VERSION = int(
             os.environ['EDGEDB_TEST_CATALOG_VERSION']
         )
     if version:
-        print(f"edgedb-server, version {buildmeta.get_version()}")
+        print(f"gel-server, version {buildmeta.get_version()}")
         sys.exit(0)
-    logsetup.setup_logging(kwargs['log_level'], kwargs['log_to'])
     if ctx.invoked_subcommand is None:
         server_main(**kwargs)
 
@@ -725,6 +883,83 @@ def compiler(**kwargs):
 def main_dev():
     devmode.enable_dev_mode()
     main()
+
+
+def initialize_static_cfg(
+    args: srvargs.ServerConfig,
+    is_remote_cluster: bool,
+    compiler: edbcompiler.Compiler,
+) -> Tuple[
+    Mapping[str, config.SettingValue], Dict[str, str], list[config.ConState]
+]:
+    result = {}
+    init_con_script_data: list[config.ConState] = []
+    backend_settings = {}
+    config_spec = compiler.state.config_spec
+    sources = {
+        config.ConStateType.command_line_argument: "command line argument",
+        config.ConStateType.environment_variable: "environment variable",
+    }
+
+    def add_config_values(obj: dict[str, Any], source: config.ConStateType):
+        settings = compiler.compile_structured_config(
+            {"cfg::Config": obj}, source=sources[source]
+        )["cfg::Config"]
+        for name, value in settings.items():
+            setting = config_spec[name]
+
+            if is_remote_cluster:
+                if setting.backend_setting and setting.requires_restart:
+                    if source == config.ConStateType.command_line_argument:
+                        where = "on command line"
+                    else:
+                        where = "as an environment variable"
+                    raise server.StartupError(
+                        f"Can't set config {name!r} {where} when using "
+                        f"a remote Postgres cluster"
+                    )
+            init_con_script_data.append({
+                "name": name,
+                "value": config.value_to_json_value(setting, value.value),
+                "type": source,
+            })
+            result[name] = value
+            if setting.backend_setting:
+                backend_val = value.value
+                if isinstance(backend_val, statypes.ScalarType):
+                    backend_val = backend_val.to_backend_str()
+                backend_settings[setting.backend_setting] = str(backend_val)
+
+    values: dict[str, Any] = {}
+    translate_env = {
+        "EDGEDB_SERVER_BIND_ADDRESS": "listen_addresses",
+        "EDGEDB_SERVER_PORT": "listen_port",
+        "GEL_SERVER_BIND_ADDRESS": "listen_addresses",
+        "GEL_SERVER_PORT": "listen_port",
+    }
+    for name, value in os.environ.items():
+        if cfg := translate_env.get(name):
+            values[cfg] = value
+        else:
+            cfg = name.removeprefix("EDGEDB_SERVER_CONFIG_cfg::")
+            if cfg != name:
+                values[cfg] = value
+            else:
+                cfg = name.removeprefix("GEL_SERVER_CONFIG_cfg::")
+                if cfg != name:
+                    values[cfg] = value
+    if values:
+        add_config_values(values, config.ConStateType.environment_variable)
+
+    values = {}
+    if args.bind_addresses:
+        values["listen_addresses"] = args.bind_addresses
+    if args.port:
+        values["listen_port"] = args.port
+    if values:
+        add_config_values(values, config.ConStateType.command_line_argument)
+
+    return immutables.Map(result), backend_settings, init_con_script_data
 
 
 if __name__ == '__main__':

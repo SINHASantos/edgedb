@@ -65,15 +65,19 @@ Set (
 
 from __future__ import annotations
 
+import abc
 import dataclasses
 import typing
 import uuid
 
-from edb.common import ast, compiler, parsing, markup, enum as s_enum
+from edb.common import ast, compiler, span, markup, enum as s_enum
+
+from edb import errors
 
 from edb.schema import modules as s_mod
 from edb.schema import name as sn
 from edb.schema import objects as so
+from edb.schema import objtypes as s_objtypes
 from edb.schema import pointers as s_pointers
 from edb.schema import schema as s_schema
 from edb.schema import types as s_types
@@ -85,20 +89,35 @@ from .pathid import PathId, Namespace  # noqa
 from .scopetree import ScopeTreeNode  # noqa
 
 
+Span = span.Span
+
+
 def new_scope_tree() -> ScopeTreeNode:
     return ScopeTreeNode(fenced=True)
 
 
 class Base(ast.AST):
     __abstract_node__ = True
-    __ast_hidden__ = {'context'}
+    __ast_hidden__ = {'span'}
 
-    context: typing.Optional[parsing.ParserContext] = None
+    span: typing.Optional[Span] = None
 
     def __repr__(self) -> str:
         return (
             f'<ir.{self.__class__.__name__} at 0x{id(self):x}>'
         )
+
+
+# DEBUG: Probably don't actually keep this forever?
+@markup.serializer.serializer.register(Base)
+def _serialize_to_markup_base(ir: Base, *, ctx: typing.Any) -> typing.Any:
+    node = ast.serialize_to_markup(ir, ctx=ctx)
+    has_span = bool(ir.span)
+    node.add_child(
+        label='has_span', node=markup.serialize(has_span, ctx=ctx))
+    child = node.children.pop()
+    node.children.insert(1, child)
+    return node
 
 
 class ImmutableBase(ast.ImmutableASTMixin, Base):
@@ -120,6 +139,9 @@ class TypeRef(ImmutableBase):
     # Full name of the type, not necessarily schema-addressable,
     # used for annotations only.
     name_hint: sn.Name
+    # Name hint of the real underlying type, if the type ref was created
+    # with an explicitly specified typename.
+    orig_name_hint: typing.Optional[sn.Name] = None
     # The ref of the underlying material type, if this is a view type,
     # else None.
     material_type: typing.Optional[TypeRef] = None
@@ -132,15 +154,16 @@ class TypeRef(ImmutableBase):
     # A set of type ancestor descriptors, if necessary for
     # this type description.
     ancestors: typing.Optional[typing.FrozenSet[TypeRef]] = None
-    # If this is a union type, this would be a set of
-    # union elements.
+    # If this is a compound type, this is a non-overlapping set of
+    # constituent types.
     union: typing.Optional[typing.FrozenSet[TypeRef]] = None
     # Whether the union is specified by an exhaustive list of
     # types, and type inheritance should not be considered.
-    union_is_concrete: bool = False
-    # If this is an intersection type, this would be a set of
-    # intersection elements.
-    intersection: typing.Optional[typing.FrozenSet[TypeRef]] = None
+    union_is_exhaustive: bool = False
+    # If this is a complex type, record the expression used to generate the
+    # type. This is used later to get the correct rvar in `get_path_var`.
+    expr_intersection: typing.Optional[typing.FrozenSet[TypeRef]] = None
+    expr_union: typing.Optional[typing.FrozenSet[TypeRef]] = None
     # If this node is an element of a collection, and the
     # collection elements are named, this would be then
     # name of the element.
@@ -153,12 +176,20 @@ class TypeRef(ImmutableBase):
     is_scalar: bool = False
     # True, if this describes a view
     is_view: bool = False
+    # True, if this describes a cfg view
+    is_cfg_view: bool = False
     # True, if this describes an abstract type
     is_abstract: bool = False
     # True, if the collection type is persisted in the schema
     in_schema: bool = False
     # True, if this describes an opaque union type
     is_opaque_union: bool = False
+    # Does this need to call a custom json cast function
+    needs_custom_json_cast: bool = False
+    # If this has a schema-configured backend type, what is it
+    sql_type: typing.Optional[str] = None
+    # If this has a schema-configured custom sql serialization, what is it
+    custom_sql_serialization: typing.Optional[str] = None
 
     def __repr__(self) -> str:
         return f'<ir.TypeRef \'{self.name_hint}\' at 0x{id(self):x}>'
@@ -189,6 +220,10 @@ class AnyTupleRef(TypeRef):
     pass
 
 
+class AnyObjectRef(TypeRef):
+    pass
+
+
 class BasePointerRef(ImmutableBase):
     __abstract_node__ = True
 
@@ -214,7 +249,7 @@ class BasePointerRef(ImmutableBase):
     children: typing.FrozenSet[BasePointerRef] = frozenset()
     union_components: typing.Optional[typing.Set[BasePointerRef]] = None
     intersection_components: typing.Optional[typing.Set[BasePointerRef]] = None
-    union_is_concrete: bool = False
+    union_is_exhaustive: bool = False
     has_properties: bool = False
     is_derived: bool = False
     is_computable: bool = False
@@ -223,7 +258,8 @@ class BasePointerRef(ImmutableBase):
     # Inbound cardinality of the pointer.
     in_cardinality: qltypes.Cardinality = qltypes.Cardinality.MANY
     defined_here: bool = False
-    computed_backlink: typing.Optional[BasePointerRef] = None
+    computed_link_alias: typing.Optional[BasePointerRef] = None
+    computed_link_alias_is_backward: typing.Optional[bool] = None
 
     def dir_target(self, direction: s_pointers.PointerDirection) -> TypeRef:
         if direction is s_pointers.PointerDirection.Outbound:
@@ -292,20 +328,19 @@ class TupleIndirectionLink(s_pointers.PseudoPointer):
             module='__tuple__', name=str(element_name))
 
     def __hash__(self) -> int:
-        return hash((self.__class__, self._name))
+        return hash((self.__class__, self._source, self._name))
 
     def __eq__(self, other: typing.Any) -> bool:
         if not isinstance(other, self.__class__):
             return False
 
-        return self._name == other._name
+        return self._source == other._source and self._name == other._name
 
     def get_name(self, schema: s_schema.Schema) -> sn.QualName:
         return self._name
 
     def get_cardinality(
-        self,
-        schema: s_schema.Schema
+        self, schema: s_schema.Schema
     ) -> qltypes.SchemaCardinality:
         return qltypes.SchemaCardinality.One
 
@@ -337,6 +372,11 @@ class TupleIndirectionPointerRef(BasePointerRef):
     pass
 
 
+class SpecialPointerRef(BasePointerRef):
+    """Pointer ref used for internal columns, such as __fts_document__"""
+    pass
+
+
 class TypeIntersectionLink(s_pointers.PseudoPointer):
     """A Link-alike that can be used in type intersection path ids."""
 
@@ -365,8 +405,7 @@ class TypeIntersectionLink(s_pointers.PseudoPointer):
         return self._name
 
     def get_cardinality(
-        self,
-        schema: s_schema.Schema
+        self, schema: s_schema.Schema
     ) -> qltypes.SchemaCardinality:
         return self._cardinality
 
@@ -418,13 +457,34 @@ class TypeIntersectionPointerRef(BasePointerRef):
     rptr_specialization: typing.FrozenSet[PointerRef]
 
 
-class Pointer(Base):
+class Expr(Base):
+    __abstract_node__ = True
+
+    if typing.TYPE_CHECKING:
+        @property
+        @abc.abstractmethod
+        def typeref(self) -> TypeRef:
+            raise NotImplementedError
+
+    # Sets to materialize at this point, keyed by the type/ptr id.
+    materialized_sets: typing.Optional[
+        typing.Dict[uuid.UUID, MaterializedSet]] = None
+
+
+class Pointer(Expr):
 
     source: Set
-    target: Set
     ptrref: BasePointerRef
     direction: s_pointers.PointerDirection
+
+    # If the pointer is a computed pointer (or a computed pointer
+    # definition), the expression.
+    expr: typing.Optional[Expr] = None
+
     is_definition: bool
+    # Set when we have placed an rptr to help route link properties
+    # but it is not a genuine pointer use.
+    is_phony: bool = False
     anchor: typing.Optional[str] = None
     show_as_anchor: typing.Optional[str] = None
 
@@ -435,6 +495,10 @@ class Pointer(Base):
     @property
     def dir_cardinality(self) -> qltypes.Cardinality:
         return self.ptrref.dir_cardinality(self.direction)
+
+    @property
+    def typeref(self) -> TypeRef:
+        return self.ptrref.dir_target(self.direction)
 
 
 class TypeIntersectionPointer(Pointer):
@@ -450,14 +514,6 @@ class TupleIndirectionPointer(Pointer):
     is_definition: bool = False
 
 
-class Expr(Base):
-    __abstract_node__ = True
-
-    # Sets to materialize at this point, keyed by the type/ptr id.
-    materialized_sets: typing.Optional[
-        typing.Dict[uuid.UUID, MaterializedSet]] = None
-
-
 class ImmutableExpr(Expr, ImmutableBase):
     __abstract_node__ = True
 
@@ -466,9 +522,55 @@ class BindingKind(s_enum.StrEnum):
     With = 'With'
     For = 'For'
     Select = 'Select'
+    Schema = 'Schema'
 
 
-class Set(Base):
+class TypeRoot(Expr):
+    # This will be replicated in the enclosing set.
+    typeref: TypeRef
+
+    # Whether this is a reference to a global that is cached in a
+    # materialized CTE in the query.
+    is_cached_global: bool = False
+
+    # Whether to force this to not select subtypes
+    skip_subtypes: bool = False
+
+
+class RefExpr(Expr):
+    '''Different expressions sorts that refer to some kind of binding.'''
+    __abstract_node__ = True
+    typeref: TypeRef
+
+
+class MaterializedExpr(RefExpr):
+    pass
+
+
+class VisibleBindingExpr(RefExpr):
+    pass
+
+
+class InlinedParameterExpr(RefExpr):
+    required: bool
+    is_global: bool
+
+
+T_expr_co = typing.TypeVar('T_expr_co', covariant=True, bound=Expr)
+
+
+# SetE is the base 'Set' type, and it is parameterized over what kind
+# of expression it holds. Most code uses the Set alias below, which
+# instantiates it with Expr.
+# irutils.is_set_instance can be used to refine the type.
+class SetE(Base, typing.Generic[T_expr_co]):
+    '''A somewhat overloaded metadata container for expressions.
+
+    Its primary purpose is to be the holder for expression metadata
+    such as path_id.
+
+    It *also* contains shape applications.
+    '''
 
     __ast_frozen_fields__ = frozenset({'typeref'})
 
@@ -477,15 +579,16 @@ class Set(Base):
     path_id: PathId
     path_scope_id: typing.Optional[int] = None
     typeref: TypeRef
-    expr: typing.Optional[Expr] = None
-    rptr: typing.Optional[Pointer] = None
+    expr: T_expr_co
+    shape: typing.Tuple[typing.Tuple[SetE[Pointer], qlast.ShapeOp], ...] = ()
+
     anchor: typing.Optional[str] = None
     show_as_anchor: typing.Optional[str] = None
-    shape: typing.Tuple[typing.Tuple[Set, qlast.ShapeOp], ...] = ()
     # A pointer to a set nested within this one has a shape and the same
     # typeref, if such a set exists.
     shape_source: typing.Optional[Set] = None
     is_binding: typing.Optional[BindingKind] = None
+    is_schema_alias: bool = False
 
     is_materialized_ref: bool = False
     # A ref to a visible binding (like a for iterator variable) should
@@ -494,15 +597,30 @@ class Set(Base):
     # card/multi inference.
     is_visible_binding_ref: bool = False
 
-    # Whether to force this to not select subtypes
-    skip_subtypes: bool = False
     # Whether to force this to ignore rewrites. Very dangerous!
-    # Currently only used for preventing duplicate explicit .id
-    # insertions to BaseObject.
+    # Currently for preventing duplicate explicit .id
+    # insertions to BaseObject and for ignoring other access policies
+    # inside access policy expressions.
+    #
+    # N.B: This is defined on Set and not on TypeRoot because we use the Set
+    # to join against target types on links, and to ensure rvars.
     ignore_rewrites: bool = False
 
     def __repr__(self) -> str:
         return f'<ir.Set \'{self.path_id}\' at 0x{id(self):x}>'
+
+# We set its name to Set because that's what we want visitors to use.
+
+
+SetE.__name__ = 'Set'
+
+if typing.TYPE_CHECKING:
+    Set = SetE[Expr]
+else:
+    Set = SetE
+
+
+DUMMY_SET = Set()  # type: ignore[call-arg]
 
 
 class Command(Base):
@@ -511,7 +629,7 @@ class Command(Base):
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
 class Param:
-    """Query parameter with it's schema type and IR type"""
+    """Query parameter with its schema type and IR type"""
 
     name: str
     """Parameter name"""
@@ -584,15 +702,18 @@ class ParamTransType:
 @dataclasses.dataclass(eq=False)
 class ParamScalar(ParamTransType):
     def flatten(self) -> tuple[typing.Any, ...]:
-        return (0, self.idx)
+        return (int(qltypes.TypeTag.SCALAR), self.idx)
 
 
 @dataclasses.dataclass(eq=False)
 class ParamTuple(ParamTransType):
-    typs: tuple[ParamTransType, ...]
+    typs: tuple[tuple[typing.Optional[str], ParamTransType], ...]
 
     def flatten(self) -> tuple[typing.Any, ...]:
-        return (1, self.idx) + tuple(x.flatten() for x in self.typs)
+        return (
+            (int(qltypes.TypeTag.TUPLE), self.idx)
+            + tuple(x.flatten() for _, x in self.typs)
+        )
 
 
 @dataclasses.dataclass(eq=False)
@@ -600,7 +721,7 @@ class ParamArray(ParamTransType):
     typ: ParamTransType
 
     def flatten(self) -> tuple[typing.Any, ...]:
-        return (2, self.idx, self.typ.flatten())
+        return (int(qltypes.TypeTag.ARRAY), self.idx, self.typ.flatten())
 
 
 @dataclasses.dataclass(frozen=True)
@@ -640,7 +761,8 @@ class MaterializeVisible(Base):
 
 @markup.serializer.serializer.register(MaterializeVisible)
 def _serialize_to_markup_mat_vis(
-        ir: MaterializeVisible, *, ctx: typing.Any) -> typing.Any:
+    ir: MaterializeVisible, *, ctx: typing.Any
+) -> typing.Any:
     # We want to show the path_ids but *not* to show the full sets
     node = ast.serialize_to_markup(ir, ctx=ctx)
     fixed = {(x, y.path_id) for x, y in ir.sets}
@@ -664,7 +786,7 @@ class ComputableInfo(typing.NamedTuple):
 
 class Statement(Command):
 
-    expr: typing.Union[Set, Expr]
+    expr: Set
     views: typing.Dict[sn.Name, s_types.Type]
     params: typing.List[Param]
     globals: typing.List[Global]
@@ -678,15 +800,19 @@ class Statement(Command):
     schema_refs: typing.FrozenSet[so.Object]
     schema_ref_exprs: typing.Optional[
         typing.Dict[so.Object, typing.Set[qlast.Base]]]
-    new_coll_types: typing.FrozenSet[s_types.Collection]
     scope_tree: ScopeTreeNode
     dml_exprs: typing.List[qlast.Base]
     type_rewrites: typing.Dict[typing.Tuple[uuid.UUID, bool], Set]
     singletons: typing.List[PathId]
+    triggers: tuple[tuple[Trigger, ...], ...]
+    warnings: tuple[errors.EdgeDBError, ...]
 
 
 class TypeIntrospection(ImmutableExpr):
 
+    # The type value to return
+    output_typeref: TypeRef
+    # The type value *of the output*
     typeref: TypeRef
 
 
@@ -695,7 +821,7 @@ class ConstExpr(Expr):
     typeref: TypeRef
 
 
-class EmptySet(Set, ConstExpr):
+class EmptySet(ConstExpr):
     pass
 
 
@@ -714,6 +840,9 @@ class BaseConstant(ConstExpr, ImmutableExpr):
             raise ValueError('cannot create irast.Constant without a type')
         if self.value is None:
             raise ValueError('cannot create irast.Constant without a value')
+
+    def _init_copy(self) -> BaseConstant:
+        return self.__class__(typeref=self.typeref, value=self.value)
 
 
 class BaseStrConstant(BaseConstant):
@@ -752,7 +881,7 @@ class BytesConstant(BaseConstant):
 
 class ConstantSet(ConstExpr, ImmutableExpr):
 
-    elements: typing.Tuple[BaseConstant, ...]
+    elements: typing.Tuple[BaseConstant | Parameter, ...]
 
 
 class Parameter(ImmutableExpr):
@@ -795,6 +924,7 @@ class TypeCheckOp(ImmutableExpr):
     right: TypeRef
     op: str
     result: typing.Optional[bool] = None
+    typeref: TypeRef
 
 
 class SortExpr(Base):
@@ -816,6 +946,7 @@ class CallArg(ImmutableBase):
     cardinality: qltypes.Cardinality = qltypes.Cardinality.UNKNOWN
     multiplicity: qltypes.Multiplicity = qltypes.Multiplicity.UNKNOWN
     is_default: bool = False
+    param_typemod: qltypes.TypeModifier
 
 
 class Call(ImmutableExpr):
@@ -837,11 +968,9 @@ class Call(ImmutableExpr):
     force_return_cast: bool
 
     # Bound arguments.
-    args: typing.List[CallArg]
-
-    # Typemods of parameters.  This list corresponds to ".args"
-    # (so `zip(args, params_typemods)` is valid.)
-    params_typemods: typing.List[qltypes.TypeModifier]
+    # Named arguments are indexed by argument name.
+    # Positional arguments are indexed by argument position.
+    args: typing.Dict[typing.Union[int, str], CallArg]
 
     # Return type and typemod.  In bodies of polymorphic functions
     # the return type can be polymorphic; in queries the return
@@ -861,8 +990,20 @@ class Call(ImmutableExpr):
     # filter at the call site.
     impl_is_strict: bool = False
 
+    # Kind of a hack: indicates that when possible we should pass arguments
+    # to this function as a subquery-as-an-expression.
+    # See comment in schema/functions.py for more discussion.
+    prefer_subquery_args: bool = False
+
+    # If this is a set of call but is allowed in singleton expressions.
+    is_singleton_set_of: typing.Optional[bool] = None
+
 
 class FunctionCall(Call):
+
+    __ast_mutable_fields__ = frozenset((
+        'extras', 'body'
+    ))
 
     # If the bound callable is a "USING SQL" callable, this
     # attribute will be set to the name of the SQL function.
@@ -900,6 +1041,12 @@ class FunctionCall(Call):
     # Additional arguments representing global variables
     global_args: typing.Optional[typing.List[Set]] = None
 
+    # Any extra information useful for compilation of special-case callables.
+    extras: typing.Optional[dict[str, typing.Any]] = None
+
+    # Inline body of the callable.
+    body: typing.Optional[Set] = None
+
 
 class OperatorCall(Call):
 
@@ -926,6 +1073,7 @@ class IndexIndirection(ImmutableExpr):
 
     expr: Base
     index: Base
+    typeref: TypeRef
 
 
 class SliceIndirection(ImmutableExpr):
@@ -933,6 +1081,7 @@ class SliceIndirection(ImmutableExpr):
     expr: Set
     start: typing.Optional[Base]
     stop: typing.Optional[Base]
+    typeref: TypeRef
 
 
 class TypeCast(ImmutableExpr):
@@ -946,6 +1095,11 @@ class TypeCast(ImmutableExpr):
     sql_function: typing.Optional[str] = None
     sql_cast: bool
     sql_expr: bool
+    error_message_context: typing.Optional[str] = None
+
+    @property
+    def typeref(self) -> TypeRef:
+        return self.to_type
 
 
 class MaterializedSet(Base):
@@ -971,7 +1125,8 @@ class MaterializedSet(Base):
 
 @markup.serializer.serializer.register(MaterializedSet)
 def _serialize_to_markup_mat_set(
-        ir: MaterializedSet, *, ctx: typing.Any) -> typing.Any:
+    ir: MaterializedSet, *, ctx: typing.Any
+) -> typing.Any:
     # We want to show the path_ids but *not* to show the full uses
     node = ast.serialize_to_markup(ir, ctx=ctx)
     node.add_child(label='uses', node=markup.serialize(ir.uses, ctx=ctx))
@@ -986,11 +1141,15 @@ class Stmt(Expr):
     name: typing.Optional[str] = None
     # Parts of the edgeql->IR compiler need to create statements and fill in
     # the result later, but making it Optional would cause lots of errors,
-    # so we stick a bogus Empty set in.
-    result: Set = EmptySet()  # type: ignore
+    # so we stick a dummy set set in.
+    result: Set = DUMMY_SET
     parent_stmt: typing.Optional[Stmt] = None
     iterator_stmt: typing.Optional[Set] = None
-    bindings: typing.Optional[typing.List[Set]] = None
+    bindings: typing.Optional[list[tuple[Set, qltypes.Volatility]]] = None
+
+    @property
+    def typeref(self) -> TypeRef:
+        return self.result.typeref
 
 
 class FilteredStmt(Stmt):
@@ -1006,14 +1165,20 @@ class SelectStmt(FilteredStmt):
     limit: typing.Optional[Set] = None
     implicit_wrapper: bool = False
 
+    # An expression to use instead of this one for the purpose of
+    # cardinality/multiplicity inference. This is used for when something
+    # is desugared in a way that doesn't preserve cardinality, but we
+    # need to anyway.
+    card_inference_override: typing.Optional[Set] = None
+
 
 class GroupStmt(FilteredStmt):
-    subject: Set = EmptySet()  # type: ignore
+    subject: Set = DUMMY_SET
     using: typing.Dict[str, typing.Tuple[Set, qltypes.Cardinality]] = (
         ast.field(factory=dict))
     by: typing.List[qlast.GroupingElement]
-    result: Set = EmptySet()  # type: ignore
-    group_binding: Set = EmptySet()  # type: ignore
+    result: Set = DUMMY_SET
+    group_binding: Set = DUMMY_SET
     grouping_binding: typing.Optional[Set] = None
     orderby: typing.Optional[typing.List[SortExpr]] = None
     # Optimization information
@@ -1022,12 +1187,34 @@ class GroupStmt(FilteredStmt):
     ] = ast.field(factory=dict)
 
 
-class MutatingStmt(Stmt):
+class MutatingLikeStmt(Expr):
+    """Represents statements that are "like" mutations for certain purposes.
+
+    In particular, it includes both MutatingStmt, representing actual
+    mutations, and TriggerAnchor, which is a way to signal that
+    something should (or should not) see certain mutation overlays in
+    the backend without being an actual mutation.
+    """
+    __abstract_node__ = True
+
+
+class TriggerAnchor(MutatingLikeStmt):
+
+    """A placeholder to be put in trigger __old__ nodes.
+
+    The idea here is that in the backend, it will be treated as if it
+    was a MutatingStmt for the purposes of determining whether to use
+    overlays.
+    """
+    typeref: TypeRef
+
+
+class MutatingStmt(Stmt, MutatingLikeStmt):
     __abstract_node__ = True
     # Parts of the edgeql->IR compiler need to create statements and fill in
     # the subject later, but making it Optional would cause lots of errors,
-    # so we stick a bogus Empty set in.
-    subject: Set = EmptySet()  # type: ignore
+    # so we stick a dummy set in.
+    subject: Set = DUMMY_SET
     # Conflict checks that we should manually raise constraint violations
     # for.
     conflict_checks: typing.Optional[typing.List[OnConflictClause]] = None
@@ -1039,6 +1226,9 @@ class MutatingStmt(Stmt):
     read_policies: typing.Dict[uuid.UUID, ReadPolicyExpr] = ast.field(
         factory=dict
     )
+
+    # Rewrites of the subject shape
+    rewrites: typing.Optional[Rewrites] = None
 
     @property
     def material_type(self) -> TypeRef:
@@ -1067,6 +1257,23 @@ class WritePolicy(Base):
     cardinality: qltypes.Cardinality = qltypes.Cardinality.UNKNOWN
 
 
+class Trigger(Base):
+    expr: Set
+    # All the relevant dml
+    affected: set[tuple[TypeRef, MutatingStmt]]
+    all_affected_types: set[TypeRef]
+    source_type: TypeRef
+    kinds: set[qltypes.TriggerKind]
+    scope: qltypes.TriggerScope
+
+    # N.B: Semantically and in the external language, delete triggers
+    # don't have a __new__ set, but we give it one in the
+    # implementation (identical to the old set), to help make the
+    # implementation more uniform.
+    new_set: Set
+    old_set: typing.Optional[Set]
+
+
 class OnConflictClause(Base):
     constraint: typing.Optional[ConstraintRef]
     select_ir: Set
@@ -1078,19 +1285,29 @@ class OnConflictClause(Base):
 
 class InsertStmt(MutatingStmt):
     on_conflict: typing.Optional[OnConflictClause] = None
+    final_typeref: typing.Optional[TypeRef] = None
 
     @property
     def material_type(self) -> TypeRef:
         return self.subject.typeref.real_material_type
 
+    @property
+    def typeref(self) -> TypeRef:
+        return self.final_typeref or self.result.typeref
+
+
+# N.B: The PointerRef corresponds to the *definition* point of the rewrite.
+RewritesOfType = typing.Dict[str, typing.Tuple[SetE[Pointer], BasePointerRef]]
+
+
+@dataclasses.dataclass(kw_only=True, frozen=True, slots=True)
+class Rewrites:
+    old_path_id: typing.Optional[PathId]
+
+    by_type: typing.Dict[TypeRef, RewritesOfType]
+
 
 class UpdateStmt(MutatingStmt, FilteredStmt):
-    # The pgsql DML compilation needs to be able to access __type__
-    # fields on link fields for doing covariant assignment checking.
-    # To enable this, we just make sure that update has access to
-    # BaseObject's __type__, from which we can derive whatever we need.
-    # This is at least a bit of a hack.
-    dunder_type_ptrref: BasePointerRef
     _material_type: TypeRef | None = None
 
     @property
@@ -1098,9 +1315,16 @@ class UpdateStmt(MutatingStmt, FilteredStmt):
         assert self._material_type
         return self._material_type
 
+    sql_mode_link_only: bool = False
+
 
 class DeleteStmt(MutatingStmt, FilteredStmt):
     _material_type: TypeRef | None = None
+
+    links_to_delete: typing.Dict[
+        uuid.UUID,
+        typing.Tuple[PointerRef, ...]
+    ] = ast.field(factory=dict)
 
     @property
     def material_type(self) -> TypeRef:
@@ -1121,8 +1345,12 @@ class ConfigCommand(Command, Expr):
     cardinality: qltypes.SchemaCardinality
     requires_restart: bool
     backend_setting: typing.Optional[str]
+    is_system_config: bool
     globals: typing.Optional[typing.List[Global]] = None
     scope_tree: typing.Optional[ScopeTreeNode] = None
+
+    params: typing.List[Param] = ast.field(factory=list)
+    schema: typing.Optional[s_schema.Schema] = None
 
 
 class ConfigSet(ConfigCommand):
@@ -1131,12 +1359,103 @@ class ConfigSet(ConfigCommand):
     required: bool
     backend_expr: typing.Optional[Set] = None
 
+    @property
+    def typeref(self) -> TypeRef:
+        return self.expr.typeref
+
 
 class ConfigReset(ConfigCommand):
 
     selector: typing.Optional[Set] = None
 
+    @property
+    def typeref(self) -> TypeRef:
+        return TypeRef(
+            id=so.get_known_type_id('anytype'),
+            name_hint=sn.UnqualName('anytype'),
+        )
+
 
 class ConfigInsert(ConfigCommand):
 
     expr: Set
+
+    @property
+    def typeref(self) -> TypeRef:
+        return self.expr.typeref
+
+
+class FTSDocument(ImmutableExpr):
+    """
+    Text and information on how to search through it.
+
+    Constructed with `std::fts::with_options`.
+    """
+
+    text: Set
+
+    language: Set
+
+    language_domain: typing.Set[str]
+
+    weight: typing.Optional[str]
+
+    typeref: TypeRef
+
+
+# StaticIntrospection is only used in static evaluation (staeval.py),
+# but unfortunately the IR AST node can only be defined here.
+class StaticIntrospection(Tuple):
+
+    ir: TypeIntrospection
+    schema: s_schema.Schema
+
+    @property
+    def meta_type(self) -> s_objtypes.ObjectType:
+        return self.schema.get_by_id(
+            self.ir.typeref.id, type=s_objtypes.ObjectType
+        )
+
+    @property
+    def output_type(self) -> s_types.Type:
+        return self.schema.get_by_id(
+            self.ir.output_typeref.id, type=s_types.Type
+        )
+
+    @property
+    def elements(self) -> typing.List[TupleElement]:
+        from . import staeval
+
+        rv = []
+        schema = self.schema
+        output_type = self.output_type
+        for ptr in self.meta_type.get_pointers(schema).objects(schema):
+            field_sn = ptr.get_shortname(schema)
+            field_name = field_sn.name
+            field_type = ptr.get_target(schema)
+            assert field_type is not None
+            try:
+                field_value = output_type.get_field_value(schema, field_name)
+            except LookupError:
+                continue
+            try:
+                val = staeval.coerce_py_const(field_type.id, field_value)
+            except staeval.UnsupportedExpressionError:
+                continue
+            ref = TypeRef(id=field_type.id, name_hint=field_sn)
+            vset = Set(expr=val, typeref=ref, path_id=PathId.from_typeref(ref))
+            rv.append(TupleElement(name=field_name, val=vset))
+        return rv
+
+    @elements.setter
+    def elements(self, elements: typing.List[TupleElement]) -> None:
+        pass
+
+    def get_field_value(self, name: sn.QualName) -> ConstExpr | TypeCast:
+        from . import staeval
+
+        ptr = self.meta_type.getptr(self.schema, name.get_local_name())
+        rv_type = ptr.get_target(self.schema)
+        assert rv_type is not None
+        rv_value = self.output_type.get_field_value(self.schema, name.name)
+        return staeval.coerce_py_const(rv_type.id, rv_value)

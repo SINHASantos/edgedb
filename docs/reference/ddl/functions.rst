@@ -49,7 +49,7 @@ Create function
 
     # and <subcommand> is one of
 
-      set volatility := {'Immutable' | 'Stable' | 'Volatile'} ;
+      set volatility := {'Immutable' | 'Stable' | 'Volatile' | 'Modifying'} ;
       create annotation <annotation-name> := <value> ;
       using ( <expr> ) ;
       using <language> <functionbody> ;
@@ -75,7 +75,7 @@ Most sub-commands and options of this command are identical to the
 :ref:`SDL function declaration <ref_eql_sdl_functions_syntax>`, with
 some additional features listed below:
 
-:eql:synopsis:`set volatility := {'Immutable' | 'Stable' | 'Volatile'}`
+:eql:synopsis:`set volatility := {'Immutable' | 'Stable' | 'Volatile' | 'Modifying'}`
     Function volatility determines how aggressively the compiler can
     optimize its invocations. Other than a slight syntactical
     difference this is the same as the corresponding SDL declaration.
@@ -141,7 +141,7 @@ Change the definition of a function.
 
     # and <subcommand> is one of
 
-      set volatility := {'Immutable' | 'Stable' | 'Volatile'} ;
+      set volatility := {'Immutable' | 'Stable' | 'Volatile' | 'Modifying'} ;
       reset volatility ;
       rename to <newname> ;
       create annotation <annotation-name> := <value> ;
@@ -271,6 +271,7 @@ Remove the ``mysum`` function:
   * - :ref:`Schema > Functions <ref_datamodel_functions>`
   * - :ref:`SDL > Functions <ref_eql_sdl_functions>`
   * - :ref:`Reference > Function calls <ref_reference_function_call>`
-  * - :ref:`Introspection > Functions <ref_eql_introspection_functions>`
+  * - :ref:`Introspection > Functions <ref_datamodel_introspection_functions>`
   * - :ref:`Cheatsheets > Functions <ref_cheatsheet_functions>`
-
+  * - `Tutorial > Advanced EdgeQL > User-Defined Functions
+      </tutorial/advanced-edgeql/user-def-functions>`_

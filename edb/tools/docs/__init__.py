@@ -20,8 +20,11 @@
 from __future__ import annotations
 
 from docutils import nodes as d_nodes
+from docutils.parsers import rst as d_rst
+from sphinx import addnodes as s_nodes
 from sphinx import transforms as s_transforms
 
+from . import edb
 from . import cli
 from . import eql
 from . import js
@@ -51,11 +54,76 @@ class ProhibitedNodeTransform(s_transforms.SphinxTransform):
                 f'perhaps you wanted to use double backticks?')
 
 
+class VersionAdded(d_rst.Directive):
+
+    has_content = True
+    optional_arguments = 0
+    required_arguments = 1
+
+    def run(self):
+        node = s_nodes.versionmodified()
+        node['type'] = 'versionadded'
+        node['version'] = self.arguments[0]
+        self.state.nested_parse(self.content, self.content_offset, node)
+        return [node]
+
+
+class VersionChanged(d_rst.Directive):
+
+    has_content = True
+    optional_arguments = 0
+    required_arguments = 1
+
+    def run(self):
+        node = s_nodes.versionmodified()
+        node['type'] = 'versionchanged'
+        node['version'] = self.arguments[0]
+        self.state.nested_parse(self.content, self.content_offset, node)
+        return [node]
+
+
+class VersionedSection(d_rst.Directive):
+
+    has_content = False
+    optional_arguments = 0
+    required_arguments = 0
+
+    def run(self):
+        node = d_nodes.container()
+        node['versioned-section'] = True
+        return [node]
+
+
+class VersionedReplaceRole:
+
+    def __call__(
+        self, role, rawtext, text, lineno, inliner, options=None, content=None
+    ):
+        nodes = []
+        if not text.startswith('_default:'):
+            text = '_default:' + text
+        for section in text.split(';'):
+            parts = section.split(':', maxsplit=1)
+            node = s_nodes.versionmodified()
+            node['type'] = 'versionchanged'
+            node['version'] = parts[0].strip()
+            node += d_nodes.Text(parts[1].strip())
+            nodes.append(node)
+        return nodes, []
+
+
 def setup(app):
+    edb.setup_domain(app)
     cli.setup_domain(app)
     eql.setup_domain(app)
     js.setup_domain(app)
     sdl.setup_domain(app)
     graphql.setup_domain(app)
+
+    app.add_directive('versionadded', VersionAdded, True)
+    app.add_directive('versionchanged', VersionChanged, True)
+    app.add_directive('code-block', shared.CodeBlock, True)
+    app.add_directive('versioned-section', VersionedSection)
+    app.add_role('versionreplace', VersionedReplaceRole())
 
     app.add_transform(ProhibitedNodeTransform)

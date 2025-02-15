@@ -1222,6 +1222,7 @@ class TestEdgeQLScope(tb.QueryTestCase):
             [9],
         )
 
+    @tb.ignore_warnings('more than one.* in a FILTER clause')
     async def test_edgeql_scope_filter_01(self):
         await self.assert_query_result(
             r'''
@@ -1338,6 +1339,7 @@ class TestEdgeQLScope(tb.QueryTestCase):
             ]
         )
 
+    @tb.ignore_warnings('more than one.* in a FILTER clause')
     async def test_edgeql_scope_filter_04(self):
         await self.assert_query_result(
             r'''
@@ -1361,6 +1363,7 @@ class TestEdgeQLScope(tb.QueryTestCase):
             ]
         )
 
+    @tb.ignore_warnings('more than one.* in a FILTER clause')
     async def test_edgeql_scope_filter_05(self):
         await self.assert_query_result(
             r'''
@@ -1372,6 +1375,7 @@ class TestEdgeQLScope(tb.QueryTestCase):
             {'Alice', 'Bob', 'Carol', 'Dave'}
         )
 
+    @tb.ignore_warnings('more than one.* in a FILTER clause')
     async def test_edgeql_scope_filter_06(self):
         await self.assert_query_result(
             r'''
@@ -1383,6 +1387,7 @@ class TestEdgeQLScope(tb.QueryTestCase):
             {'Alice', 'Bob', 'Carol', 'Dave'}
         )
 
+    @tb.ignore_warnings('more than one.* in a FILTER clause')
     async def test_edgeql_scope_filter_07(self):
         await self.assert_query_result(
             r'''
@@ -1394,6 +1399,7 @@ class TestEdgeQLScope(tb.QueryTestCase):
             {'Alice', 'Bob', 'Carol', 'Dave'}
         )
 
+    @tb.ignore_warnings('more than one.* in a FILTER clause')
     async def test_edgeql_scope_filter_08(self):
         await self.assert_query_result(
             r'''
@@ -1450,6 +1456,7 @@ class TestEdgeQLScope(tb.QueryTestCase):
     # NOTE: LIMIT tests are largely identical to OFFSET tests, any
     # time there is a new OFFSET test, there should be a corresponding
     # LIMIT one.
+    @tb.ignore_warnings('more than one.* in a FILTER clause')
     async def test_edgeql_scope_offset_01(self):
         await self.assert_query_result(
             r'''
@@ -1539,6 +1546,7 @@ class TestEdgeQLScope(tb.QueryTestCase):
             ]
         )
 
+    @tb.ignore_warnings('more than one.* in a FILTER clause')
     async def test_edgeql_scope_limit_01(self):
         await self.assert_query_result(
             r'''
@@ -1978,6 +1986,7 @@ class TestEdgeQLScope(tb.QueryTestCase):
                 ).friends@nickname = 'Firefighter';
                 """)
 
+    @tb.ignore_warnings('more than one.* in a FILTER clause')
     async def test_edgeql_scope_detached_05(self):
         await self.assert_query_result(
             r"""
@@ -2048,6 +2057,7 @@ class TestEdgeQLScope(tb.QueryTestCase):
             ],
         )
 
+    @tb.ignore_warnings('more than one.* in a FILTER clause')
     async def test_edgeql_scope_detached_06(self):
         # this is very similar to test_edgeql_scope_filter_01
         await self.assert_query_result(
@@ -2351,6 +2361,7 @@ class TestEdgeQLScope(tb.QueryTestCase):
             sort=True
         )
 
+    @tb.ignore_warnings('more than one.* in a FILTER clause')
     async def test_edgeql_scope_union_02(self):
         await self.assert_query_result(
             r'''
@@ -2412,6 +2423,7 @@ class TestEdgeQLScope(tb.QueryTestCase):
             ]
         )
 
+    @tb.ignore_warnings('more than one.* in a FILTER clause')
     async def test_edgeql_scope_computables_02(self):
         # Test that expressions in link computables
         # of the type variant do not leak out into the query.
@@ -2462,7 +2474,7 @@ class TestEdgeQLScope(tb.QueryTestCase):
                         name,
                         owners: {
                             name
-                        },
+                        } ORDER BY .name,
                     } ORDER BY .name
                 } FILTER .name = 'Alice';
             """,
@@ -2773,30 +2785,13 @@ class TestEdgeQLScope(tb.QueryTestCase):
 
     async def test_edgeql_scope_unused_with_def_01(self):
 
-        with self.assertRaisesRegex(
-                edgedb.QueryError,
-                r"unused alias definition: 'foo'",
-                _position=48):
-            await self.con.query("""\
-                WITH
-                    foo := 1
+        await self.assert_query_result(
+            """
+                WITH foo := 1
                 SELECT 1;
-            """)
-
-    async def test_edgeql_scope_unused_with_def_02(self):
-
-        with self.assertRaisesRegex(
-                edgedb.QueryError,
-                r"unused alias definition: 'foo'",
-                _position=48):
-            await self.con.query("""\
-                WITH
-                    foo := 1
-                SELECT (
-                    WITH foo := 2
-                    SELECT foo
-                )
-            """)
+            """,
+            [1]
+        )
 
     async def test_edgeql_scope_nested_computable_01(self):
         # This is a test for a bug where the outside filter would get
@@ -3018,7 +3013,7 @@ class TestEdgeQLScope(tb.QueryTestCase):
             ["Alice"],
         )
 
-    async def test_edgeql_scope_source_rebind_02(self):
+    async def test_edgeql_scope_source_rebind_02a(self):
         await self.assert_query_result(
             """
                 WITH
@@ -3026,6 +3021,19 @@ class TestEdgeQLScope(tb.QueryTestCase):
                     SELECT User.name FILTER random() > 0) }),
                 A := (SELECT U FILTER .name = 'Alice'),
                 SELECT A.tag;
+            """,
+            ["Alice"],
+        )
+
+    @test.xerror("can't find materialized set")
+    async def test_edgeql_scope_source_rebind_02b(self):
+        await self.assert_query_result(
+            """
+                WITH
+                U := (SELECT User { tag := (
+                    SELECT User.name FILTER random() > 0) }),
+                A := (SELECT U FILTER .name = 'Alice'),
+                SELECT (A,).0.tag;
             """,
             ["Alice"],
         )
@@ -3249,7 +3257,7 @@ class TestEdgeQLScope(tb.QueryTestCase):
             ]
         )
 
-    async def test_edgeql_scope_ref_outer_05(self):
+    async def test_edgeql_scope_ref_outer_05a(self):
         await self.assert_query_result(
             """
                 WITH
@@ -3263,6 +3271,44 @@ class TestEdgeQLScope(tb.QueryTestCase):
                 A := (SELECT U FILTER .name = 'Alice'),
                 B := (SELECT U FILTER .name = 'Bob'),
                 SELECT { a := A.cards.tag, b := B.cards.tag };
+            """,
+            [
+                {
+                    "a": {
+                        "Alice - Imp",
+                        "Alice - Dragon",
+                        "Alice - Bog monster",
+                        "Alice - Giant turtle",
+                    },
+                    "b": {
+                        "Bob - Bog monster",
+                        "Bob - Giant turtle",
+                        "Bob - Dwarf",
+                        "Bob - Golem",
+                    }
+                }
+            ]
+        )
+
+    @test.xfail("gives every user name in the output")
+    async def test_edgeql_scope_ref_outer_05b(self):
+        # I was trying to do something I wasn't sure of, and I tried
+        # to write this variant of outer_05a to investigate.
+        #
+        # But then it turns out this was already broken.
+        await self.assert_query_result(
+            """
+                WITH
+                U := (
+                    SELECT User {
+                        cards := .deck {
+                            name,
+                            tag := User.name ++ " - " ++ .name,
+                        }
+                    }),
+                A := (SELECT U FILTER .name = 'Alice'),
+                B := (SELECT U FILTER .name = 'Bob'),
+                SELECT { a := (A.cards,).0.tag, b := B.cards.tag };
             """,
             [
                 {
@@ -3781,6 +3827,39 @@ class TestEdgeQLScope(tb.QueryTestCase):
             ])
         )
 
+    async def test_edgeql_scope_linkprop_rebinding_01(self):
+        # This is a lot like code the querybuilder generates
+        # See issue #4961
+        await self.assert_query_result(
+            r'''
+            select assert_exists((WITH
+              __user := DETACHED User
+            SELECT __user {
+              deck := (
+                WITH
+                  __user2 := (
+                    SELECT __user.deck {
+                      __linkprop_count := __user.deck@count
+                    }
+                  )
+                SELECT __user2 {
+                  single @count := __user2.__linkprop_count
+                }
+              )
+            } filter .name = 'Alice'));
+            ''',
+            [
+                {
+                    "deck": tb.bag([
+                        {"@count": 2},
+                        {"@count": 2},
+                        {"@count": 3},
+                        {"@count": 3},
+                    ])
+                }
+            ]
+        )
+
     async def test_edgeql_scope_for_with_computable_01(self):
         await self.assert_query_result(
             r'''
@@ -3823,6 +3902,7 @@ class TestEdgeQLScope(tb.QueryTestCase):
             ])
         )
 
+    @tb.ignore_warnings('more than one.* in a FILTER clause')
     async def test_edgeql_shape_intersection_semijoin_01(self):
         await self.assert_query_result(
             r'''
@@ -3853,4 +3933,378 @@ class TestEdgeQLScope(tb.QueryTestCase):
                 select count(Named[IS User].deck);
             ''',
             [9],
+        )
+
+    async def test_edgeql_scope_union_backlink_01(self):
+        await self.assert_query_result(
+            r'''
+                select {Card {name}, Card{element}} {name, owners: {name}}
+                filter .name = 'Djinn';
+            ''',
+            [
+                {"name": "Djinn", "owners": tb.bag([
+                    {"name": "Carol"}, {"name": "Dave"}])},
+                {"name": "Djinn", "owners": tb.bag([
+                    {"name": "Carol"}, {"name": "Dave"}])},
+            ],
+        )
+
+    @tb.ignore_warnings('more than one.* in a FILTER clause')
+    async def test_edgeql_scope_schema_computed_01(self):
+        await self.con.execute('''
+            alter type User
+            create link lcards := (
+                select Card filter Card.name[0] = User.name[0]);
+        ''')
+
+        await self.assert_query_result(
+            r'''
+                with U := User,
+                select U { name } filter exists .lcards;
+            ''',
+            tb.bag([
+                {"name": "Bob"},
+                {"name": "Dave"},
+            ]),
+        )
+
+        await self.assert_query_result(
+            r'''
+                select Bot { lcards: {name} }
+            ''',
+            [
+                {
+                    "lcards": tb.bag([
+                        {"name": "Dragon"},
+                        {"name": "Dwarf"},
+                        {"name": "Djinn"}
+                    ])
+                }
+            ]
+        )
+
+    async def test_edgeql_scope_schema_computed_02(self):
+        await self.con.execute('''
+            alter type Named
+            create property foo := count(User)
+        ''')
+
+        # Make sure that 'User' doesn't get captured when evaluating
+        # the schema computed here.
+        await self.assert_query_result(
+            r'''
+                select User { foo }
+            ''',
+            [{'foo': 4}, {'foo': 4}, {'foo': 4}, {'foo': 4}]
+        )
+
+    async def test_edgeql_scope_linkprop_assert_01(self):
+        await self.assert_query_result(
+            r'''
+            select User {
+              cards := assert_exists(User.deck {name, c := User.deck@count})
+            }
+            filter .name = 'Alice';
+            ''',
+            [
+                {
+                    "cards": tb.bag([
+                        {"c": 2, "name": "Imp"},
+                        {"c": 2, "name": "Dragon"},
+                        {"c": 3, "name": "Bog monster"},
+                        {"c": 3, "name": "Giant turtle"}
+                    ])
+                }
+            ],
+        )
+
+        await self.assert_query_result(
+            r'''
+            select User {
+              cards := assert_exists(User.deck {name, @c := User.deck@count})
+            }
+            filter .name = 'Alice';
+            ''',
+            [
+                {
+                    "cards": tb.bag([
+                        {"@c": 2, "name": "Imp"},
+                        {"@c": 2, "name": "Dragon"},
+                        {"@c": 3, "name": "Bog monster"},
+                        {"@c": 3, "name": "Giant turtle"}
+                    ])
+                }
+            ],
+        )
+
+        # Query builder style
+        await self.assert_query_result(
+            r'''
+            WITH U := DETACHED User
+            SELECT U {
+              deck := assert_exists((
+                WITH
+                  Q := (
+                    SELECT U.deck {
+                      __count := U.deck@count
+                    }
+                  )
+                SELECT Q {
+                  name,
+                  single @count := Q.__count
+                }
+              ))
+            } filter .name = 'Alice';
+            ''',
+            [
+                {
+                    "deck": tb.bag([
+                        {"@count": 2, "name": "Imp"},
+                        {"@count": 2, "name": "Dragon"},
+                        {"@count": 3, "name": "Bog monster"},
+                        {"@count": 3, "name": "Giant turtle"}
+                    ])
+                }
+            ],
+        )
+
+    async def test_edgeql_scope_linkprop_assert_02(self):
+        await self.assert_query_result(
+            '''
+            SELECT User {
+                cards := assert_exists(.deck {name, @count})
+            }
+            filter .name = 'Alice';
+            ''',
+            [
+                {
+                    "cards": tb.bag([
+                        {"@count": 2, "name": "Imp"},
+                        {"@count": 2, "name": "Dragon"},
+                        {"@count": 3, "name": "Bog monster"},
+                        {"@count": 3, "name": "Giant turtle"}
+                    ])
+                }
+            ],
+        )
+
+    async def test_edgeql_scope_linkprop_assert_03(self):
+        await self.assert_query_result(
+            r'''
+            SELECT User {
+                cards := assert_exists(User.deck {name, c := @count})
+            }
+            filter .name = 'Alice';
+            ''',
+            [
+                {
+                    "cards": tb.bag([
+                        {"c": 2, "name": "Imp"},
+                        {"c": 2, "name": "Dragon"},
+                        {"c": 3, "name": "Bog monster"},
+                        {"c": 3, "name": "Giant turtle"}
+                    ])
+                }
+            ],
+        )
+
+        await self.assert_query_result(
+            r'''
+            SELECT User {
+                cards := assert_exists(.deck {name, c := @count})
+            }
+            filter .name = 'Alice';
+            ''',
+            [
+                {
+                    "cards": tb.bag([
+                        {"c": 2, "name": "Imp"},
+                        {"c": 2, "name": "Dragon"},
+                        {"c": 3, "name": "Bog monster"},
+                        {"c": 3, "name": "Giant turtle"}
+                    ])
+                }
+            ],
+        )
+
+    async def test_edgeql_scope_filter_qeq_01(self):
+        await self.assert_query_result(
+            r'''
+            select User filter .avatar ?= <Card>{} and .name = 'Bob';
+            ''',
+            [
+                {},
+            ],
+        )
+
+        await self.assert_query_result(
+            r'''
+            select User filter .name = 'Bob' and .avatar ?= <Card>{}
+            ''',
+            [
+                {},
+            ],
+        )
+
+    @test.xerror("Issue #6059 (non-group generalization)")
+    async def test_edgeql_scope_mat_issue_6059(self):
+        await self.assert_query_result(
+            r'''
+            with
+              groups := (
+                for k in {'Earth', 'Air', 'Fire', 'Water'} union {
+                    elements := (select Card filter .element = k),
+                    r := random(),
+                }
+              ),
+            select groups {
+              keyCard := (
+                select .elements { id }
+                limit 1
+              ),
+            }
+            order by .keyCard.cost
+            ''',
+            [{"keyCard": {}}] * 4,
+        )
+
+    @test.xerror("Issue #6060 (non-group generalization)")
+    async def test_edgeql_scope_mat_issue_6060(self):
+        await self.assert_query_result(
+            r'''
+            with
+              groups := (
+                for k in {'Earth', 'Air', 'Fire', 'Water'} union {
+                    elements := (select Card filter .element = k),
+                    r := random(),
+                }
+              ),
+              submissions := (
+                groups {
+                  minCost := min(.elements.cost)
+                }
+              )
+            select submissions {
+              minCost
+            }
+            order by .minCost;
+            ''',
+            [{"minCost": 1}, {"minCost": 1}, {"minCost": 1}, {"minCost": 2}],
+        )
+
+    async def test_edgeql_scope_implicit_limit_01(self):
+        # implicit limit should interact correctly with offset
+        await self.assert_query_result(
+            r'''
+                select Card { name } order by .name offset 3
+            ''',
+            [
+                {"name": "Dwarf"},
+                {"name": "Giant eagle"},
+                {"name": "Giant turtle"},
+                {"name": "Golem"},
+            ],
+            implicit_limit=4,
+        )
+
+        await self.assert_query_result(
+            r'''
+            with W := Card
+            select W { name } order by .name offset 3;
+            ''',
+            [
+                {"name": "Dwarf"},
+                {"name": "Giant eagle"},
+                {"name": "Giant turtle"},
+                {"name": "Golem"},
+            ],
+            implicit_limit=4,
+        )
+
+        await self.assert_query_result(
+            r'''
+                select Card { name } order by .name offset 3 limit 2
+            ''',
+            [
+                {"name": "Dwarf"},
+                {"name": "Giant eagle"},
+            ],
+            implicit_limit=4,
+        )
+
+        await self.assert_query_result(
+            r'''
+            select User { deck: {name} order by .name offset 3 }
+            filter .name = 'Carol';
+            ''',
+            [
+                {
+                    "deck": [
+                        {"name": "Giant eagle"},
+                        {"name": "Giant turtle"},
+                        {"name": "Golem"},
+                    ]
+                }
+            ],
+            implicit_limit=3,
+        )
+
+    async def test_edgeql_scope_implicit_limit_02(self):
+        # explicit limit shouldn't override implicit
+        await self.assert_query_result(
+            r'''
+            select User { deck: {name} order by .name offset 3 limit 100}
+            filter .name = 'Carol';
+            ''',
+            [
+                {
+                    "deck": [
+                        {"name": "Giant eagle"},
+                        {"name": "Giant turtle"},
+                        {"name": "Golem"},
+                    ]
+                }
+            ],
+            implicit_limit=3,
+        )
+
+        await self.assert_query_result(
+            r'''
+            select User { cards := (
+                select .deck {name} order by .name offset 3 limit 100)}
+            filter .name = 'Carol';
+            ''',
+            [
+                {
+                    "cards": [
+                        {"name": "Giant eagle"},
+                        {"name": "Giant turtle"},
+                        {"name": "Golem"},
+                    ]
+                }
+            ],
+            implicit_limit=3,
+        )
+
+        await self.assert_query_result(
+            r'''
+                select Card { name } order by .name offset 3 limit 100
+            ''',
+            [
+                {"name": "Dwarf"},
+                {"name": "Giant eagle"},
+                {"name": "Giant turtle"},
+                {"name": "Golem"},
+            ],
+            implicit_limit=4,
+        )
+
+        await self.assert_query_result(
+            r'''
+                select Card { name } order by .name offset 3 limit 1
+            ''',
+            [
+                {"name": "Dwarf"},
+            ],
+            implicit_limit=4,
         )

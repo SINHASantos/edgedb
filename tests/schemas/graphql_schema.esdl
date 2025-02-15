@@ -63,6 +63,12 @@ alias SettingAliasAugmented := Setting {
 
 type Person extending User;
 
+type Combo {
+    # Test type union, Setting and Profile share some inherited fields as well
+    # as non-inherited ones.
+    link data -> Setting | Profile;
+}
+
 scalar type positive_int_t extending int64 {
     constraint min_value(0);
 }
@@ -90,4 +96,15 @@ type ScalarTest {
     property p_array_int64 -> array<int64>;
     property p_array_json -> array<json>;
     property p_array_bytes -> array<bytes>;
+}
+
+type Fixed {
+    property computed := 123;
+}
+
+type NotEditable {
+    property computed := 'a computed value';
+    required once: str {
+        readonly := true;
+    }
 }

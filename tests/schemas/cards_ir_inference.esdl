@@ -55,6 +55,9 @@ type Card extending Named {
     multi link owners := .<deck[IS User];
     # computable property
     property elemental_cost := <str>.cost ++ ' ' ++ .element;
+
+    required multi link req_awards -> Award;
+    required multi property req_tags -> str;
 }
 
 type SpecialCard extending Card;
@@ -96,6 +99,10 @@ type Eert {
     multi link children -> Eert {
         constraint exclusive;
     }
+}
+
+type Asdf {
+    link children -> Eert;
 }
 
 
@@ -140,3 +147,19 @@ function taking_non_opt_returning_opt(a: str) -> optional str {
         a
     );
 };
+
+
+type Tgt;
+abstract type Src {
+    required lnk: Tgt { delegated constraint exclusive }
+};
+type SrcSub1 extending Src;
+type SrcSub2 extending Src;
+
+abstract type Named2 {
+    required property name -> str;
+    delegated constraint exclusive on (.name);
+}
+type Named2Sub extending Named2;
+
+global Alice := (select User filter .name = 'Alice');

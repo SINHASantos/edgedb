@@ -19,7 +19,6 @@
 
 from __future__ import annotations
 
-from typing import *
 
 from edb import errors
 
@@ -28,14 +27,27 @@ from edb.edgeql import qltypes
 
 from . import annos as s_anno
 from . import delta as sd
+from . import name as sn
+from . import objects as so
 from . import schema as s_schema
+
+RESERVED_MODULE_NAMES = {
+    'super',
+}
+
+
+DEFAULT_MODULE_ALIAS = 'default'
 
 
 class Module(
     s_anno.AnnotationSubject,
+    so.Object,  # Help reflection figure out the right db MRO
     qlkind=qltypes.SchemaObjectClass.MODULE,
     data_safe=False,
 ):
+    # N.B: Modules are not "qualified" objects, even though they can
+    # be nested (because they might *not* be nested) and we arrange
+    # for their names to always be represented with an UnqualName.
     pass
 
 
@@ -55,14 +67,28 @@ class ModuleCommand(
     ) -> None:
         super()._validate_legal_command(schema, context)
 
+        last = str(self.classname)
+        first = last
+        enclosing = None
+        if '::' in str(self.classname):
+            first, _, _ = str(self.classname).partition('::')
+            enclosing, _, last = str(self.classname).rpartition('::')
+            if not schema.has_module(enclosing):
+                raise errors.UnknownModuleError(
+                    f'module {enclosing!r} is not in this schema')
+
+        if last in RESERVED_MODULE_NAMES:
+            raise errors.SchemaDefinitionError(
+                f"module {last!r} is a reserved module name")
+
         if (
             not context.stdmode and not context.testmode
-            and (modname := self.classname) in s_schema.STD_MODULES
+            and sn.UnqualName(first) in s_schema.STD_MODULES
         ):
             raise errors.SchemaDefinitionError(
                 f'cannot {self._delta_action} {self.get_verbosename()}: '
-                f'module {modname} is read-only',
-                context=self.source_context)
+                f'module {first} is read-only',
+                span=self.span)
 
 
 class CreateModule(ModuleCommand, sd.CreateObject[Module]):
@@ -71,6 +97,19 @@ class CreateModule(ModuleCommand, sd.CreateObject[Module]):
 
 class AlterModule(ModuleCommand, sd.AlterObject[Module]):
     astnode = qlast.AlterModule
+
+
+class RenameModule(ModuleCommand, sd.RenameObject[Module]):
+
+    def apply(
+        self,
+        schema: s_schema.Schema,
+        context: sd.CommandContext,
+    ) -> s_schema.Schema:
+        raise errors.SchemaError(
+            f'renaming modules is not supported',
+            span=self.span,
+        )
 
 
 class DeleteModule(ModuleCommand, sd.DeleteObject[Module]):

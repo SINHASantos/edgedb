@@ -16,26 +16,52 @@
 # limitations under the License.
 #
 
+from __future__ import annotations
+from typing import NamedTuple, Optional, TYPE_CHECKING
 import base64
 import collections
 import hashlib
 import http
 import os
 import time
-from jwcrypto import jwt
 
 from edgedb import scram
 
 from edb.common import debug
 from edb.common import markup
+from edb.common import secretkey
+
+if TYPE_CHECKING:
+    from edb.server import tenant as edbtenant
+    from edb.server.protocol import protocol
 
 
-SESSION_TIMEOUT = 30
-SESSION_HIGH_WATER_MARK = SESSION_TIMEOUT * 10
-sessions: collections.OrderedDict[str, tuple] = collections.OrderedDict()
+SESSION_TIMEOUT: float = 30
+SESSION_HIGH_WATER_MARK: float = SESSION_TIMEOUT * 10
 
 
-def handle_request(scheme, auth_str, response, server):
+class Session(NamedTuple):
+    time: float
+    client_nonce: str
+    server_nonce: str
+    client_first_bare: bytes
+    cb_flag: bool
+    server_first: bytes
+    verifier: scram.SCRAMVerifier
+    mock_auth: bool
+    username: str
+
+
+sessions: collections.OrderedDict[str, Session] = collections.OrderedDict()
+
+
+def handle_request(
+    scheme: str,
+    auth_str: str,
+    response: protocol.HttpResponse,
+    tenant: edbtenant.Tenant,
+) -> None:
+    server = tenant.server
     if scheme != "SCRAM-SHA-256":
         response.body = (
             b"Client selected an invalid SASL authentication mechanism"
@@ -63,7 +89,7 @@ def handle_request(scheme, auth_str, response, server):
         response.close_connection = True
         return
 
-    if not server.get_jws_key().has_private:
+    if not server.get_jws_key().has_private:  # type: ignore[union-attr]
         response.body = b"Server doesn't support HTTP SCRAM authentication"
         response.status = http.HTTPStatus.FORBIDDEN
         response.close_connection = True
@@ -71,11 +97,16 @@ def handle_request(scheme, auth_str, response, server):
 
     if sid is None:
         try:
+            bare_offset: int
+            cb_flag: bool
+            authzid: Optional[bytes]
+            username_bytes: bytes
+            client_nonce: str
             (
                 bare_offset,
                 cb_flag,
                 authzid,
-                username,
+                username_bytes,
                 client_nonce,
             ) = scram.parse_client_first_message(data)
         except ValueError as ex:
@@ -86,7 +117,7 @@ def handle_request(scheme, auth_str, response, server):
             response.close_connection = True
             return
 
-        username = username.decode("utf-8")
+        username = username_bytes.decode("utf-8")
         client_first_bare = data[bare_offset:]
 
         if isinstance(cb_flag, str):
@@ -110,7 +141,7 @@ def handle_request(scheme, auth_str, response, server):
             return
 
         try:
-            verifier, mock_auth = get_scram_verifier(username, server)
+            verifier, mock_auth = get_scram_verifier(username, tenant)
         except ValueError as ex:
             if debug.flags.server:
                 markup.dump(ex)
@@ -119,16 +150,16 @@ def handle_request(scheme, auth_str, response, server):
             response.custom_headers["WWW-Authenticate"] = "SCRAM-SHA-256"
             return
 
-        server_nonce = scram.generate_nonce()
-        server_first = scram.build_server_first_message(
+        server_nonce: str = scram.generate_nonce()
+        server_first: bytes = scram.build_server_first_message(
             server_nonce, client_nonce, verifier.salt, verifier.iterations
         ).encode("utf-8")
 
         if len(sessions) > SESSION_HIGH_WATER_MARK:
             while sessions:
-                key, value = sessions.popitem(last=False)
-                if value[0] + SESSION_TIMEOUT > time.monotonic():
-                    sessions[key] = value
+                key, session = sessions.popitem(last=False)
+                if session.time + SESSION_TIMEOUT > time.monotonic():
+                    sessions[key] = session
                     sessions.move_to_end(key, last=False)
                     break
 
@@ -138,7 +169,7 @@ def handle_request(scheme, auth_str, response, server):
             .rstrip("=")
         )
         assert sid not in sessions
-        sessions[sid] = (
+        sessions[sid] = Session(
             time.monotonic(),
             client_nonce,
             server_nonce,
@@ -150,11 +181,11 @@ def handle_request(scheme, auth_str, response, server):
             username,
         )
 
-        server_first = base64.b64encode(server_first).decode("ascii")
+        server_first_str = base64.b64encode(server_first).decode("ascii")
         response.status = http.HTTPStatus.UNAUTHORIZED
         response.custom_headers[
             "WWW-Authenticate"
-        ] = f"SCRAM-SHA-256 sid={sid}, data={server_first}"
+        ] = f"SCRAM-SHA-256 sid={sid}, data={server_first_str}"
 
     else:
         session = sessions.pop(sid)
@@ -237,7 +268,10 @@ def handle_request(scheme, auth_str, response, server):
         ).decode("ascii")
 
         try:
-            response.body = b"edbt_" + generate_jwt_token(username, server)
+            response.body = secretkey.generate_secret_key(
+                server.get_jws_key(),
+                roles=[username],
+            ).encode("ascii")
         except ValueError as ex:
             if debug.flags.server:
                 markup.dump(ex)
@@ -251,8 +285,11 @@ def handle_request(scheme, auth_str, response, server):
         ] = f"sid={sid}, data={server_final}"
 
 
-def get_scram_verifier(user, server):
-    roles = server.get_roles()
+def get_scram_verifier(
+    user: str,
+    tenant: edbtenant.Tenant,
+) -> tuple[scram.SCRAMVerifier, bool]:
+    roles = tenant.get_roles()
 
     rolerec = roles.get(user)
     if rolerec is not None:
@@ -266,7 +303,7 @@ def get_scram_verifier(user, server):
     # generate a mock verifier using a salt derived from the
     # received user name and the cluster mock auth nonce.
     # The same approach is taken by Postgres.
-    nonce = server.get_instance_data("mock_auth_nonce")
+    nonce = tenant.get_instance_data("mock_auth_nonce")
     salt = hashlib.sha256(nonce.encode() + user.encode()).digest()
 
     verifier = scram.SCRAMVerifier(
@@ -278,18 +315,3 @@ def get_scram_verifier(user, server):
     )
     is_mock = True
     return verifier, is_mock
-
-
-def generate_jwt_token(user, server):
-    skey = server.get_jws_key()
-
-    namespace = "edgedb.server"
-    token = jwt.JWT(
-        header={"alg": "ES256" if skey["kty"] == "EC" else "RS256"},
-        claims={
-            f"{namespace}.roles": [user],
-            "iat": int(time.time()),
-        },
-    )
-    token.make_signed_token(skey)
-    return token.serialize().encode("ascii")

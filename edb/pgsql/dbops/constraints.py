@@ -19,19 +19,28 @@
 
 from __future__ import annotations
 
+from typing import Optional, Sequence, List
+
 from .. import common
 from . import base
 
 
 class Constraint(base.DBObject):
-    def __init__(self, subject_name, constraint_name=None):
-        self._subject_name = subject_name
+    def __init__(
+        self,
+        subject_name: Sequence[str],
+        constraint_name: Optional[str] = None,
+    ):
+        self._subject_name = tuple(subject_name)
         self._constraint_name = constraint_name
 
     def get_type(self):
         return 'CONSTRAINT'
 
     def get_subject_type(self):
+        raise NotImplementedError
+
+    def generate_extra(self, block: base.PLBlock) -> None:
         raise NotImplementedError
 
     def get_subject_name(self, quote=True):
@@ -45,11 +54,11 @@ class Constraint(base.DBObject):
             self.constraint_name(), self.get_subject_type(),
             self.get_subject_name())
 
-    def constraint_name(self, quote=True):
+    def constraint_name(self, quote=True) -> str:
         if quote and self._constraint_name:
             return common.quote_ident(self._constraint_name)
         else:
-            return self._constraint_name
+            return self._constraint_name or ''
 
-    def constraint_code(self, block: base.PLBlock) -> str:
+    def constraint_code(self, block: base.PLBlock) -> str | List[str]:
         raise NotImplementedError

@@ -36,13 +36,13 @@ Strings
       - :eql:func-desc:`to_str`
 
     * - :eql:func:`len`
-      - Return string's length.
+      - Returns a string's length.
 
     * - :eql:func:`contains`
-      - Test if a string contains a substring.
+      - Tests if a string contains a substring.
 
     * - :eql:func:`find`
-      - Find index of a substring.
+      - Finds the index of a substring.
 
     * - :eql:func:`str_lower`
       - :eql:func-desc:`str_lower`
@@ -78,7 +78,7 @@ Strings
       - :eql:func-desc:`str_reverse`
 
     * - :eql:func:`str_split`
-      - Split a string into an array using a delimiter.
+      - Splits a string into an array using a delimiter.
 
     * - :eql:func:`re_match`
       - :eql:func-desc:`re_match`
@@ -102,7 +102,7 @@ Strings
 
     A unicode string of text.
 
-    Any other type (except :eql:type:`bytes`) can be
+    Most primitive types (except :eql:type:`bytes`) can be
     :eql:op:`cast <cast>` to and from a string:
 
     .. code-block:: edgeql-repl
@@ -115,7 +115,7 @@ Strings
         {'I ❤️ EdgeDB'}
 
     Note that when a :eql:type:`str` is cast into a :eql:type:`json`,
-    the result is a JSON string value. Same applies for casting back
+    the result is a JSON string value. The same applies for casting back
     from :eql:type:`json` - only a JSON string value can be cast into
     a :eql:type:`str`:
 
@@ -133,8 +133,13 @@ Strings
 
     .. code-block:: edgeql-repl
 
-        db> select r'a raw \\\ string';
-        {'a raw \\\ string'}
+        db> select r'A raw \n string';
+        {'A raw \\n string'}
+        db> select 'Not a raw \n string';
+        {
+          'Not a raw
+         string',
+        }
         db> select $$something$$;
         {'something'}
         db> select $marker$something $$
@@ -153,6 +158,33 @@ Strings
         ...         world';
         {'"Hello, world"'}
 
+    .. note::
+
+        This type is subject to `the Postgres maximum field size`_
+        of 1GB.
+
+    .. versionadded:: 6.0
+
+    Regular strings may use ``\(expr)`` to interpolate the value of
+    ``expr`` into the string. The value will be cast to ``str`` if it
+    is not already. For example:
+
+    .. code-block:: edgeql-repl
+
+        db> select '1 + 1 = \(1+1)';
+        {'1 + 1 = 2'}
+        db> select User { name := '\(.first_name) \(.last_name)' };
+        {
+          default::User {
+            name := 'Keanu Reeves',
+          },
+          ...
+        }
+
+
+.. lint-off
+.. _the Postgres maximum field size: https://wiki.postgresql.org/wiki/FAQ#What_is_the_maximum_size_for_a_row.2C_a_table.2C_and_a_database.3F>
+.. lint-on
 
 ----------
 
@@ -176,8 +208,20 @@ Strings
 
     .. code-block:: edgeql-repl
 
-        db> select 'some text'[10];
-        InvalidValueError: string index 10 is out of bounds
+        db> select 'some text'[8];
+        {'t'}
+        db> select 'some text'[9];
+        InvalidValueError: string index 9 is out of bounds
+
+    A slice up to the next index can be used if an empty string is
+    preferred to an error when outside the bounds of the string:
+
+    .. code-block:: edgeql-repl
+
+        db> select 'some text'[8:9];
+        {'t'}
+        db> select 'some text'[9:10];
+        {''}
 
 
 ----------
@@ -233,9 +277,9 @@ Strings
 
     Case-sensitive simple string matching.
 
-    Returns ``true`` if the *value* ``V`` matches the *pattern* ``P``
-    and ``false`` otherwise.  The operator ``not like`` is
-    the negation of ``like``.
+    Returns ``true`` if the *value* (the ``str`` on the left) matches the
+    *pattern* (the ``str`` on the right) and ``false`` otherwise. The operator
+    ``not like`` is the negation of ``like``.
 
     The pattern matching rules are as follows:
 
@@ -298,7 +342,7 @@ Strings
 
 .. eql:function:: std::str_lower(string: str) -> str
 
-    Return a lowercase copy of the input *string*.
+    Returns a lowercase copy of the input string.
 
     .. code-block:: edgeql-repl
 
@@ -311,7 +355,7 @@ Strings
 
 .. eql:function:: std::str_upper(string: str) -> str
 
-    Return an uppercase copy of the input *string*.
+    Returns an uppercase copy of the input string.
 
     .. code-block:: edgeql-repl
 
@@ -324,9 +368,9 @@ Strings
 
 .. eql:function:: std::str_title(string: str) -> str
 
-    Return a titlecase copy of the input *string*.
+    Returns a titlecase copy of the input string.
 
-    Every word in the *string* will have the first letter capitalized
+    Every word in the string will have the first letter capitalized
     and the rest converted to lowercase.
 
     .. code-block:: edgeql-repl
@@ -341,10 +385,10 @@ Strings
 .. eql:function:: std::str_pad_start(string: str, n: int64, fill: str = ' ') \
                     -> str
 
-    Return the input *string* padded at the start to the length *n*.
+    Returns the input string padded at the start to the length *n*.
 
-    If the *string* is longer than *n*, then it is truncated to the
-    first *n* characters. Otherwise, the *string* is padded on the
+    If the string is longer than *n*, then it is truncated to the
+    first *n* characters. Otherwise, the string is padded on the
     left up to the total length *n* using *fill* characters (space by
     default).
 
@@ -364,10 +408,10 @@ Strings
 .. eql:function:: std::str_pad_end(string: str, n: int64, fill: str = ' ') \
                     -> str
 
-    Return the input *string* padded at the end to the length *n*.
+    Returns the input string padded at the end to the length *n*.
 
-    If the *string* is longer than *n*, then it is truncated to the
-    first *n* characters. Otherwise, the *string* is padded on the
+    If the string is longer than *n*, then it is truncated to the
+    first *n* characters. Otherwise, the string is padded on the
     right up to the total length *n* using *fill* characters (space by
     default).
 
@@ -386,11 +430,11 @@ Strings
 
 .. eql:function:: std::str_trim_start(string: str, trim: str = ' ') -> str
 
-    Return the input string with all *trim* characters removed from its start.
+    Returns the input string with all *trim* characters removed
+    from the start.
 
-    If the *trim* specifies more than one character they will be
-    removed from the beginning of the *string* regardless of the order
-    in which they appear.
+    If *trim* specifies more than one character they will be removed from
+    the beginning of the string regardless of the order in which they appear.
 
     .. code-block:: edgeql-repl
 
@@ -411,11 +455,10 @@ Strings
 
 .. eql:function:: std::str_trim_end(string: str, trim: str = ' ') -> str
 
-    Return the input string with all *trim* characters removed from its end.
+    Returns the input string with all *trim* characters removed from the end.
 
-    If the *trim* specifies more than one character they will be
-    removed from the end of the *string* regardless of the order
-    in which they appear.
+    If *trim* specifies more than one character they will be removed from
+    the end of the string regardless of the order in which they appear.
 
     .. code-block:: edgeql-repl
 
@@ -436,12 +479,12 @@ Strings
 
 .. eql:function:: std::str_trim(string: str, trim: str = ' ') -> str
 
-    Return the input string with *trim* characters removed from both ends.
+    Returns the input string with *trim* characters removed from both ends.
 
-    If the *trim* specifies more than one character they will be
-    removed from both ends of the *string* regardless of the order
-    in which they appear. This is the same as applying
-    :eql:func:`str_ltrim` and :eql:func:`str_rtrim`.
+    If *trim* specifies more than one character they will be removed from
+    both ends of the string regardless of the order in which they appear.
+    This is the same as applying
+    :eql:func:`str_trim_start` and :eql:func:`str_trim_end`.
 
     .. code-block:: edgeql-repl
 
@@ -462,9 +505,9 @@ Strings
 
 .. eql:function:: std::str_repeat(string: str, n: int64) -> str
 
-    Repeat the input *string* *n* times.
+    Repeats the input string *n* times.
 
-    If *n* is zero or negative an empty string is returned.
+    An empty string is returned if *n* is zero or negative.
 
     .. code-block:: edgeql-repl
 
@@ -479,10 +522,10 @@ Strings
 
 .. eql:function:: std::str_replace(s: str, old: str, new: str) -> str
 
-    Replace all occurrences of *old* substring with the *new* one.
+    Replaces all occurrences of a substring with a new one.
 
-    Given a string *s* find all non-overlapping occurrences of the substring
-    *old* and replace them with the substring *new*.
+    Given a string *s*, finds all non-overlapping occurrences of the
+    substring *old* and replaces them with the substring *new*.
 
     .. code-block:: edgeql-repl
 
@@ -499,7 +542,7 @@ Strings
 
 .. eql:function:: std::str_reverse(string: str) -> str
 
-    Reverse the order of the characters in the string.
+    Reverses the order of the characters in the string.
 
     .. code-block:: edgeql-repl
 
@@ -516,7 +559,7 @@ Strings
 
     :index: split str_split explode
 
-    Split string into array elements using the supplied delimiter.
+    Splits a string into array elements using the supplied delimiter.
 
     .. code-block:: edgeql-repl
 
@@ -537,12 +580,12 @@ Strings
 
     :index: regex regexp regular
 
-    Find the first regular expression match in a string.
+    Finds the first regular expression match in a string.
 
-    Given an input *string* and a regular expression :ref:`pattern
-    <string_regexp>` find the first match for the regular expression
-    within the *string*. Return the match, each match represented by
-    an :eql:type:`array\<str\>` of matched groups.
+    Given an input string and a regular expression :ref:`pattern
+    <string_regexp>`, finds the first match for the regular expression
+    within the string. Each match returned is represented by an
+    :eql:type:`array\<str\>` of matched groups.
 
     .. code-block:: edgeql-repl
 
@@ -558,11 +601,11 @@ Strings
 
     :index: regex regexp regular
 
-    Find all regular expression matches in a string.
+    Finds all regular expression matches in a string.
 
-    Given an input *string* and a regular expression :ref:`pattern
-    <string_regexp>` repeatedly match the regular expression within
-    the *string*. Return the set of all matches, each match
+    Given an input string and a regular expression :ref:`pattern
+    <string_regexp>`, repeatedly matches the regular expression within
+    the string. Returns the set of all matches, with each match
     represented by an :eql:type:`array\<str\>` of matched groups.
 
     .. code-block:: edgeql-repl
@@ -581,19 +624,21 @@ Strings
 
     :index: regex regexp regular replace
 
-    Replace matching substrings in a given string.
+    Replaces matching substrings in a given string.
 
-    Given an input *string* and a regular expression :ref:`pattern
-    <string_regexp>` replace matching substrings with the replacement
-    string *sub*. Optional :ref:`flag <string_regexp_flags>` arguments
-    can be used to specify additional regular expression flags. Return
-    the string resulting from substring replacement.
+    Takes an input string and a regular expression :ref:`pattern
+    <string_regexp>`, replacing matching substrings with the replacement
+    string *sub*. Optional :ref:`flag arguments<string_regexp_flags>`
+    can be used to specify additional regular expression flags.
 
     .. code-block:: edgeql-repl
 
-        db> select re_replace(r'l', r'L', 'Hello World',
-        ...                   flags := 'g');
-        {'HeLLo WorLd'}
+        db> select re_replace('a', 'A', 'Alabama');
+        {'AlAbama'}
+        db> select re_replace('a', 'A', 'Alabama', flags := 'g');
+        {'AlAbAmA'}
+        db> select re_replace('A', 'A', 'Alabama', flags := 'ig');
+        {'AlAbAmA'}
 
 
 ----------
@@ -603,11 +648,11 @@ Strings
 
     :index: regex regexp regular match
 
-    Test if a regular expression has a match in a string.
+    Tests if a regular expression has a match in a string.
 
-    Given an input *string* and a regular expression :ref:`pattern
-    <string_regexp>` test whether there is a match for the regular
-    expression within the *string*. Return ``true`` if there is a
+    Given an input string and a regular expression :ref:`pattern
+    <string_regexp>`, tests whether there is a match for the regular
+    expression within the string. Returns ``true`` if there is a
     match, ``false`` otherwise.
 
     .. code-block:: edgeql-repl
@@ -626,6 +671,7 @@ Strings
                   std::to_str(val: bigint, fmt: optional str={}) -> str
                   std::to_str(val: decimal, fmt: optional str={}) -> str
                   std::to_str(val: json, fmt: optional str={}) -> str
+                  std::to_str(val: bytes) -> str
                   std::to_str(val: cal::local_datetime, \
                               fmt: optional str={}) -> str
                   std::to_str(val: cal::local_date, \
@@ -633,21 +679,20 @@ Strings
                   std::to_str(val: cal::local_time, \
                               fmt: optional str={}) -> str
 
-    :index: stringify dumps join array_to_string
+    :index: stringify dumps join array_to_string decode TextDecoder
 
-    Return string representation of the input value.
+    Returns the string representation of the input value.
 
-    This is a very versatile polymorphic function that is defined for
-    many different input types. In general, there are corresponding
-    converter functions from :eql:type:`str` back to the specific
-    types, which share the meaning of the format argument *fmt*.
+    A versatile polymorphic function defined for different input types,
+    ``to_str`` uses corresponding converter functions from :eql:type:`str`
+    to specific types via the format argument *fmt*.
 
-    When converting :eql:type:`datetime`, :eql:type:`cal::local_datetime`,
-    :eql:type:`cal::local_date`, :eql:type:`cal::local_time`,
-    :eql:type:`duration` this function is the inverse of
-    :eql:func:`to_datetime`, :eql:func:`cal::to_local_datetime`,
-    :eql:func:`cal::to_local_date`, :eql:func:`cal::to_local_time`,
-    :eql:func:`to_duration`, correspondingly.
+    When converting :eql:type:`bytes`, :eql:type:`datetime`,
+    :eql:type:`cal::local_datetime`, :eql:type:`cal::local_date`,
+    :eql:type:`cal::local_time`, :eql:type:`duration` this function
+    is the inverse of :eql:func:`to_bytes`, :eql:func:`to_datetime`,
+    :eql:func:`cal::to_local_datetime`, :eql:func:`cal::to_local_date`,
+    :eql:func:`cal::to_local_time`, :eql:func:`to_duration`, correspondingly.
 
     For valid date and time formatting patterns see
     :ref:`here <ref_std_converters_datetime_fmt>`.
@@ -655,10 +700,16 @@ Strings
     .. code-block:: edgeql-repl
 
         db> select to_str(<datetime>'2018-05-07 15:01:22.306916-05',
-        ...               'FMDDth of FMMonth, YYYY');
+        ...               'FMDDth "of" FMMonth, YYYY');
         {'7th of May, 2018'}
         db> select to_str(<cal::local_date>'2018-05-07', 'CCth "century"');
         {'21st century'}
+
+    .. note::
+
+        If you want to use literal text in your format string, it's best to
+        enclose it in double quotes as shown above with ``of`` and
+        ``century``.
 
     When converting one of the numeric types, this function is the
     reverse of: :eql:func:`to_bigint`, :eql:func:`to_decimal`,
@@ -684,7 +735,7 @@ Strings
         {'-123.45'}
 
     When converting :eql:type:`json`, this function can take
-    ``'pretty'`` as the optional *fmt* argument to produce a
+    ``'pretty'`` as an optional *fmt* argument to produce a
     pretty-formatted JSON string.
 
     See also :eql:func:`to_json`.
@@ -713,8 +764,19 @@ Strings
 
     .. warning::
 
-        There's a deprecated version of ``std::to_str`` which operates
-        on arrays, however :eql:func:`array_join` should be used instead.
+        A version of ``std::to_str`` exists which operates on arrays but has
+        been deprecated; :eql:func:`array_join` should be used instead.
+
+    A :eql:type:`bytes` value can be converted to a :eql:type:`str` using
+    UTF-8 encoding. Returns an InvalidValueError if input UTF-8 is invalid.
+
+    .. code-block:: edgeql-repl
+
+        db> select to_str(b'\xe3\x83\x86');
+        {'テ'}
+        db> select to_str(b'\xe3\x83');
+        edgedb error: InvalidValueError: invalid byte sequence for
+        encoding "UTF8": 0xe3 0x83
 
 
 ----------
@@ -736,10 +798,9 @@ BRE, ERE, and ARE support can be found in `PostgreSQL documentation`_.
                 https://www.postgresql.org/docs/10/static/
                 functions-matching.html#POSIX-SYNTAX-DETAILS
 
-For convenience, here's a table outlining the different options
-accepted as the ``flags`` argument to various regular expression
-functions, or as `embedded options`_ in the pattern itself, e.g.
-``'(?i)fooBAR'``:
+The table below outlines the different options accepted as the ``flags``
+argument to various regular expression functions, or as
+`embedded options`_ in the pattern itself, e.g. ``'(?i)fooBAR'``:
 
 .. _`embedded options`:
   https://www.postgresql.org/docs/10/functions-matching.html#POSIX-METASYNTAX
@@ -763,7 +824,7 @@ Option  Description
 ``s``   non-newline-sensitive matching (default)
 ``t``   tight syntax (default)
 ``w``   inverse partial newline-sensitive ("weird") matching
-``x``   expanded syntax ignoring white-space characters
+``x``   expanded syntax ignoring whitespace characters
 ======  ==================================================================
 
 
@@ -798,8 +859,8 @@ Formatting
 
 
 Some of the type converter functions take an extra argument specifying
-the formatting (either for converting to a :eql:type:`str` or parsing
-from one). The different formatting options are collected in this section.
+formatting (either for converting to a :eql:type:`str` or parsing from one).
+The different formatting options are collected in this section.
 
 
 .. _ref_std_converters_datetime_fmt:
@@ -942,17 +1003,17 @@ Date and time formatting options
 |                         | (i-xii; i=January)                     |
 +-------------------------+----------------------------------------+
 | TZ                      | upper case time-zone abbreviation      |
-|                         | (only supported in to_char)            |
+|                         | (only supported in :eql:func:`to_str`) |
 +-------------------------+----------------------------------------+
 | tz                      | lower case time-zone abbreviation      |
-|                         | (only supported in to_char)            |
+|                         | (only supported in :eql:func:`to_str`) |
 +-------------------------+----------------------------------------+
 | TZH                     | time-zone hours                        |
 +-------------------------+----------------------------------------+
 | TZM                     | time-zone minutes                      |
 +-------------------------+----------------------------------------+
 | OF                      | time-zone offset from UTC (only        |
-|                         | supported in to_char)                  |
+|                         | supported in :eql:func:`to_str`)       |
 +-------------------------+----------------------------------------+
 
 Some additional formatting modifiers:
@@ -973,7 +1034,7 @@ Some additional formatting modifiers:
 |               | usage notes)                      | Day           |
 +---------------+-----------------------------------+---------------+
 
-Normally when parsing a string input whitespace is ignored, unless
+Whitespace is normally ignored when parsing string input, unless
 the *FX* prefix modifier is used. For example:
 
 .. code-block:: edgeql-repl
@@ -985,6 +1046,10 @@ the *FX* prefix modifier is used. For example:
     ...     '2000    JUN', 'FXYYYY MON');
     InternalServerError: invalid value "   " for "MON"
 
+Ordinary text is allowed in :eql:func:`to_str` format strings and will be
+output literally.  For better compatibility you should put a plain substring
+in double quotes to force it to be interpreted as literal text even if it
+contains template patterns now or could in the future.
 
 .. _ref_std_converters_number_fmt:
 
@@ -996,7 +1061,7 @@ Number formatting options
 +============+=====================================================+
 | 9          | digit position (can be dropped if insignificant)    |
 +------------+-----------------------------------------------------+
-| 0          | digit position (will not be dropped, even if        |
+| 0          | digit position (will not be dropped even if         |
 |            | insignificant)                                      |
 +------------+-----------------------------------------------------+
 | .          | (period)  decimal point                             |

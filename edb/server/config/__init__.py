@@ -18,7 +18,9 @@
 
 
 from __future__ import annotations
-from typing import *
+from typing import Any, Mapping, TypedDict
+
+import enum
 
 import immutables
 
@@ -26,46 +28,56 @@ from edb import errors
 from edb.edgeql.qltypes import ConfigScope
 
 from .ops import OpCode, Operation, SettingValue
-from .ops import spec_to_json, to_json, from_json, set_value, to_edgeql
+from .ops import (
+    spec_to_json, to_json_obj, to_json, from_json, set_value, to_edgeql
+)
 from .ops import value_from_json, value_to_json_value
-from .spec import Spec, Setting, load_spec_from_schema
-from .types import ConfigType
+from .spec import (
+    Spec, FlatSpec, ChainedSpec, Setting,
+    load_spec_from_schema, load_ext_spec_from_schema,
+    load_ext_settings_from_schema,
+)
+from .types import ConfigType, CompositeConfigType
+from .types import QueryCacheMode
 
 
 __all__ = (
-    'get_settings', 'set_settings',
     'lookup',
-    'Spec', 'Setting', 'SettingValue',
-    'spec_to_json', 'to_json', 'to_edgeql', 'from_json', 'set_value',
-    'value_from_json', 'value_to_json_value',
+    'Spec', 'FlatSpec', 'ChainedSpec', 'Setting', 'SettingValue',
+    'spec_to_json', 'to_json_obj', 'to_json', 'to_edgeql', 'from_json',
+    'set_value', 'value_from_json', 'value_to_json_value',
     'ConfigScope', 'OpCode', 'Operation',
-    'ConfigType',
-    'load_spec_from_schema',
+    'ConfigType', 'CompositeConfigType',
+    'load_spec_from_schema', 'load_ext_spec_from_schema',
+    'load_ext_settings_from_schema',
     'get_compilation_config',
+    'QueryCacheMode',
+    'ConState', 'ConStateType',
 )
 
 
-_settings = Spec()
+# See edb/server/pgcon/connect.py for documentation of the types
+class ConStateType(enum.StrEnum):
+    session_config = "C"
+    backend_session_config = "B"
+    command_line_argument = "A"
+    environment_variable = "E"
+    config_file = "F"
 
 
-def get_settings() -> Spec:
-    return _settings
-
-
-def set_settings(settings: Spec) -> None:
-    global _settings
-    _settings = settings
+class ConState(TypedDict):
+    name: str
+    value: Any
+    type: ConStateType
 
 
 def lookup(
     name: str,
     *configs: Mapping[str, SettingValue],
+    spec: Spec,
     allow_unrecognized: bool = False,
-    spec: Optional[Spec] = None,
 ) -> Any:
-
-    if spec is None:
-        spec = get_settings()
+    assert len(configs) > 0
 
     try:
         setting = spec[name]
@@ -89,10 +101,32 @@ def lookup(
 
 def get_compilation_config(
     config: Mapping[str, SettingValue],
+    *,
+    spec: Spec,
 ) -> immutables.Map[str, SettingValue]:
-    spec = get_settings()
     return immutables.Map((
         (k, v)
         for k, v in config.items()
+        if k in spec
         if spec[k].affects_compilation
     ))
+
+
+def _serialize_val(v: object) -> object:
+    if isinstance(v, frozenset):
+        return [_serialize_val(x) for x in v]
+    elif isinstance(v, CompositeConfigType):
+        return v.to_json_value(redacted=True)
+    else:
+        return v
+
+
+def debug_serialize_config(
+    cfg: Mapping[str, SettingValue],
+) -> Any:
+    return {
+        name:
+        {'redacted': True} if value.secret
+        else _serialize_val(value.value)
+        for name, value in cfg.items()
+    }

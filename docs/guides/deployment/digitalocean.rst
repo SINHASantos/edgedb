@@ -93,7 +93,7 @@ instance link``.
        --trust-tls-cert \
        --non-interactive \
        my_instance
-   Authenticating to edgedb://edgedb@1.2.3.4:5656/edgedb
+   Authenticating to edgedb://edgedb@1.2.3.4:5656/main
    Trusting unknown server certificate:
    SHA1:1880da9527be464e2cad3bdb20dfc430a6af5727
    Successfully linked to remote instance. To connect run:
@@ -136,7 +136,7 @@ If you already have a PostgreSQL instance you can skip this step.
    $ DSN="$( \
          doctl databases create edgedb-postgres \
              --engine pg \
-             --version 13 \
+             --version 14 \
              --size db-s-1vcpu-1gb \
              --num-nodes 1 \
              --region sfo3 \
@@ -210,9 +210,21 @@ Set the security policy to strict.
 
    .. code-block:: bash
 
-      $ apt-get update && apt-get install --only-upgrade edgedb-server-2
+      $ apt-get update && apt-get install --only-upgrade edgedb-server-5
       $ systemctl restart edgedb
 
 That's it! Refer to the :ref:`Construct the DSN
 <ref_guide_deployment_digitalocean_link>` section above to connect to your
 instance.
+
+.. note::
+
+   The command groups ``edgedb instance`` and ``edgedb project`` are not
+   intended to manage production instances.
+
+Health Checks
+=============
+
+Using an HTTP client, you can perform health checks to monitor the status of
+your EdgeDB instance. Learn how to use them with our :ref:`health checks guide
+<ref_guide_deployment_health_checks>`.

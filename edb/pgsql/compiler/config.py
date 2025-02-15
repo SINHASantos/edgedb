@@ -21,10 +21,13 @@ from __future__ import annotations
 
 from edb import errors
 from edb.ir import ast as irast
+from edb.ir import typeutils as irtyputils
 
+from edb.edgeql import ast as qlast
 from edb.edgeql import qltypes
 
 from edb.schema import casts as s_casts
+from edb.schema import name as sn
 
 from edb.pgsql import ast as pgast
 from edb.pgsql import common
@@ -66,7 +69,7 @@ def compile_ConfigSet(
             )
 
         fcall = pgast.FuncCall(
-            name=('edgedb', '_alter_current_database_set'),
+            name=astutils.edgedb_func('_alter_current_database_set', ctx=ctx),
             args=[pgast.StringConstant(val=op.backend_setting), val],
         )
 
@@ -88,7 +91,7 @@ def compile_ConfigSet(
             args=[
                 pgast.StringConstant(val=op.backend_setting),
                 val,
-                pgast.BooleanConstant(val='false'),
+                pgast.BooleanConstant(val=False),
             ],
         )
 
@@ -159,7 +162,7 @@ def compile_ConfigSet(
                 ),
                 target_list=[
                     pgast.MultiAssignRef(
-                        columns=[pgast.ColumnRef(name=['value'])],
+                        columns=['value'],
                         source=pgast.RowExpr(
                             args=[
                                 val,
@@ -224,7 +227,7 @@ def compile_ConfigSet(
                 ),
                 target_list=[
                     pgast.MultiAssignRef(
-                        columns=[pgast.ColumnRef(name=['value'])],
+                        columns=['value'],
                         source=pgast.RowExpr(
                             args=[
                                 val,
@@ -257,7 +260,7 @@ def compile_ConfigReset(
 
     elif op.scope is qltypes.ConfigScope.DATABASE and op.backend_setting:
         fcall = pgast.FuncCall(
-            name=('edgedb', '_alter_current_database_set'),
+            name=astutils.edgedb_func('_alter_current_database_set', ctx=ctx),
             args=[
                 pgast.StringConstant(val=op.backend_setting),
                 pgast.NullConstant(),
@@ -276,7 +279,7 @@ def compile_ConfigReset(
             args=[
                 pgast.StringConstant(val=op.backend_setting),
                 pgast.NullConstant(),
-                pgast.BooleanConstant(val='false'),
+                pgast.BooleanConstant(val=False),
             ],
         )
 
@@ -343,7 +346,7 @@ def compile_ConfigReset(
         if rvar is not None:
             stmt.from_clause = [rvar]
 
-    elif op.scope is qltypes.ConfigScope.DATABASE:
+    elif op.scope is qltypes.ConfigScope.DATABASE and op.selector is None:
         stmt = pgast.DeleteStmt(
             relation=pgast.RelRangeVar(
                 relation=pgast.Relation(
@@ -357,6 +360,156 @@ def compile_ConfigReset(
                 rexpr=pgast.StringConstant(val=op.name),
                 op='=',
             ),
+        )
+
+    elif op.scope is qltypes.ConfigScope.DATABASE and op.selector is not None:
+        # For FILTERed RESET on the database, we have to do a decent
+        # amount of work to actually delete the RESET objects from the
+        # json config blogs.
+        #
+        # This is because the server isn't set up to write back just
+        # the changed parts of the config based on interpreting the output,
+        # so instead we do all the work here.
+        with context.output_format(ctx, context.OutputFormat.JSONB):
+            selector = dispatch.compile(op.selector, ctx=ctx)
+
+        assert isinstance(selector, pgast.SelectStmt), \
+            "expected ast.SelectStmt"
+        target = selector.target_list[0]
+        if not target.name:
+            target = selector.target_list[0] = pgast.ResTarget(
+                name=ctx.env.aliases.get('res'),
+                val=target.val,
+            )
+            assert target.name is not None
+
+        rvar = relctx.rvar_for_rel(selector, ctx=ctx)
+
+        sel_expr = op.selector.expr
+        assert isinstance(sel_expr, irast.SelectStmt)
+        sel_expr = sel_expr.result.expr
+        assert isinstance(sel_expr, irast.SelectStmt)
+
+        # Grab all the non-link properties of the object as keys. We
+        # could just do the exclusive ones, but this works too and we
+        # have the information at hand.
+        # XXX: Do we need to consider _tname also?
+        keys = [
+            el.expr.ptrref.shortname.name
+            for el, op in sel_expr.result.shape
+            if op == qlast.ShapeOp.ASSIGN
+            and not irtyputils.is_object(el.expr.ptrref.out_target)
+        ]
+
+        newval = pgast.SelectStmt(
+            target_list=[pgast.ResTarget(
+                val=pgast.FuncCall(
+                    name=('jsonb_agg',),
+                    args=[pgast.ColumnRef(name=['ov', 'value'])],
+                ),
+            )],
+            from_clause=[
+                pgast.RangeFunction(
+                    lateral=True,
+                    alias=pgast.Alias(aliasname='ov'),
+                    functions=[pgast.FuncCall(
+                        name=('jsonb_array_elements',),
+                        args=[pgast.ColumnRef(name=['value'])],
+                    )],
+                ),
+            ],
+            where_clause=(
+                pgast.SubLink(
+                    operator="NOT EXISTS",
+                    expr=pgast.SelectStmt(
+                        from_clause=[rvar],
+                        where_clause=astutils.extend_binop(
+                            None,
+                            *[
+                                pgast.Expr(
+                                    name='=',
+                                    lexpr=pgast.Expr(
+                                        name='->',
+                                        lexpr=pgast.ColumnRef(name=[
+                                            rvar.alias.aliasname,
+                                            target.name,
+                                        ]),
+                                        rexpr=pgast.StringConstant(val=key),
+                                    ),
+                                    rexpr=pgast.CoalesceExpr(
+                                        args=[
+                                            pgast.Expr(
+                                                name='->',
+                                                lexpr=pgast.ColumnRef(name=[
+                                                    'ov', 'value'
+                                                ]),
+                                                rexpr=pgast.StringConstant(
+                                                    val=key
+                                                ),
+                                            ),
+                                            pgast.TypeCast(
+                                                arg=pgast.StringConstant(
+                                                    val='null'),
+                                                type_name=pgast.TypeName(
+                                                    name=('jsonb',),
+                                                ),
+                                            ),
+                                        ]
+                                    )
+                                )
+                                for key in keys
+                            ],
+                        )
+                    )
+                )
+            ),
+        )
+
+        stmt = pgast.UpdateStmt(
+            targets=[pgast.UpdateTarget(
+                name='value',
+                val=newval,
+            )],
+            relation=pgast.RelRangeVar(
+                relation=pgast.Relation(
+                    name='_db_config',
+                    schemaname='edgedb',
+                ),
+            ),
+            where_clause=astutils.new_binop(
+                lexpr=pgast.ColumnRef(name=['name']),
+                rexpr=pgast.StringConstant(val=op.name),
+                op='=',
+            ),
+            returning_list=[pgast.ResTarget(
+                val=pgast.CaseExpr(
+                    args=[
+                        pgast.CaseWhen(
+                            expr=pgast.NullTest(
+                                arg=pgast.ColumnRef(name=['value'])
+                            ),
+                            result=pgast.FuncCall(
+                                name=('jsonb_build_array',),
+                                args=[
+                                    pgast.StringConstant(val='RESET'),
+                                    pgast.StringConstant(val=str(op.scope)),
+                                    pgast.StringConstant(val=op.name),
+                                    pgast.NullConstant(),
+                                ],
+                            )
+                        ),
+                    ],
+                    defresult=pgast.FuncCall(
+                        name=('jsonb_build_array',),
+                        args=[
+                            pgast.StringConstant(val='SET'),
+                            pgast.StringConstant(val=str(op.scope)),
+                            pgast.StringConstant(val=op.name),
+                            pgast.ColumnRef(name=['value']),
+                        ],
+                    )
+                )
+            )],
         )
 
     elif op.scope is qltypes.ConfigScope.SESSION:
@@ -383,7 +536,7 @@ def compile_ConfigReset(
         )
     elif op.scope is qltypes.ConfigScope.GLOBAL:
         stmt = pgast.SelectStmt(
-            where_clause=pgast.BooleanConstant(val='false')
+            where_clause=pgast.BooleanConstant(val=False)
         )
     else:
         raise AssertionError(f'unexpected configuration scope: {op.scope}')
@@ -393,8 +546,8 @@ def compile_ConfigReset(
 
 @dispatch.compile.register
 def compile_ConfigInsert(
-        stmt: irast.ConfigInsert, *,
-        ctx: context.CompilerContextLevel) -> pgast.BaseExpr:
+    stmt: irast.ConfigInsert, *, ctx: context.CompilerContextLevel
+) -> pgast.BaseExpr:
 
     with ctx.new() as subctx:
         with context.output_format(ctx, context.OutputFormat.JSONB):
@@ -407,26 +560,29 @@ def compile_ConfigInsert(
 
 
 def _rewrite_config_insert(
-        ir_set: irast.Set, *,
-        ctx: context.CompilerContextLevel) -> irast.Set:
+    ir_set: irast.Set, *, ctx: context.CompilerContextLevel
+) -> irast.Set:
 
     overwrite_query = pgast.SelectStmt()
     id_expr = pgast.FuncCall(
-        name=('edgedbext', 'uuid_generate_v1mc',),
+        name=astutils.edgedb_func('uuid_generate_v1mc', ctx=ctx),
         args=[],
     )
     pathctx.put_path_identity_var(
-        overwrite_query, ir_set.path_id, id_expr, force=True, env=ctx.env)
+        overwrite_query, ir_set.path_id, id_expr, force=True
+    )
     pathctx.put_path_value_var(
-        overwrite_query, ir_set.path_id, id_expr, force=True, env=ctx.env)
+        overwrite_query, ir_set.path_id, id_expr, force=True
+    )
     pathctx.put_path_source_rvar(
-        overwrite_query, ir_set.path_id,
+        overwrite_query,
+        ir_set.path_id,
         relctx.rvar_for_rel(pgast.NullRelation(), ctx=ctx),
-        env=ctx.env)
+    )
 
     relctx.add_type_rel_overlay(
         ir_set.typeref,
-        'replace',
+        context.OverlayOp.REPLACE,
         overwrite_query,
         path_id=ir_set.path_id,
         ctx=ctx,
@@ -436,26 +592,24 @@ def _rewrite_config_insert(
     # so the autogenerated id must not be returned.
     ir_set.shape = tuple(filter(
         lambda el: (
-            (rptr := el[0].rptr) is not None
-            and rptr.ptrref.shortname.name != 'id'
+            el[0].expr.ptrref.shortname.name != 'id'
         ),
         ir_set.shape,
     ))
 
     for el, _ in ir_set.shape:
-        if isinstance(el.expr, irast.InsertStmt):
+        if isinstance(el.expr.expr, irast.InsertStmt):
             el.shape = tuple(filter(
                 lambda e: (
-                    (rptr := e[0].rptr) is not None
-                    and rptr.ptrref.shortname.name != 'id'
+                    e[0].expr.ptrref.shortname.name != 'id'
                 ),
                 el.shape,
             ))
 
-            result = _rewrite_config_insert(el.expr.subject, ctx=ctx)
-            el.expr = irast.SelectStmt(
+            result = _rewrite_config_insert(el.expr.expr.subject, ctx=ctx)
+            el.expr.expr = irast.SelectStmt(
                 result=result,
-                parent_stmt=el.expr.parent_stmt,
+                parent_stmt=el.expr.expr.parent_stmt,
             )
 
     return ir_set
@@ -468,11 +622,7 @@ def _compile_config_value(
 ) -> pgast.BaseExpr:
     val: pgast.BaseExpr
 
-    if op.backend_setting:
-        assert op.backend_expr is not None
-        expr = op.backend_expr
-    else:
-        expr = op.expr
+    expr = op.backend_expr or op.expr
 
     with ctx.new() as subctx:
         if op.backend_setting or op.scope == qltypes.ConfigScope.GLOBAL:
@@ -481,7 +631,7 @@ def _compile_config_value(
             output_format = context.OutputFormat.JSONB
 
         with context.output_format(ctx, output_format):
-            if isinstance(expr, irast.EmptySet):
+            if isinstance(expr.expr, irast.EmptySet):
                 # Special handling for empty sets, because we want a
                 # singleton representation of the value and not an empty rel
                 # in this context.
@@ -531,9 +681,13 @@ def _compile_config_value(
             ],
         )
         cast_name = s_casts.get_cast_fullname_from_names(
-            'std', 'std::bytes', 'std::json')
+            sn.QualName('std', 'bytes'), sn.QualName('std', 'json'))
         val = pgast.FuncCall(
-            name=common.get_cast_backend_name(cast_name, aspect='function'),
+            name=common.get_cast_backend_name(
+                cast_name,
+                aspect='function',
+                versioned=ctx.env.versioned_stdlib,
+            ),
             args=[val],
         )
 
@@ -549,36 +703,126 @@ def _compile_config_value(
 
 
 def top_output_as_config_op(
-        ir_set: irast.Set,
-        stmt: pgast.SelectStmt, *,
-        env: context.Environment) -> pgast.Query:
+    ir_set: irast.Set, stmt: pgast.SelectStmt, *, env: context.Environment
+) -> pgast.Query:
 
     assert isinstance(ir_set.expr, irast.ConfigCommand)
+    op = ir_set.expr
 
-    if ir_set.expr.scope is qltypes.ConfigScope.INSTANCE:
-        alias = env.aliases.get('cfg')
-        subrvar = pgast.RangeSubselect(
-            subquery=stmt,
-            alias=pgast.Alias(
-                aliasname=alias,
-            )
+    alias = env.aliases.get('cfg')
+    cte = pgast.CommonTableExpr(query=stmt, name=alias)
+    ctes = [cte]
+
+    subrvar = relctx.rvar_for_rel(cte, env=env)
+
+    stmt_res = stmt.target_list[0]
+
+    if stmt_res.name is None:
+        stmt_res = stmt.target_list[0] = pgast.ResTarget(
+            name=env.aliases.get('v'),
+            val=stmt_res.val,
+        )
+        assert stmt_res.name is not None
+    val = pgast.ColumnRef(name=[stmt_res.name])
+
+    # FIXME: Can the duplication with other db cases be reduced?
+    if op.scope is qltypes.ConfigScope.DATABASE:
+        sval = pgast.SelectStmt(
+            target_list=[pgast.ResTarget(val=val)], from_clause=[subrvar])
+        ins_val = pgast.FuncCall(
+            name=('jsonb_build_array',),
+            args=[sval],
+            null_safe=True,
+            ser_safe=True,
         )
 
-        stmt_res = stmt.target_list[0]
+        old_val = pgast.CoalesceExpr(
+            args=[
+                pgast.ColumnRef(name=['edgedb', '_db_config', 'value']),
+                pgast.TypeCast(
+                    arg=pgast.StringConstant(val='[]'),
+                    type_name=pgast.TypeName(
+                        name=('jsonb',),
+                    ),
+                ),
+            ],
+        )
+        upd_val = pgast.Expr(
+            name='||',
+            lexpr=old_val,
+            rexpr=ins_val,
+        )
 
-        if stmt_res.name is None:
-            stmt_res = stmt.target_list[0] = pgast.ResTarget(
-                name=env.aliases.get('v'),
-                val=stmt_res.val,
-            )
-            assert stmt_res.name is not None
+        ins = pgast.InsertStmt(
+            relation=pgast.RelRangeVar(
+                relation=pgast.Relation(
+                    name='_db_config',
+                    schemaname='edgedb',
+                ),
+            ),
+            select_stmt=pgast.SelectStmt(
+                values=[
+                    pgast.ImplicitRowExpr(
+                        args=[
+                            pgast.StringConstant(
+                                val=op.name,
+                            ),
+                            ins_val,
+                        ]
+                    )
+                ],
+            ),
+            cols=[
+                pgast.InsertTarget(name='name'),
+                pgast.InsertTarget(name='value'),
+            ],
+            on_conflict=pgast.OnConflictClause(
+                action='update',
+                infer=pgast.InferClause(
+                    index_elems=[
+                        pgast.ColumnRef(name=['name']),
+                    ],
+                ),
+                target_list=[
+                    pgast.MultiAssignRef(
+                        columns=['value'],
+                        source=pgast.RowExpr(
+                            args=[
+                                upd_val,
+                            ],
+                        ),
+                    ),
+                ],
+            ),
+            returning_list=[
+                pgast.ResTarget(
+                    val=pgast.ColumnRef(name=[pgast.Star()])
+                )
+            ],
+        )
+        ctes.append(
+            pgast.CommonTableExpr(query=ins, name=env.aliases.get('ins'))
+        )
 
+        subrvar = relctx.rvar_for_rel(ctes[-1], env=env)
+        val = pgast.ColumnRef(name=['value'])
+
+    if ir_set.expr.scope in (
+        qltypes.ConfigScope.INSTANCE, qltypes.ConfigScope.DATABASE
+    ):
+        # For database config, we do SET, and we return the entire new
+        # value, in order to avoid race conditions in duplicate
+        # checking.
+        command = (
+            'SET' if ir_set.expr.scope is qltypes.ConfigScope.DATABASE
+            else 'ADD'
+        )
         result_row = pgast.RowExpr(
             args=[
-                pgast.StringConstant(val='ADD'),
+                pgast.StringConstant(val=command),
                 pgast.StringConstant(val=str(ir_set.expr.scope)),
                 pgast.StringConstant(val=ir_set.expr.name),
-                pgast.ColumnRef(name=[stmt_res.name]),
+                val,
             ]
         )
 
@@ -598,10 +842,9 @@ def top_output_as_config_op(
             from_clause=[
                 subrvar,
             ],
+            ctes=ctes + (stmt.ctes or []),
         )
 
-        result.ctes = stmt.ctes
-        result.argnames = stmt.argnames
         stmt.ctes = []
 
         return result

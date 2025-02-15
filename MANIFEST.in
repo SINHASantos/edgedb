@@ -3,4 +3,5 @@ recursive-include tests *.edgeql *.esdl *.py
 include LICENSE README.md logo.svg
 
 recursive-include edb/edgeql-parser *
-recursive-include edb/edgeql-rust *
+recursive-include edb/edgeql-parser/edgeql-parser-python *
+recursive-include edb/server/protocol/auth_ext/_static *

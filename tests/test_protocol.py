@@ -26,6 +26,7 @@ import edgedb
 from edb.server import args as srv_args
 from edb.server import compiler
 from edb import protocol
+from edb.protocol.protocol import Connection
 from edb.testbase import server as tb
 from edb.testbase import connection as tconn
 from edb.testbase.protocol.test import ProtocolTestCase
@@ -37,13 +38,26 @@ def pack_i32s(*args):
 
 class TestProtocol(ProtocolTestCase):
 
-    async def _execute(self, command_text, sync=True, data=False, cc=None):
+    async def _execute(
+        self,
+        command_text: str,
+        sync: bool = True,
+        data: bool = False,
+        sql: bool = False,
+        cc: protocol.CommandComplete | None = None,
+        con: Connection | None = None,
+        input_language: protocol.InputLanguage = protocol.InputLanguage.EDGEQL,
+    ) -> None:
         exec_args = dict(
             annotations=[],
             allowed_capabilities=protocol.Capability.ALL,
             compilation_flags=protocol.CompilationFlag(0),
             implicit_limit=0,
             command_text=command_text,
+            input_language=(
+                protocol.InputLanguage.SQL
+                if sql else protocol.InputLanguage.EDGEQL
+            ),
             output_format=protocol.OutputFormat.NONE,
             expected_cardinality=protocol.Cardinality.MANY,
             input_typedesc_id=b'\0' * 16,
@@ -58,10 +72,14 @@ class TestProtocol(ProtocolTestCase):
         if data:
             exec_args['output_format'] = protocol.OutputFormat.BINARY
 
-        args = (protocol.Execute(**exec_args),)
+        args: tuple[protocol.ClientMessage, ...] = (
+            protocol.Execute(**exec_args),
+        )
         if sync:
             args += (protocol.Sync(),)
-        await self.con.send(*args)
+        if con is None:
+            con = self.con
+        await con.send(*args)
 
     async def test_proto_execute_01(self):
         # Test that Execute returns ErrorResponse immediately.
@@ -136,6 +154,74 @@ class TestProtocol(ProtocolTestCase):
             transaction_state=protocol.TransactionState.NOT_IN_TRANSACTION,
         )
 
+    async def test_proto_execute_03(self):
+        # Test that OutputFormat.NONE returns no data
+
+        await self.con.connect()
+
+        await self._execute('SELECT 1', data=True)
+
+        await self.con.recv_match(
+            protocol.CommandDataDescription,
+            result_cardinality=compiler.Cardinality.ONE,
+        )
+        await self.con.recv_match(
+            protocol.Data,
+        )
+        await self.con.recv_match(
+            protocol.CommandComplete,
+            status='SELECT'
+        )
+        await self.con.recv_match(
+            protocol.ReadyForCommand,
+            transaction_state=protocol.TransactionState.NOT_IN_TRANSACTION,
+        )
+
+        await self._execute('SELECT 1')
+
+        await self.con.recv_match(
+            protocol.CommandComplete,
+            status='SELECT'
+        )
+        await self.con.recv_match(
+            protocol.ReadyForCommand,
+            transaction_state=protocol.TransactionState.NOT_IN_TRANSACTION,
+        )
+
+    async def test_proto_execute_04(self):
+        # Same as test_proto_execute_03 but for SQL
+
+        await self.con.connect()
+
+        await self._execute('SELECT 1', data=True, sql=True)
+
+        await self.con.recv_match(
+            protocol.CommandDataDescription,
+            result_cardinality=compiler.Cardinality.MANY,
+        )
+        await self.con.recv_match(
+            protocol.Data,
+        )
+        await self.con.recv_match(
+            protocol.CommandComplete,
+            status='SELECT'
+        )
+        await self.con.recv_match(
+            protocol.ReadyForCommand,
+            transaction_state=protocol.TransactionState.NOT_IN_TRANSACTION,
+        )
+
+        await self._execute('SELECT 1', sql=True)
+
+        await self.con.recv_match(
+            protocol.CommandComplete,
+            status='SELECT'
+        )
+        await self.con.recv_match(
+            protocol.ReadyForCommand,
+            transaction_state=protocol.TransactionState.NOT_IN_TRANSACTION,
+        )
+
     async def test_proto_flush_01(self):
 
         await self.con.connect()
@@ -146,6 +232,7 @@ class TestProtocol(ProtocolTestCase):
                 allowed_capabilities=protocol.Capability.ALL,
                 compilation_flags=protocol.CompilationFlag(0),
                 implicit_limit=0,
+                input_language=protocol.InputLanguage.EDGEQL,
                 output_format=protocol.OutputFormat.BINARY,
                 expected_cardinality=compiler.Cardinality.AT_MOST_ONE,
                 command_text='SEL ECT 1',
@@ -170,6 +257,7 @@ class TestProtocol(ProtocolTestCase):
                 allowed_capabilities=protocol.Capability.ALL,
                 compilation_flags=protocol.CompilationFlag(0),
                 implicit_limit=0,
+                input_language=protocol.InputLanguage.EDGEQL,
                 output_format=protocol.OutputFormat.BINARY,
                 expected_cardinality=compiler.Cardinality.AT_MOST_ONE,
                 command_text='SELECT 1',
@@ -218,7 +306,13 @@ class TestProtocol(ProtocolTestCase):
 
     async def test_proto_state(self):
         await self.con.connect()
+        try:
+            await self._test_proto_state()
+        finally:
+            await self.con.execute('DROP GLOBAL state_desc_1')
+            await self.con.execute('DROP GLOBAL state_desc_2')
 
+    async def _test_proto_state(self):
         # Create initial state schema
         await self._execute('CREATE GLOBAL state_desc_1 -> int32')
         sdd1 = await self.con.recv_match(protocol.StateDataDescription)
@@ -355,6 +449,7 @@ class TestProtocol(ProtocolTestCase):
             protocol.ReadyForCommand,
             transaction_state=protocol.TransactionState.NOT_IN_TRANSACTION,
         )
+        await self.con.execute('DROP GLOBAL state_desc_in_script')
 
     async def test_proto_desc_id_cardinality(self):
         await self.con.connect()
@@ -367,6 +462,13 @@ class TestProtocol(ProtocolTestCase):
             status='CREATE TYPE'
         )
         await self.con.recv_match(protocol.ReadyForCommand)
+
+        try:
+            await self._test_proto_desc_id_cardinality()
+        finally:
+            await self.con.execute('DROP TYPE CardTest')
+
+    async def _test_proto_desc_id_cardinality(self):
 
         await self._execute('SELECT CardTest { prop }', data=True)
         cdd1 = await self.con.recv_match(protocol.CommandDataDescription)
@@ -400,14 +502,15 @@ class TestProtocol(ProtocolTestCase):
 
         self.assertNotEqual(cdd1.output_typedesc_id, cdd2.output_typedesc_id)
 
-    async def _parse(self, query):
+    async def _parse(self, query, output_format=protocol.OutputFormat.BINARY):
         await self.con.send(
             protocol.Parse(
                 annotations=[],
                 allowed_capabilities=protocol.Capability.ALL,
                 compilation_flags=protocol.CompilationFlag(0),
                 implicit_limit=0,
-                output_format=protocol.OutputFormat.BINARY,
+                input_language=protocol.InputLanguage.EDGEQL,
+                output_format=output_format,
                 expected_cardinality=compiler.Cardinality.MANY,
                 command_text=query,
                 state_typedesc_id=b'\0' * 16,
@@ -438,22 +541,81 @@ class TestProtocol(ProtocolTestCase):
         )
         await self.con.recv_match(protocol.ReadyForCommand)
 
-        await self._parse("SELECT ParseCardTest")
-        await self.con.recv_match(
-            protocol.CommandDataDescription,
-            result_cardinality=compiler.Cardinality.MANY,
-        )
+        try:
+            await self._parse("SELECT ParseCardTest")
+            await self.con.recv_match(
+                protocol.CommandDataDescription,
+                result_cardinality=compiler.Cardinality.MANY,
+            )
 
-        await self._parse("SELECT ParseCardTest LIMIT 1")
-        await self.con.recv_match(
-            protocol.CommandDataDescription,
-            result_cardinality=compiler.Cardinality.AT_MOST_ONE,
+            await self._parse("SELECT ParseCardTest LIMIT 1")
+            await self.con.recv_match(
+                protocol.CommandDataDescription,
+                result_cardinality=compiler.Cardinality.AT_MOST_ONE,
+            )
+        finally:
+            await self.con.execute("DROP TYPE ParseCardTest")
+
+    async def test_proto_state_concurrent_alter(self):
+        con2 = await protocol.protocol.new_connection(
+            **self.get_connect_args(database=self.get_database_name())
         )
+        try:
+            await self.con.connect()
+            await con2.connect()
+
+            # Create initial state schema
+            await self._execute('CREATE GLOBAL state_desc_3 -> int32')
+            sdd1 = await self.con.recv_match(protocol.StateDataDescription)
+            await self.con.recv_match(protocol.CommandComplete)
+            await self.con.recv_match(protocol.ReadyForCommand)
+            self.assertNotEqual(sdd1.typedesc_id, b'\0' * 16)
+
+            # Check setting the state
+            await self._execute('SET GLOBAL state_desc_3 := 11')
+            cc1 = await self.con.recv_match(
+                protocol.CommandComplete,
+                state_typedesc_id=sdd1.typedesc_id,
+            )
+            await self.con.recv_match(protocol.ReadyForCommand)
+
+            # Verify the state is set
+            await self._execute(
+                'SELECT GLOBAL state_desc_3', data=True, cc=cc1)
+            await self.con.recv_match(protocol.CommandDataDescription)
+            d1 = await self.con.recv_match(protocol.Data)
+            await self.con.recv_match(protocol.CommandComplete)
+            await self.con.recv_match(protocol.ReadyForCommand)
+            self.assertEqual(d1.data[0].data[-1], 11)
+
+            # Alter the global type in another connection
+            await self._execute(
+                'ALTER GLOBAL state_desc_3 SET TYPE str RESET TO DEFAULT',
+                con=con2,
+            )
+            sdd2 = await con2.recv_match(protocol.StateDataDescription)
+            await con2.recv_match(protocol.CommandComplete)
+            await con2.recv_match(protocol.ReadyForCommand)
+            self.assertNotEqual(sdd1.typedesc_id, sdd2.typedesc_id)
+
+            # The same query in the first connection should now fail
+            await self._execute(
+                'SELECT GLOBAL state_desc_3', data=True, cc=cc1)
+            sdd3 = await self.con.recv_match(protocol.StateDataDescription)
+            await self.con.recv_match(
+                protocol.ErrorResponse,
+                message='Cannot decode state: type mismatch',
+            )
+            await self.con.recv_match(protocol.ReadyForCommand)
+            self.assertEqual(sdd2.typedesc_id, sdd3.typedesc_id)
+
+        finally:
+            await con2.aclose()
+            await self.con.execute("DROP GLOBAL state_desc_3")
 
     async def _parse_execute(self, query, args):
-        await self.con.connect()
-
-        await self._parse(query)
+        output_format = protocol.OutputFormat.BINARY
+        await self._parse(query, output_format=output_format)
         res = await self.con.recv()
 
         await self.con.send(
@@ -463,7 +625,8 @@ class TestProtocol(ProtocolTestCase):
                 compilation_flags=protocol.CompilationFlag(0),
                 implicit_limit=0,
                 command_text=query,
-                output_format=protocol.OutputFormat.NONE,
+                input_language=protocol.InputLanguage.EDGEQL,
+                output_format=output_format,
                 expected_cardinality=protocol.Cardinality.MANY,
                 input_typedesc_id=res.input_typedesc_id,
                 output_typedesc_id=res.output_typedesc_id,
@@ -473,7 +636,6 @@ class TestProtocol(ProtocolTestCase):
             ),
             protocol.Sync(),
         )
-        await self.con.recv()
 
     async def test_proto_execute_bad_array_01(self):
         q = "SELECT <array<int32>>$0"
@@ -498,6 +660,7 @@ class TestProtocol(ProtocolTestCase):
             len(array),   # len
         ) + array
 
+        await self.con.connect()
         await self._parse_execute(q, args)
         await self.con.recv_match(
             protocol.ErrorResponse,
@@ -526,6 +689,7 @@ class TestProtocol(ProtocolTestCase):
             len(array),   # len
         ) + array
 
+        await self.con.connect()
         await self._parse_execute(q, args)
         await self.con.recv_match(
             protocol.ErrorResponse,
@@ -554,11 +718,183 @@ class TestProtocol(ProtocolTestCase):
             len(array),   # len
         ) + array
 
+        await self.con.connect()
         await self._parse_execute(q, args)
         await self.con.recv_match(
             protocol.ErrorResponse,
             message='unsupported array dimensions'
         )
+
+    async def test_proto_global_bad_array(self):
+        await self.con.connect()
+
+        # Use a transaction to avoid interfering with tests that care about
+        # the details of the state
+        await self._execute('START TRANSACTION')
+        await self.con.recv_match(protocol.CommandComplete)
+        await self.con.recv_match(protocol.ReadyForCommand)
+
+        # Create a global
+        await self._execute('CREATE GLOBAL array_glob -> array<str>')
+        sdd1 = await self.con.recv_match(protocol.StateDataDescription)
+        await self.con.recv_match(protocol.CommandComplete)
+        await self.con.recv_match(protocol.ReadyForCommand)
+        self.assertNotEqual(sdd1.typedesc_id, b'\0' * 16)
+
+        # Set an array in the state
+        await self._execute('SET GLOBAL array_glob := ["AAAA", "", "CCCC"]')
+        cc1 = await self.con.recv_match(
+            protocol.CommandComplete,
+            state_typedesc_id=sdd1.typedesc_id,
+        )
+        await self.con.recv_match(protocol.ReadyForCommand)
+
+        # Blow away the empty second string from the encoding and
+        # replace it with NULL
+        cc1.state_data = cc1.state_data.replace(
+            b'AAAA' + b'\x00' * 4, b'AAAA' + b'\xff' * 4
+        )
+
+        # Verify the state is set
+        await self._execute('SELECT 1', data=True, cc=cc1)
+        await self.con.recv_match(
+            protocol.ErrorResponse,
+            message='invalid NULL'
+        )
+
+    async def test_proto_parse_execute_transaction_id(self):
+        await self.con.connect()
+        await self._parse_execute("start transaction", b"")
+        await self.con.recv_match(
+            protocol.CommandComplete,
+            status='START TRANSACTION'
+        )
+        await self.con.recv_match(
+            protocol.ReadyForCommand,
+            transaction_state=protocol.TransactionState.IN_TRANSACTION,
+        )
+        await self._parse_execute("commit", b"")
+        await self.con.recv_match(
+            protocol.CommandComplete,
+            status='COMMIT'
+        )
+        await self.con.recv_match(
+            protocol.ReadyForCommand,
+            transaction_state=protocol.TransactionState.NOT_IN_TRANSACTION,
+        )
+
+    async def test_proto_state_change_in_tx(self):
+        await self.con.connect()
+
+        # Fixture
+        await self._execute('CREATE MODULE TestStateChangeInTx')
+        await self.con.recv_match(protocol.CommandComplete)
+        await self.con.recv_match(protocol.ReadyForCommand)
+        await self._execute('CREATE TYPE TestStateChangeInTx::StateChangeInTx')
+        await self.con.recv_match(
+            protocol.CommandComplete,
+            status='CREATE TYPE'
+        )
+        await self.con.recv_match(protocol.ReadyForCommand)
+
+        try:
+            await self._test_proto_state_change_in_tx()
+        finally:
+            await self.con.execute('ROLLBACK')
+            await self.con.execute(
+                'DROP TYPE TestStateChangeInTx::StateChangeInTx')
+            await self.con.execute('DROP MODULE TestStateChangeInTx')
+
+    async def _test_proto_state_change_in_tx(self):
+        # Collect states
+        await self._execute('''
+            SET MODULE TestStateChangeInTx
+        ''')
+        cc = await self.con.recv_match(protocol.CommandComplete)
+        await self.con.recv_match(protocol.ReadyForCommand)
+        await self._execute('''
+            CONFIGURE SESSION SET allow_user_specified_id := true
+        ''', cc=cc)
+        cc_true = await self.con.recv_match(protocol.CommandComplete)
+        await self.con.recv_match(protocol.ReadyForCommand)
+        await self._execute('''
+            CONFIGURE SESSION SET allow_user_specified_id := false
+        ''')
+        cc_false = await self.con.recv_match(protocol.CommandComplete)
+        await self.con.recv_match(protocol.ReadyForCommand)
+
+        # Start a transaction that doesn't allow_user_specified_id
+        await self._execute('START TRANSACTION', cc=cc_false)
+        await self.con.recv_match(protocol.CommandComplete)
+        await self.con.recv_match(protocol.ReadyForCommand)
+
+        # But insert with session that does allow_user_specified_id
+        await self._execute('''
+            INSERT StateChangeInTx {
+                id := <uuid>'a768e9d5-d908-4072-b370-865b450216ff'
+            };
+        ''', cc=cc_true)
+        await self.con.recv_match(
+            protocol.CommandComplete,
+            status='INSERT'
+        )
+        await self.con.recv_match(protocol.ReadyForCommand)
+
+    async def test_proto_discard_prepared_statement_in_script(self):
+        await self.con.connect()
+
+        try:
+            await self._test_proto_discard_prepared_statement_in_script()
+        finally:
+            await self.con.execute("drop type DiscardStmtInScript")
+
+    async def _test_proto_discard_prepared_statement_in_script(self):
+        # Context: we don't want to jump around cache function calls
+        await self._execute(
+            "configure session set query_cache_mode"
+            " := <cfg::QueryCacheMode>'InMemory'"
+        )
+        state = await self.con.recv_match(protocol.CommandComplete)
+        await self.con.recv_match(protocol.ReadyForCommand)
+
+        # First, run a query that is known to use a prepared statement
+        await self._execute("select 42", cc=state)
+        await self.con.recv_match(protocol.CommandComplete)
+        await self.con.recv_match(protocol.ReadyForCommand)
+
+        # Then, bump dbver by modifying the schema to invalidate the statement
+        await self.con.execute("create type DiscardStmtInScript")
+
+        # Now here comes the key. We execute a script that is meant to fail at
+        # the first command. The second command, `select 42` again, is never
+        # executed living in an aborted transaction, but we didn't know that
+        # before executing the first command; we sent messages of both commands
+        # altogether. Because dbver is bumped, we need to rebuild the prepared
+        # statement for `select 42`, involving a `CLOSE` message followed by a
+        # `PARSE` message. The problem was, `CLOSE` was placed *after* the
+        # `EXECUTE` message of the first command so `CLOSE` was simply skipped
+        # because the first command failed; but we still removed the prepared
+        # statement from the in-memory registry of PGConnection, leading to an
+        # inconsistency of memory state.
+        await self._execute('select 1/0; select 42', cc=state)
+        await self.con.recv_match(
+            protocol.ErrorResponse,
+            message='division by zero'
+        )
+        await self.con.recv_match(
+            protocol.ReadyForCommand,
+            transaction_state=protocol.TransactionState.NOT_IN_TRANSACTION,
+        )
+
+        # With such inconsistency, the next `select 42` was failing trying to
+        # create its prepared statement, because the memory registry showed we
+        # didn't have a prepared statement for `select 42`, but it was actually
+        # not closed in the PG session due the issue mentioned above.
+        await self._execute("select 42", cc=state)
+        try:
+            await self.con.recv_match(protocol.CommandComplete)
+        finally:
+            await self.con.recv_match(protocol.ReadyForCommand)
 
 
 class TestServerCancellation(tb.TestCase):
@@ -596,6 +932,7 @@ class TestServerCancellation(tb.TestCase):
                     UPDATE tclcq SET { p := 'inner' };
                     SELECT sys::_sleep(10);
                     """,
+                    input_language=protocol.InputLanguage.EDGEQL,
                     output_format=protocol.OutputFormat.NONE,
                     expected_cardinality=protocol.Cardinality.MANY,
                     input_typedesc_id=b'\0' * 16,
@@ -664,6 +1001,7 @@ class TestServerCancellation(tb.TestCase):
                         compilation_flags=protocol.CompilationFlag(0),
                         implicit_limit=0,
                         command_text='START TRANSACTION',
+                        input_language=protocol.InputLanguage.EDGEQL,
                         output_format=protocol.OutputFormat.NONE,
                         expected_cardinality=protocol.Cardinality.MANY,
                         input_typedesc_id=b'\0' * 16,

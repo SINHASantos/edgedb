@@ -259,6 +259,7 @@ class TestEdgeQLLinkproperties(tb.QueryTestCase):
             ]
         )
 
+    @tb.ignore_warnings('more than one.* in a FILTER clause')
     async def test_edgeql_props_basic_03(self):
         await self.assert_query_result(
             r'''
@@ -347,7 +348,7 @@ class TestEdgeQLLinkproperties(tb.QueryTestCase):
                     cost
                 }
                 FILTER
-                    .cost = .<deck[IS User]@count
+                    .cost IN .<deck[IS User]@count
                 ORDER BY .name;
             ''',
             [
@@ -415,6 +416,7 @@ class TestEdgeQLLinkproperties(tb.QueryTestCase):
             ]
         )
 
+    @tb.ignore_warnings('more than one.* in a FILTER clause')
     async def test_edgeql_props_cross_01(self):
         await self.assert_query_result(
             r'''
@@ -431,6 +433,7 @@ class TestEdgeQLLinkproperties(tb.QueryTestCase):
             ]
         )
 
+    @tb.ignore_warnings('more than one.* in a FILTER clause')
     async def test_edgeql_props_cross_02(self):
         await self.assert_query_result(
             r'''
@@ -459,6 +462,7 @@ class TestEdgeQLLinkproperties(tb.QueryTestCase):
             ]
         )
 
+    @tb.ignore_warnings('more than one.* in a FILTER clause')
     async def test_edgeql_props_cross_03(self):
         await self.assert_query_result(
             r'''
@@ -514,6 +518,7 @@ class TestEdgeQLLinkproperties(tb.QueryTestCase):
             ]
         )
 
+    @tb.ignore_warnings('more than one.* in a FILTER clause')
     async def test_edgeql_props_implication_01(self):
         await self.assert_query_result(
             r'''
@@ -593,6 +598,7 @@ class TestEdgeQLLinkproperties(tb.QueryTestCase):
             ]
         )
 
+    @tb.ignore_warnings('more than one.* in a FILTER clause')
     async def test_edgeql_props_implication_02(self):
         await self.assert_query_result(
             r'''
@@ -614,6 +620,7 @@ class TestEdgeQLLinkproperties(tb.QueryTestCase):
             ]
         )
 
+    @tb.ignore_warnings('more than one.* in a FILTER clause')
     async def test_edgeql_props_implication_03(self):
         await self.assert_query_result(
             r'''
@@ -708,6 +715,13 @@ class TestEdgeQLLinkproperties(tb.QueryTestCase):
                 SELECT DISTINCT User.deck@count;
             ''',
             {1, 2, 3, 4},
+        )
+
+        await self.assert_query_result(
+            r'''
+                SELECT User.deck@count FILTER User.deck.element = 'Fire'
+            ''',
+            tb.bag([1, 2, 2]),
         )
 
         await self.assert_query_result(
@@ -1300,6 +1314,203 @@ class TestEdgeQLLinkproperties(tb.QueryTestCase):
             ]
         )
 
+    @test.xerror('Stack overflow!')
+    async def test_edgeql_props_back_09(self):
+        await self.assert_query_result(
+            r'''
+            select assert_exists((
+                select Card { name, z := .<deck[IS User] {
+                  name, @count := @count }}
+                filter .name = 'Dragon'
+            ));
+            ''',
+            [
+                {
+                    "name": "Dragon",
+                    "z": tb.bag([
+                        {"x": 2, "name": "Alice"},
+                        {"x": 1, "name": "Dave"},
+                    ])
+                }
+            ]
+        )
+
+    async def test_edgeql_props_schema_back_00(self):
+        with self.assertRaisesRegex(
+                edgedb.QueryError,
+                r"has no property 'total_cost'"):
+
+            await self.con.query(
+                r'''
+                    select (Card.name, Card.owners@total_cost)
+                '''
+            )
+
+    async def test_edgeql_props_schema_back_01(self):
+        await self.assert_query_result(
+            r'''
+                select (Card.name, Card.owners.name, Card.owners@count)
+                filter Card.name = 'Dragon'
+                order by Card.owners.name
+            ''',
+            [["Dragon", "Alice", 2], ["Dragon", "Dave", 1]],
+        )
+
+    async def test_edgeql_props_schema_back_02(self):
+        await self.assert_query_result(
+            r'''
+            select Card { name, z := .owners { name, @count }}
+            filter .name = 'Dragon';
+            ''',
+            [
+                {
+                    "name": "Dragon",
+                    "z": tb.bag([
+                        {"@count": 2, "name": "Alice"},
+                        {"@count": 1, "name": "Dave"},
+                    ])
+                }
+            ]
+        )
+        await self.assert_query_result(
+            r'''
+            select Card { name, owners: { name, @count }}
+            filter .name = 'Dragon';
+            ''',
+            [
+                {
+                    "name": "Dragon",
+                    "owners": tb.bag([
+                        {"@count": 2, "name": "Alice"},
+                        {"@count": 1, "name": "Dave"},
+                    ])
+                }
+            ]
+        )
+
+        await self.assert_query_result(
+            r'''
+            select SpecialCard { name, owners: { name, @count }}
+            filter .name = 'Djinn';
+            ''',
+            [
+                {
+                    "name": "Djinn",
+                    "owners": tb.bag([
+                        {"@count": 1, "name": "Carol"},
+                        {"@count": 1, "name": "Dave"},
+                    ])
+                }
+            ]
+        )
+
+    async def test_edgeql_props_schema_back_03(self):
+        await self.assert_query_result(
+            r'''
+            select Card { name, z := .owners { name, x := @count }}
+            filter .name = 'Dragon';
+            ''',
+            [
+                {
+                    "name": "Dragon",
+                    "z": tb.bag([
+                        {"x": 2, "name": "Alice"},
+                        {"x": 1, "name": "Dave"},
+                    ])
+                }
+            ]
+        )
+
+        await self.assert_query_result(
+            r'''
+            select Card { name, owners: { name, x := @count }}
+            filter .name = 'Dragon';
+            ''',
+            [
+                {
+                    "name": "Dragon",
+                    "owners": tb.bag([
+                        {"x": 2, "name": "Alice"},
+                        {"x": 1, "name": "Dave"},
+                    ])
+                }
+            ]
+        )
+
+    async def test_edgeql_props_schema_back_04(self):
+        await self.assert_query_result(
+            r'''
+            select assert_exists((
+                select Card { name, z := .owners { name, @count }}
+                filter .name = 'Dragon'
+            ));
+            ''',
+            [
+                {
+                    "name": "Dragon",
+                    "z": tb.bag([
+                        {"@count": 2, "name": "Alice"},
+                        {"@count": 1, "name": "Dave"},
+                    ])
+                }
+            ]
+        )
+
+        await self.assert_query_result(
+            r'''
+            select assert_exists((
+                select Card { name, owners: { name, @count }}
+                filter .name = 'Dragon'
+            ));
+            ''',
+            [
+                {
+                    "name": "Dragon",
+                    "owners": tb.bag([
+                        {"@count": 2, "name": "Alice"},
+                        {"@count": 1, "name": "Dave"},
+                    ])
+                }
+            ]
+        )
+
+    async def test_edgeql_props_schema_back_05(self):
+        await self.assert_query_result(
+            r'''
+            select assert_exists((
+                select Card { name, z := .owners { name, x := @count }}
+                filter .name = 'Dragon'
+            ));
+            ''',
+            [
+                {
+                    "name": "Dragon",
+                    "z": tb.bag([
+                        {"x": 2, "name": "Alice"},
+                        {"x": 1, "name": "Dave"},
+                    ])
+                }
+            ]
+        )
+
+        await self.assert_query_result(
+            r'''
+            select assert_exists((
+                select Card { name, owners: { name, x := @count }}
+                filter .name = 'Dragon'
+            ));
+            ''',
+            [
+                {
+                    "name": "Dragon",
+                    "owners": tb.bag([
+                        {"x": 2, "name": "Alice"},
+                        {"x": 1, "name": "Dave"},
+                    ])
+                }
+            ]
+        )
+
     async def test_edgeql_props_intersect_01(self):
         await self.assert_query_result(
             r'''
@@ -1352,5 +1563,77 @@ class TestEdgeQLLinkproperties(tb.QueryTestCase):
             await self.con.query(
                 r'''
                     insert Src { l := assert_single(Tgt { @y := "..." }) };
+                '''
+            )
+
+    async def test_edgeql_props_tuples_01(self):
+        await self.con.execute(r'''
+            create type Org;
+            create type Foo {
+                create multi link orgs -> Org {
+                    create property roles -> tuple<role1: bool, role2: bool>;
+                }
+            };
+            insert Org;
+            insert Foo { orgs := (select Org {
+                @roles := (role1 := true, role2 := false) }) };
+        ''')
+
+        await self.assert_query_result(
+            '''
+            select Foo.orgs@roles.role1;
+            ''',
+            [True],
+        )
+
+    async def test_edgeql_pure_computed_linkprops_01(self):
+        await self.con.execute(r'''
+            CREATE TYPE default::Test3 {
+                CREATE PROPERTY name: std::str {
+                    SET default := 'test3';
+                };
+            };
+            CREATE TYPE default::Test4 {
+                CREATE LINK test3ref: default::Test3 {
+                    CREATE PROPERTY note := (.name);
+                };
+                CREATE PROPERTY name: std::str {
+                    SET default := 'test4';
+                };
+            };
+            insert Test3;
+        ''')
+
+        await self.assert_query_result(
+            '''
+            insert Test4 { test3ref := (select Test3 limit 1)};
+            ''',
+            [{}],
+        )
+
+    async def test_edgeql_props_target_06(self):
+        # This should not work
+        with self.assertRaisesRegex(
+            edgedb.QueryError,
+            r"@target may only be used in index and constraint definitions"
+        ):
+            await self.con.query(
+                r'''
+                SELECT schema::ObjectType {
+                  name,
+                  is_abstract,
+                  bases: {
+                    name,
+                  } ORDER BY @index ASC,
+                  pointers: {
+                    cardinality,
+                    required,
+                    name,
+                    target: {
+                      name,
+                    },
+                    kind := 'link' IF @target IS schema::Link ELSE 'property'
+                  },
+                } FILTER NOT .is_compound_type;
                 '''
             )

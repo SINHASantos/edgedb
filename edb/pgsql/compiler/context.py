@@ -20,22 +20,40 @@
 """IR compiler context."""
 
 from __future__ import annotations
-from typing import *
+from typing import (
+    Callable,
+    Optional,
+    Tuple,
+    Union,
+    Mapping,
+    ChainMap,
+    Dict,
+    List,
+    Set,
+    FrozenSet,
+    Generator,
+    TYPE_CHECKING,
+)
 
 import collections
 import contextlib
+import dataclasses
 import enum
 import uuid
 
+import immutables as immu
+
 from edb.common import compiler
+from edb.common import enum as s_enum
 
 from edb.pgsql import ast as pgast
 from edb.pgsql import params as pgparams
 
-from . import aliases
+from . import aliases as pg_aliases
 
 if TYPE_CHECKING:
     from edb.ir import ast as irast
+    from . import enums as pgce
 
 
 class ContextSwitchMode(enum.Enum):
@@ -71,6 +89,124 @@ class OutputFormat(enum.Enum):
 NO_STMT = pgast.SelectStmt()
 
 
+class OverlayOp(s_enum.StrEnum):
+    UNION = 'union'
+    REPLACE = 'replace'
+    FILTER = 'filter'
+    EXCEPT = 'except'
+
+
+OverlayEntry = tuple[
+    OverlayOp,
+    Union[pgast.BaseRelation, pgast.CommonTableExpr],
+    'irast.PathId',
+]
+
+
+@dataclasses.dataclass(kw_only=True)
+class RelOverlays:
+    """Container for relation overlays.
+
+    These track "overlays" that can be registered for different types,
+    in the context of DML.
+
+    Consider the query:
+      with X := (
+        insert Person {
+          name := "Sully",
+          notes := assert_distinct({
+            (insert Note {name := "1"}),
+            (select Note filter .name = "2"),
+          }),
+        }),
+      select X { name, notes: {name} };
+
+    When we go to select X, we find the source of that set without any
+    trouble (it's the result of the actual insert statement, more or
+    less; in any case, it's in a CTE that we then include).
+
+    Handling the notes are trickier, though:
+      * The links aren't in the link table yet, but only in a CTE.
+        (In similar update cases, with things like +=, they might be mixed
+        between both.)
+      * Some of the actual Note objects aren't in the table yet, just an insert
+        CTE. But some *are*, so we need to union them.
+
+    We solve these problems using overlays:
+      * Whenever we do DML (or reference WITH-bound DML),
+        we register overlays describing the changes done
+        to *all of the enclosing DML*. So here, the Note insert's overlays
+        get registered both for the Note insert and for the Person insert.
+      * When we try to compile a root set or pointer, we see if it is connected
+        to a DML statement, and if so we apply the overlays.
+
+    The overlay itself is simply a sequence of operations on relations
+    and CTEs that mix in the new data. In the obvious insert cases,
+    these consist of unioning the new data in.
+
+    This system works decently well but is also a little broken: I
+    think that both the "all of the enclosing DML" and the "see if it
+    is connected to a DML statement" have dangers; see Issue #3030.
+
+    In relctx, see range_for_material_objtype, range_for_ptrref, and
+    range_from_queryset (which those two call) for details on how
+    overlays are applied.
+    Overlays are added to with relctx.add_type_rel_overlay
+    and relctx.add_ptr_rel_overlay.
+
+
+    ===== NOTE ON MUTABILITY:
+    In typical use, the overlays are mutable: nested DML adds overlays
+    that are then consumed by code in enclosing contexts.
+
+    In some places, however, we need to temporarily customize the
+    overlay environment (during policy and trigger compilation, for
+    example).
+
+    The original version of overlays were implemented as a dict of
+    dicts of lists. Doing temporary customizations required doing
+    at least some copying. Doing a full deep copy always felt excessive
+    but doing anything short of that left me constantly terrified.
+
+    So instead we represent the overlays as a mutable object that
+    contains immutable maps. When we add overlays, we update the maps
+    and then reassign their values.
+
+    When we want to do a temporary adjustment, we can cheaply make a
+    fresh RelOverlays object and then modify that without touching the
+    original.
+    """
+
+    #: Relations used to "overlay" the main table for
+    #: the type.  Mostly used with DML statements.
+    type: immu.Map[
+        Optional[irast.MutatingLikeStmt],
+        immu.Map[
+            uuid.UUID,
+            tuple[OverlayEntry, ...],
+        ],
+    ] = immu.Map()
+
+    #: Relations used to "overlay" the main table for
+    #: the pointer.  Mostly used with DML statements.
+    ptr: immu.Map[
+        Optional[irast.MutatingLikeStmt],
+        immu.Map[
+            Tuple[uuid.UUID, str],
+            Tuple[
+                Tuple[
+                    OverlayOp,
+                    Union[pgast.BaseRelation, pgast.CommonTableExpr],
+                    irast.PathId,
+                ], ...
+            ],
+        ],
+    ] = immu.Map()
+
+    def copy(self) -> RelOverlays:
+        return RelOverlays(type=self.type, ptr=self.ptr)
+
+
 class CompilerContextLevel(compiler.ContextLevel):
     #: static compilation environment
     env: Environment
@@ -81,6 +217,9 @@ class CompilerContextLevel(compiler.ContextLevel):
     #: whether compiling in singleton expression mode
     singleton_mode: bool
 
+    #: whether compiling a trigger
+    trigger_mode: bool
+
     #: the top-level SQL statement
     toplevel_stmt: pgast.Query
 
@@ -89,6 +228,15 @@ class CompilerContextLevel(compiler.ContextLevel):
     #: by their iterator set.
     dml_stmts: Dict[Union[irast.MutatingStmt, irast.Set],
                     pgast.CommonTableExpr]
+
+    #: Inline DML functions may require additional CTEs.
+    #: Record such CTEs as well as the path used by their iterators.
+    #: This ensures CTEs are created only once, and that the correct
+    #: iterator bonds are applied.
+    inline_dml_ctes: dict[
+        irast.PathId,
+        tuple[irast.PathId, pgast.CommonTableExpr],
+    ]
 
     #: SQL statement corresponding to the IR statement
     #: currently being compiled.
@@ -103,11 +251,21 @@ class CompilerContextLevel(compiler.ContextLevel):
     #: CTEs representing decoded parameters
     param_ctes: Dict[str, pgast.CommonTableExpr]
 
-    #: CTEs representing schema types, when rewritten based on access policy
-    type_ctes: Dict[RewriteKey, pgast.CommonTableExpr]
+    #: CTEs representing pointers and their inherited pointers
+    ptr_inheritance_ctes: Dict[uuid.UUID, pgast.CommonTableExpr]
+
+    #: CTEs representing types, when rewritten based on access policy
+    type_rewrite_ctes: Dict[FullRewriteKey, pgast.CommonTableExpr]
 
     #: A set of type CTEs currently being generated
-    pending_type_ctes: Set[RewriteKey]
+    pending_type_rewrite_ctes: Set[RewriteKey]
+
+    #: CTEs representing types and their inherited types
+    type_inheritance_ctes: Dict[uuid.UUID, pgast.CommonTableExpr]
+
+    # Type and type inheriance CTEs in creation order. This ensures type CTEs
+    # referring to other CTEs are in the correct order.
+    ordered_type_ctes: list[pgast.CommonTableExpr]
 
     #: The logical parent of the current query in the
     #: query hierarchy
@@ -162,38 +320,19 @@ class CompilerContextLevel(compiler.ContextLevel):
 
     #: A stack of dml statements currently being compiled. Used for
     #: figuring out what to record in type_rel_overlays.
-    dml_stmt_stack: List[irast.MutatingStmt]
+    dml_stmt_stack: List[irast.MutatingLikeStmt]
 
     #: Relations used to "overlay" the main table for
     #: the type.  Mostly used with DML statements.
-    type_rel_overlays: DefaultDict[
-        Optional[irast.MutatingStmt],
-        DefaultDict[
-            uuid.UUID,
-            List[
-                Tuple[
-                    str,
-                    Union[pgast.BaseRelation, pgast.CommonTableExpr],
-                    irast.PathId,
-                ]
-            ],
-        ],
-    ]
+    rel_overlays: RelOverlays
 
-    #: Relations used to "overlay" the main table for
-    #: the pointer.  Mostly used with DML statements.
-    ptr_rel_overlays: DefaultDict[
-        Optional[irast.MutatingStmt],
-        DefaultDict[
-            Tuple[uuid.UUID, str],
-            List[
-                Tuple[
-                    str,
-                    Union[pgast.BaseRelation, pgast.CommonTableExpr],
-                    irast.PathId,
-                ]
-            ],
-        ],
+    #: Mapping from path ids to "external" rels given by a particular relation
+    external_rels: Mapping[
+        irast.PathId,
+        Tuple[
+            pgast.BaseRelation | pgast.CommonTableExpr,
+            Tuple[pgce.PathAspect, ...]
+        ]
     ]
 
     #: The CTE and some metadata of any enclosing iterator-like
@@ -227,9 +366,13 @@ class CompilerContextLevel(compiler.ContextLevel):
             self.rel = NO_STMT
             self.rel_hierarchy = {}
             self.param_ctes = {}
-            self.type_ctes = {}
-            self.pending_type_ctes = set()
+            self.ptr_inheritance_ctes = {}
+            self.type_rewrite_ctes = {}
+            self.pending_type_rewrite_ctes = set()
+            self.type_inheritance_ctes = {}
+            self.ordered_type_ctes = []
             self.dml_stmts = {}
+            self.inline_dml_ctes = {}
             self.parent_rel = None
             self.pending_query = None
             self.materializing = frozenset()
@@ -247,12 +390,13 @@ class CompilerContextLevel(compiler.ContextLevel):
             self.path_scope = collections.ChainMap()
             self.scope_tree = scope_tree
             self.dml_stmt_stack = []
-            self.type_rel_overlays = collections.defaultdict(
-                lambda: collections.defaultdict(list))
-            self.ptr_rel_overlays = collections.defaultdict(
-                lambda: collections.defaultdict(list))
+            self.rel_overlays = RelOverlays()
+
+            self.external_rels = {}
             self.enclosing_cte_iterator = None
             self.shapes_needed_by_dml = set()
+
+            self.trigger_mode = False
 
         else:
             self.env = prevlevel.env
@@ -265,9 +409,13 @@ class CompilerContextLevel(compiler.ContextLevel):
             self.rel = prevlevel.rel
             self.rel_hierarchy = prevlevel.rel_hierarchy
             self.param_ctes = prevlevel.param_ctes
-            self.type_ctes = prevlevel.type_ctes
-            self.pending_type_ctes = prevlevel.pending_type_ctes
+            self.ptr_inheritance_ctes = prevlevel.ptr_inheritance_ctes
+            self.type_rewrite_ctes = prevlevel.type_rewrite_ctes
+            self.pending_type_rewrite_ctes = prevlevel.pending_type_rewrite_ctes
+            self.type_inheritance_ctes = prevlevel.type_inheritance_ctes
+            self.ordered_type_ctes = prevlevel.ordered_type_ctes
             self.dml_stmts = prevlevel.dml_stmts
+            self.inline_dml_ctes = prevlevel.inline_dml_ctes
             self.parent_rel = prevlevel.parent_rel
             self.pending_query = prevlevel.pending_query
             self.materializing = prevlevel.materializing
@@ -285,10 +433,12 @@ class CompilerContextLevel(compiler.ContextLevel):
             self.path_scope = prevlevel.path_scope
             self.scope_tree = prevlevel.scope_tree
             self.dml_stmt_stack = prevlevel.dml_stmt_stack
-            self.type_rel_overlays = prevlevel.type_rel_overlays
-            self.ptr_rel_overlays = prevlevel.ptr_rel_overlays
+            self.rel_overlays = prevlevel.rel_overlays
             self.enclosing_cte_iterator = prevlevel.enclosing_cte_iterator
             self.shapes_needed_by_dml = prevlevel.shapes_needed_by_dml
+            self.external_rels = prevlevel.external_rels
+
+            self.trigger_mode = prevlevel.trigger_mode
 
             if mode is ContextSwitchMode.SUBSTMT:
                 if self.pending_query is not None:
@@ -322,14 +472,22 @@ class CompilerContextLevel(compiler.ContextLevel):
                 self.path_scope = collections.ChainMap()
                 self.rel_hierarchy = {}
                 self.scope_tree = prevlevel.scope_tree.root
+                self.volatility_ref = ()
 
                 self.disable_semi_join = frozenset()
                 self.force_optional = frozenset()
                 self.intersection_narrowing = {}
-                self.pending_type_ctes = set(prevlevel.pending_type_ctes)
+                self.pending_type_rewrite_ctes = set(
+                    prevlevel.pending_type_rewrite_ctes
+                )
 
             elif mode == ContextSwitchMode.NEWSCOPE:
                 self.path_scope = prevlevel.path_scope.new_child()
+
+    def get_current_dml_stmt(self) -> Optional[irast.MutatingLikeStmt]:
+        if len(self.dml_stmt_stack) == 0:
+            return None
+        return self.dml_stmt_stack[-1]
 
     def subrel(
         self,
@@ -369,14 +527,16 @@ class CompilerContext(compiler.CompilerContext[CompilerContextLevel]):
 
 
 RewriteKey = Tuple[uuid.UUID, bool]
+FullRewriteKey = Tuple[
+    uuid.UUID, bool, Optional[frozenset['irast.MutatingLikeStmt']]]
 
 
 class Environment:
     """Static compilation environment."""
 
-    aliases: aliases.AliasGenerator
+    aliases: pg_aliases.AliasGenerator
     output_format: Optional[OutputFormat]
-    use_named_params: bool
+    named_param_prefix: Optional[tuple[str, ...]]
     ptrref_source_visibility: Dict[irast.BasePointerRef, bool]
     expected_cardinality_one: bool
     ignore_object_shapes: bool
@@ -385,9 +545,12 @@ class Environment:
     query_params: List[irast.Param]
     type_rewrites: Dict[RewriteKey, irast.Set]
     scope_tree_nodes: Dict[int, irast.ScopeTreeNode]
-    external_rvars: Mapping[Tuple[irast.PathId, str], pgast.PathRangeVar]
+    external_rvars: Mapping[
+        Tuple[irast.PathId, pgce.PathAspect], pgast.PathRangeVar
+    ]
     materialized_views: Dict[uuid.UUID, irast.Set]
     backend_runtime_params: pgparams.BackendRuntimeParams
+    versioned_stdlib: bool
 
     #: A list of CTEs that implement constraint validation at the
     #: query level.
@@ -396,27 +559,32 @@ class Environment:
     def __init__(
         self,
         *,
+        alias_generator: Optional[pg_aliases.AliasGenerator] = None,
         output_format: Optional[OutputFormat],
-        use_named_params: bool,
+        named_param_prefix: Optional[tuple[str, ...]],
         expected_cardinality_one: bool,
         ignore_object_shapes: bool,
         singleton_mode: bool,
+        is_explain: bool,
         explicit_top_cast: Optional[irast.TypeRef],
         query_params: List[irast.Param],
         type_rewrites: Dict[RewriteKey, irast.Set],
         scope_tree_nodes: Dict[int, irast.ScopeTreeNode],
         external_rvars: Optional[
-            Mapping[Tuple[irast.PathId, str], pgast.PathRangeVar]
+            Mapping[Tuple[irast.PathId, pgce.PathAspect], pgast.PathRangeVar]
         ] = None,
         backend_runtime_params: pgparams.BackendRuntimeParams,
+        # XXX: TRAMPOLINE: THIS IS WRONG
+        versioned_stdlib: bool = True,
     ) -> None:
-        self.aliases = aliases.AliasGenerator()
+        self.aliases = alias_generator or pg_aliases.AliasGenerator()
         self.output_format = output_format
-        self.use_named_params = use_named_params
+        self.named_param_prefix = named_param_prefix
         self.ptrref_source_visibility = {}
         self.expected_cardinality_one = expected_cardinality_one
         self.ignore_object_shapes = ignore_object_shapes
         self.singleton_mode = singleton_mode
+        self.is_explain = is_explain
         self.explicit_top_cast = explicit_top_cast
         self.query_params = query_params
         self.type_rewrites = type_rewrites
@@ -425,6 +593,7 @@ class Environment:
         self.materialized_views = {}
         self.check_ctes = []
         self.backend_runtime_params = backend_runtime_params
+        self.versioned_stdlib = versioned_stdlib
 
 
 # XXX: this context hack is necessary until pathctx is converted
@@ -435,8 +604,11 @@ def output_format(
     output_format: OutputFormat,
 ) -> Generator[None, None, None]:
     original_output_format = ctx.env.output_format
+    original_ignore_object_shapes = ctx.env.ignore_object_shapes
     ctx.env.output_format = output_format
+    ctx.env.ignore_object_shapes = False
     try:
         yield
     finally:
         ctx.env.output_format = original_output_format
+        ctx.env.ignore_object_shapes = original_ignore_object_shapes

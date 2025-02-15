@@ -19,8 +19,8 @@
 
 SET MODULE default;
 
-CREATE MIGRATION m14pt32wg7zijus7jmmnvbtf7dftt34xxgbkrtmys46pmrailnkcia
-ONTO m1bzqjsa6r7e3prynbm52zutm3jo42ybgulhsjlnxbd43m4sqdmcoq {
+CREATE MIGRATION m1t2phsw6j2rgl4ieihm6mnvoln3ssayxncjzl2kwkxmunn2f6aqha
+ONTO m1iej6dr3hk33wykqwqgg4xxo3tivpiznpb2mto7qsw2zgipsbfihq {
     CREATE TYPE default::Migrated;
     create type default::Migrated2 {};
 };

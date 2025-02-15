@@ -17,9 +17,11 @@ guide!
 .. toctree::
     :maxdepth: 1
 
-    tutorials/index
+    cloud/index
     deployment/index
+    datamigrations/index
+    tutorials/index
+    auth/index
     migrations/index
-    introspection/index
-    cheatsheet/index
-    contributing
+    contributing/index
+    Cheatsheets <https://docs.edgedb.com/database/cheatsheets>

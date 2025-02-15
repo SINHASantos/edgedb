@@ -208,7 +208,7 @@ import lxml.etree
 import pygments.lexers
 import pygments.lexers.special
 
-from typing import *
+from typing import Any, Dict
 
 from edb.common import debug
 
@@ -218,6 +218,7 @@ from edb import protocol
 
 from docutils import nodes as d_nodes
 from docutils.parsers import rst as d_rst
+from docutils.parsers.rst import directives as d_directives  # type: ignore
 from docutils import utils as d_utils
 
 from sphinx import addnodes as s_nodes
@@ -225,7 +226,6 @@ from sphinx import directives as s_directives
 from sphinx import domains as s_domains
 from sphinx import roles as s_roles
 from sphinx import transforms as s_transforms
-from sphinx.directives import code as s_code
 from sphinx.util import docfields as s_docfields
 from sphinx.util import nodes as s_nodes_utils
 from sphinx.ext.intersphinx import InventoryAdapter
@@ -235,8 +235,15 @@ from . import shared
 
 class EQLField(s_docfields.Field):
 
-    def __init__(self, name, names=(), label=None, has_arg=False,
-                 rolename=None, bodyrolename=None):
+    def __init__(
+        self,
+        name,
+        names=(),
+        label=None,
+        has_arg=False,
+        rolename=None,
+        bodyrolename=None,
+    ):
         super().__init__(name, names, label, has_arg, rolename, bodyrolename)
 
     def make_field(self, *args, **kwargs):
@@ -244,9 +251,17 @@ class EQLField(s_docfields.Field):
         node['eql-name'] = self.name
         return node
 
-    def make_xref(self, rolename, domain, target,
-                  innernode=d_nodes.emphasis, contnode=None, env=None,
-                  inliner=None, location=None):
+    def make_xref(
+        self,
+        rolename,
+        domain,
+        target,
+        innernode=d_nodes.emphasis,
+        contnode=None,
+        env=None,
+        inliner=None,
+        location=None,
+    ):
 
         if not rolename:
             return contnode or innernode(target, target)
@@ -268,8 +283,17 @@ class EQLField(s_docfields.Field):
         refnode['eql-auto-link'] = True
         return refnode
 
-    def make_xrefs(self, rolename, domain, target, innernode=d_nodes.emphasis,
-                   contnode=None, env=None, inliner=None, location=None):
+    def make_xrefs(
+        self,
+        rolename,
+        domain,
+        target,
+        innernode=d_nodes.emphasis,
+        contnode=None,
+        env=None,
+        inliner=None,
+        location=None,
+    ):
         delims = r'''(?x)
         (
             \s* [\[\]\(\)<>,] \s* | \s+or\s+ |
@@ -312,13 +336,22 @@ class EQLTypedField(EQLField):
         'type'
     }
 
-    def __init__(self, name, names=(), label=None, rolename=None,
-                 *, typerolename, has_arg=True):
+    def __init__(
+        self,
+        name,
+        names=(),
+        label=None,
+        rolename=None,
+        *,
+        typerolename,
+        has_arg=True,
+    ):
         super().__init__(name, names, label, has_arg, rolename, None)
         self.typerolename = typerolename
 
-    def make_field(self, types, domain, item, env=None, inliner=None,
-                   location=None):
+    def make_field(
+        self, types, domain, item, env=None, inliner=None, location=None
+    ):
         fieldarg, fieldtype = item
 
         body = d_nodes.paragraph()
@@ -350,8 +383,17 @@ class EQLTypedParamField(EQLField):
 
     is_typed = True
 
-    def __init__(self, name, names=(), label=None, rolename=None,
-                 *, has_arg=True, typerolename, typenames):
+    def __init__(
+        self,
+        name,
+        names=(),
+        label=None,
+        rolename=None,
+        *,
+        has_arg=True,
+        typerolename,
+        typenames,
+    ):
         super().__init__(name, names, label, has_arg, rolename)
         self.typenames = typenames
         self.typerolename = typerolename
@@ -414,12 +456,19 @@ class BaseEQLDirective(s_directives.ObjectDescription):
         if desc_cnt is None or not desc_cnt.children:
             raise self.error('the directive must include a description')
 
-        first_node = desc_cnt.children[0]
+        first_node_index = 0
+        first_node = desc_cnt.children[first_node_index]
+
         if isinstance(first_node, d_nodes.field_list):
             if len(desc_cnt.children) < 2:
                 raise self.error('the directive must include a description')
 
-            first_node = desc_cnt.children[1]
+            first_node_index += 1
+            first_node = desc_cnt.children[first_node_index]
+
+        if isinstance(first_node, s_nodes.versionmodified):
+            first_node_index += 1
+            first_node = desc_cnt.children[first_node_index]
 
         if not isinstance(first_node, d_nodes.paragraph):
             raise self.error(
@@ -545,7 +594,7 @@ class EQLTypeDirective(BaseEQLDirective):
 
     def handle_signature(self, sig, signode):
         if '::' in sig:
-            mod, name = sig.strip().split('::')
+            mod, name = sig.strip().rsplit('::', 1)
         else:
             name = sig.strip()
             mod = 'std'
@@ -586,12 +635,14 @@ class EQLKeywordDirective(BaseEQLDirective):
             f'keyword::{name}', sig, signode)
 
 
-class EQLSynopsisDirective(s_code.CodeBlock):
+class EQLSynopsisDirective(shared.CodeBlock):
 
     has_content = True
     optional_arguments = 0
     required_arguments = 0
-    option_spec: Dict[str, Any] = {}
+    option_spec: Dict[str, Any] = {
+        'version-lt': d_directives.unchanged_required
+    }
 
     def run(self):
         self.arguments = ['edgeql-synopsis']
@@ -703,24 +754,27 @@ class EQLFunctionDirective(BaseEQLDirective):
         if debug.flags.disable_docs_edgeql_validation:
             signode['eql-fullname'] = fullname = sig.split('(')[0]
             signode['eql-signature'] = sig
-            mod, name = fullname.split('::')
+            mod, name = fullname.rsplit('::', 1)
             signode['eql-module'] = mod
             signode['eql-name'] = name
 
             return fullname
 
-        from edb.edgeql.parser import parser as edgeql_parser
+        from edb.edgeql import parser as edgeql_parser
+        from edb.edgeql.parser import grammar as edgeql_grammar
         from edb.edgeql import ast as ql_ast
         from edb.edgeql import codegen as ql_gen
         from edb.edgeql import qltypes
 
-        parser = edgeql_parser.EdgeQLBlockParser()
         try:
-            astnode = parser.parse(
+            astnode = edgeql_parser.parse(
+                edgeql_grammar.tokens.T_STARTBLOCK,
                 f'create function {sig} using SQL function "xxx";')[0]
         except Exception as ex:
             raise self.error(
-                f'could not parse function signature {sig!r}') from ex
+                f'could not parse function signature {sig!r}: '
+                f'{ex.__class__.__name__}({ex.args[0]!r})'
+            ) from ex
 
         if (not isinstance(astnode, ql_ast.CreateFunction) or
                 not isinstance(astnode.name, ql_ast.ObjectRef)):
@@ -783,14 +837,16 @@ class EQLConstraintDirective(BaseEQLDirective):
 
             return fullname
 
-        from edb.edgeql.parser import parser as edgeql_parser
+        from edb.edgeql import parser as edgeql_parser
+        from edb.edgeql.parser import grammar as edgeql_grammar
         from edb.edgeql import ast as ql_ast
         from edb.edgeql import codegen as ql_gen
 
-        parser = edgeql_parser.EdgeQLBlockParser()
         try:
-            astnode = parser.parse(
-                f'create abstract constraint {sig};')[0]
+            astnode = edgeql_parser.parse(
+                edgeql_grammar.tokens.T_STARTBLOCK,
+                f'create abstract constraint {sig};'
+            )[0]
         except Exception as ex:
             raise self.error(
                 f'could not parse constraint signature {sig!r}') from ex
@@ -903,8 +959,9 @@ class GitHubLinkRole:
         ''',
         re.X)
 
-    def __call__(self, role, rawtext, text, lineno, inliner,
-                 options=None, content=None):
+    def __call__(
+        self, role, rawtext, text, lineno, inliner, options=None, content=None
+    ):
         if options is None:
             options = {}
         if content is None:
@@ -978,9 +1035,11 @@ class EdgeQLDomain(s_domains.Domain):
         'keyword': EQLKeywordDirective,
         'operator': EQLOperatorDirective,
         'synopsis': EQLSynopsisDirective,
+        'struct': EQLStructElement,
+
+        # TODO: Move to edb domain
         'react-element': EQLReactElement,
         'section-intro-page': EQLSectionIntroPage,
-        'struct': EQLStructElement,
     }
 
     roles = {
@@ -992,6 +1051,8 @@ class EdgeQLDomain(s_domains.Domain):
         'op': s_roles.XRefRole(),
         'op-desc': EQLOperatorDescXRef(),
         'stmt': s_roles.XRefRole(),
+
+        # TODO: Move to edb domain
         'gh': GitHubLinkRole(),
     }
 
@@ -1004,8 +1065,9 @@ class EdgeQLDomain(s_domains.Domain):
         'objects': {}  # fullname -> docname, objtype, description
     }
 
-    def resolve_xref(self, env, fromdocname, builder,
-                     type, target, node, contnode):
+    def resolve_xref(
+        self, env, fromdocname, builder, type, target, node, contnode
+    ):
 
         objects = self.data['objects']
         expected_type = self._role_to_object_type[type]
@@ -1092,8 +1154,9 @@ class EdgeQLDomain(s_domains.Domain):
 
         return node
 
-    def resolve_any_xref(self, env, fromdocname, builder,
-                         target, node, contnode):
+    def resolve_any_xref(
+        self, env, fromdocname, builder, target, node, contnode
+    ):
         # 'myst-parser' resolves all markdown links as :any: xrefs, so return
         # empty list to prevent sphinx trying to resolve these as :eql: refs
         return []
@@ -1199,6 +1262,7 @@ def setup_domain(app):
 
     app.add_lexer("edgeql", EdgeQLLexer)
     app.add_lexer("edgeql-repl", EdgeQLLexer)
+    app.add_lexer("edgeql-runnable", EdgeQLLexer)
     app.add_lexer("edgeql-synopsis", EdgeQLLexer)
     app.add_lexer("edgeql-result", pygments.lexers.special.TextLexer)
 

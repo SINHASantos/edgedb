@@ -16,11 +16,15 @@
 # limitations under the License.
 #
 
-
-from typing import Optional
+import re
+from typing import Any, Optional
 
 
 class PSqlParseError(Exception):
+    pass
+
+
+class PSqlSyntaxError(PSqlParseError):
     def __init__(self, message, lineno, cursorpos):
         self.message = message
         self.lineno = lineno
@@ -30,11 +34,24 @@ class PSqlParseError(Exception):
         return self.message
 
 
-class PSqlUnsupportedError(Exception):
-    def __init__(self, construct: Optional[str] = None):
-        self.construct = construct
+class PSqlUnsupportedError(PSqlParseError):
+    def __init__(self, node: Optional[Any] = None, feat: Optional[str] = None):
+        self.node = node
+        self.location = None
+        self.message = "not supported"
+        if feat:
+            self.message += f": {feat}"
 
     def __str__(self):
-        if self.construct is not None:
-            return f"unsupported SQL construct: {self.construct}"
-        return "unsupported SQL construct"
+        return self.message
+
+
+def get_node_name(name: str) -> str:
+    """
+    Given a node name (CreateTableStmt), this function tries to guess the SQL
+    command text (CREATE TABLE).
+    """
+
+    name = name.removesuffix('Stmt').removesuffix('Expr')
+    name = re.sub(r'(?<!^)(?=[A-Z])', ' ', name)
+    return name.upper()

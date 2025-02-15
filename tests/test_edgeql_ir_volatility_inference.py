@@ -34,7 +34,7 @@ class TestEdgeQLVolatilityInference(tb.BaseEdgeQLCompilerTest):
                           'cards.esdl')
 
     def run_test(self, *, source, spec, expected):
-        qltree = qlparser.parse(source)
+        qltree = qlparser.parse_query(source)
         ir = compiler.compile_ast_to_ir(
             qltree,
             self.schema,
@@ -114,7 +114,7 @@ class TestEdgeQLVolatilityInference(tb.BaseEdgeQLCompilerTest):
                 cost := 1,
             }
 % OK %
-        Volatile
+        Modifying
         """
 
     def test_edgeql_ir_volatility_inference_07(self):
@@ -125,7 +125,7 @@ class TestEdgeQLVolatilityInference(tb.BaseEdgeQLCompilerTest):
                 name := 'foo',
         }
 % OK %
-        Volatile
+        Modifying
         """
 
     def test_edgeql_ir_volatility_inference_08(self):
@@ -133,7 +133,7 @@ class TestEdgeQLVolatilityInference(tb.BaseEdgeQLCompilerTest):
         DELETE
             Card
 % OK %
-        Volatile
+        Modifying
         """
 
     def test_edgeql_ir_volatility_inference_09(self):
@@ -155,4 +155,39 @@ class TestEdgeQLVolatilityInference(tb.BaseEdgeQLCompilerTest):
         with X := random() select X
 % OK %
         Volatile
+        """
+
+    def test_edgeql_ir_volatility_inference_12(self):
+        """
+        select AliasOne
+% OK %
+        Immutable
+        """
+
+    def test_edgeql_ir_volatility_inference_13(self):
+        """
+        select global GlobalOne
+% OK %
+        Stable
+        """
+
+    def test_edgeql_ir_volatility_inference_14(self):
+        """
+        select AirCard
+% OK %
+        Stable
+        """
+
+    def test_edgeql_ir_volatility_inference_15(self):
+        """
+        select global HighestCost
+% OK %
+        Stable
+        """
+
+    def test_edgeql_ir_volatility_inference_16(self):
+        """
+        select global CardsWithText
+% OK %
+        Stable
         """

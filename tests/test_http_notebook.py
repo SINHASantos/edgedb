@@ -17,7 +17,7 @@
 #
 
 
-from typing import *
+from typing import List
 
 import json
 import urllib
@@ -30,8 +30,10 @@ class TestHttpNotebook(tb.BaseHttpExtensionTest):
     # EdgeQL/HTTP queries cannot run in a transaction
     TRANSACTION_ISOLATION = False
 
+    EXTENSIONS = ['notebook']
+
     @classmethod
-    def get_extension_name(cls):
+    def get_extension_path(cls):
         return 'notebook'
 
     def run_queries(self, queries: List[str]):
@@ -42,6 +44,7 @@ class TestHttpNotebook(tb.BaseHttpExtensionTest):
         req = urllib.request.Request(
             self.http_addr, method='POST')  # type: ignore
         req.add_header('Content-Type', 'application/json')
+        req.add_header('Authorization', self.make_auth_header())
         response = urllib.request.urlopen(
             req, json.dumps(req_data).encode(), context=self.tls_context
         )
@@ -57,7 +60,7 @@ class TestHttpNotebook(tb.BaseHttpExtensionTest):
             'SELECT "AAAA"',
         ])
 
-        self.assertEqual(
+        self.assert_data_shape(
             results,
             {
                 'kind': 'results',
@@ -65,19 +68,19 @@ class TestHttpNotebook(tb.BaseHttpExtensionTest):
                     {
                         'kind': 'data',
                         'data': [
-                            'AAAAAAAAAAAAAAAAAAABBQ==',
-                            'AgAAAAAAAAAAAAAAAAAAAQU=',
+                            str,
+                            str,
                             'RAAAABIAAQAAAAgAAAAAAAAAAQ==',
-                            'U0VMRUNU'
+                            str,
                         ]
                     },
                     {
                         'kind': 'data',
                         'data': [
-                            'AAAAAAAAAAAAAAAAAAABAQ==',
-                            'AgAAAAAAAAAAAAAAAAAAAQE=',
+                            str,
+                            str,
                             'RAAAAA4AAQAAAARBQUFB',
-                            'U0VMRUNU'
+                            str,
                         ]
                     },
                 ]
@@ -91,7 +94,7 @@ class TestHttpNotebook(tb.BaseHttpExtensionTest):
             'SELECT 55',
         ])
 
-        self.assertEqual(
+        self.assert_data_shape(
             results,
             {
                 'kind': 'results',
@@ -99,10 +102,10 @@ class TestHttpNotebook(tb.BaseHttpExtensionTest):
                     {
                         'kind': 'data',
                         'data': [
-                            'AAAAAAAAAAAAAAAAAAABBQ==',
-                            'AgAAAAAAAAAAAAAAAAAAAQU=',
+                            str,
+                            str,
                             'RAAAABIAAQAAAAgAAAAAAAAAAQ==',
-                            'U0VMRUNU'
+                            str,
                         ]
                     },
                     {
@@ -161,7 +164,11 @@ class TestHttpNotebook(tb.BaseHttpExtensionTest):
     def test_http_notebook_04(self):
         req = urllib.request.Request(self.http_addr + '/status',
                                      method='GET')
-        response = urllib.request.urlopen(req, context=self.tls_context)
+        req.add_header('Authorization', self.make_auth_header())
+        response = urllib.request.urlopen(
+            req,
+            context=self.tls_context,
+        )
         resp_data = json.loads(response.read())
         self.assertEqual(resp_data, {'kind': 'status', 'status': 'OK'})
 
@@ -172,7 +179,7 @@ class TestHttpNotebook(tb.BaseHttpExtensionTest):
             'SELECT 2'
         ])
 
-        self.assertEqual(
+        self.assert_data_shape(
             results,
             {
                 'kind': 'results',
@@ -180,16 +187,18 @@ class TestHttpNotebook(tb.BaseHttpExtensionTest):
                     {
                         'kind': 'data',
                         'data': [
-                            'AAAAAAAAAAAAAAAAAAABBQ==',
-                            'AgAAAAAAAAAAAAAAAAAAAQU=',
+                            str,
+                            str,
                             'RAAAABIAAQAAAAgAAAAAAAAAAQ==',
-                            'U0VMRUNU'
+                            str,
                         ]
                     },
                     {
                         'kind': 'error',
                         'error': [
-                            'Error', 'array index 2 is out of bounds', {}
+                            'InvalidValueError',
+                            'array index 2 is out of bounds',
+                            {},
                         ]
                     }
                 ]
@@ -222,15 +231,15 @@ class TestHttpNotebook(tb.BaseHttpExtensionTest):
 
         self.assertNotIn('error', results['results'][0])
 
-        self.assertEqual(
+        self.assert_data_shape(
             results['results'][1],
             {
                 'kind': 'data',
                 'data': [
-                    'AAAAAAAAAAAAAAAAAAABBQ==',
-                    'AgAAAAAAAAAAAAAAAAAAAQU=',
+                    str,
+                    str,
                     'RAAAABIAAQAAAAgAAAAAAAAAAQ==',
-                    'U0VMRUNU'
+                    str,
                 ]
             },
         )
@@ -245,15 +254,15 @@ class TestHttpNotebook(tb.BaseHttpExtensionTest):
         self.assertNotIn('error', results['results'][0])
         self.assertNotIn('error', results['results'][1])
 
-        self.assertEqual(
+        self.assert_data_shape(
             results['results'][2],
             {
                 'kind': 'data',
                 'data': [
-                    'AAAAAAAAAAAAAAAAAAABBQ==',
-                    'AgAAAAAAAAAAAAAAAAAAAQU=',
+                    str,
+                    str,
                     'RAAAABIAAQAAAAgAAAAAAAAAAQ==',
-                    'U0VMRUNU'
+                    str,
                 ]
             },
         )
@@ -264,3 +273,63 @@ class TestHttpNotebook(tb.BaseHttpExtensionTest):
             'create global foo -> int64',
         ])
         self.assertNotIn('error', results['results'][0])
+
+    def test_http_notebook_09(self):
+        results = self.run_queries([
+            '''
+            select <duration>'15m' < <duration>'1h';
+            ''',
+        ])
+
+        self.assertNotIn('error', results['results'][0])
+
+    async def test_http_notebook_cors(self):
+        req = urllib.request.Request(self.http_addr, method='OPTIONS')
+        req.add_header('Origin', 'https://example.edgedb.com')
+        response = urllib.request.urlopen(
+            req, context=self.tls_context
+        )
+
+        self.assertNotIn('Access-Control-Allow-Origin', response.headers)
+
+        await self.con.execute(
+            'configure current database '
+            'set cors_allow_origins := {"https://example.edgedb.com"}')
+        await self._wait_for_db_config('cors_allow_origins')
+
+        req = urllib.request.Request(self.http_addr, method='OPTIONS')
+        req.add_header('Origin', 'https://example.edgedb.com')
+        response = urllib.request.urlopen(
+            req, context=self.tls_context
+        )
+
+        headers = response.headers
+
+        self.assertIn('Access-Control-Allow-Origin', headers)
+        self.assertEqual(
+            headers['Access-Control-Allow-Origin'],
+            'https://example.edgedb.com'
+        )
+        self.assertIn('POST', headers['Access-Control-Allow-Methods'])
+        self.assertIn('Authorization', headers['Access-Control-Allow-Headers'])
+        self.assertIn(
+            'EdgeDB-Protocol-Version',
+            headers['Access-Control-Expose-Headers']
+        )
+
+        req = urllib.request.Request(self.http_addr, method='POST')
+        req.add_header('Content-Type', 'application/json')
+        req.add_header('Authorization', self.make_auth_header())
+        req.add_header('Origin', 'https://example.edgedb.com')
+        response = urllib.request.urlopen(
+            req,
+            json.dumps({'queries': ['select 123']}).encode(),
+            context=self.tls_context
+        )
+        headers = response.headers
+        self.assertIn('Access-Control-Allow-Origin', headers)
+        self.assertIn('Access-Control-Expose-Headers', headers)
+        self.assertIn(
+            'EdgeDB-Protocol-Version',
+            headers['Access-Control-Expose-Headers']
+        )

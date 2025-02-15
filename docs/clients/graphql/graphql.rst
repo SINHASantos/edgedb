@@ -4,33 +4,33 @@
 Basics
 ======
 
-For the purposes of this section we will consider the ``default`` 
-module containing the following schema:
+For the purposes of this section, we will consider a ``default`` module
+containing the following schema:
 
 .. code-block:: sdl
 
     type Author {
-        property name -> str;
+        name: str;
     }
 
     type Book {
         # to make the examples simpler only the title is
         # a required property
-        required property title -> str;
-        property synopsis -> str;
-        link author -> Author;
-        property isbn -> str {
+        required title: str;
+        synopsis: str;
+        author: Author;
+        isbn: str {
             constraint max_len_value(10);
         }
     }
 
-From the schema above EdgeDB will expose to GraphQL:
+From the schema above, EdgeDB will expose to GraphQL:
 
-* Object types: ``Author`` and ``Book``
+* object types ``Author`` and ``Book``
 * scalars ``String`` and ``ID``
 
-In addition to this the ``Query`` will have 2 fields: ``Author``, and
-``Book`` to query these types respectively.
+In addition to this, the ``Query`` will have two fields — ``Author``, and
+``Book`` — to query these types respectively.
 
 
 Queries
@@ -72,7 +72,7 @@ Filtering
 
 Filtering the retrieved data is done by specifying a ``filter``
 argument. The ``filter`` argument is customized to each specific type
-based on the available fields. In case of the sample schema, here are 
+based on the available fields. In case of the sample schema, here are
 the specifications for available filter arguments for querying ``Book``:
 
 .. code-block:: graphql-schema
@@ -190,8 +190,7 @@ example:
     +---------------------------------+---------------------------------+
 
 
-It is possible to search for books that don't specify the author for
-some reason:
+It is possible to search for books that don't specify the author:
 
 .. table::
     :class: codeblocks
@@ -224,7 +223,7 @@ Ordering
 Ordering the retrieved data is done by specifying an ``order``
 argument. The ``order`` argument is customized to each specific type
 based on the available fields, much like the ``filter``. In case of
-the sample schema, here are the specifications for the available 
+the sample schema, here are the specifications for the available
 filter arguments:
 
 .. code-block:: graphql-schema
@@ -293,7 +292,7 @@ Paginating
 Paginating the retrieved data is done by providing one or more of the
 following arguments: ``first``, ``last``, ``before``, and ``after``.
 The pagination works in a similar way to Relay Connections. In case of
-the sample schema, here are the specifications for the available 
+the sample schema, here are the specifications for the available
 filter arguments:
 
 .. code-block:: graphql-schema

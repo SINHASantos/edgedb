@@ -42,12 +42,18 @@ Generic
     * - :eql:func:`find`
       - :eql:func-desc:`find`
 
+.. note::
+
+    In EdgeQL, any value can be compared to another as long as their types
+    are compatible.
+
+
 -----------
 
 
 .. eql:operator:: eq: anytype = anytype -> bool
 
-    Compare two values for equality.
+    Compares two values for equality.
 
     .. code-block:: edgeql-repl
 
@@ -64,13 +70,26 @@ Generic
         db> select 'hello' = 'world';
         {false}
 
+    .. warning::
+
+        When either operand in an equality comparison is an empty set, the
+        result will not be a ``bool`` but instead an empty set.
+
+        .. code-block:: edgeql-repl
+
+            db> select true = <bool>{};
+            {}
+
+        If one of the operands in an equality comparison could be an empty set,
+        you may want to use the :eql:op:`coalescing equality <coaleq>` operator
+        (``?=``) instead.
 
 ----------
 
 
 .. eql:operator:: neq: anytype != anytype -> bool
 
-    Compare two values for inequality.
+    Compares two values for inequality.
 
     .. code-block:: edgeql-repl
 
@@ -88,16 +107,30 @@ Generic
         db> select 'hello' != 'world';
         {true}
 
+    .. warning::
+
+        When either operand in an inequality comparison is an empty set, the
+        result will not be a ``bool`` but instead an empty set.
+
+        .. code-block:: edgeql-repl
+
+            db> select true != <bool>{};
+            {}
+
+        If one of the operands in an inequality comparison could be an empty
+        set, you may want to use the :eql:op:`coalescing inequality <coaleq>`
+        operator (``?!=``) instead.
+
 
 ----------
 
 
 .. eql:operator:: coaleq: optional anytype ?= optional anytype -> bool
 
-    Compare two (potentially empty) values for equality.
+    Compares two (potentially empty) values for equality.
 
-    Works the same as regular :eql:op:`=<eq>`, but also allows
-    comparing ``{}``.  Two ``{}`` are considered equal.
+    This works the same as a regular :eql:op:`=<eq>` operator, but also allows
+    comparing an empty ``{}`` set.  Two empty sets are considered equal.
 
     .. code-block:: edgeql-repl
 
@@ -114,10 +147,10 @@ Generic
 
 .. eql:operator:: coalneq: optional anytype ?!= optional anytype -> bool
 
-    Compare two (potentially empty) values for inequality.
+    Compares two (potentially empty) values for inequality.
 
-    Works the same as regular :eql:op:`\!= <neq>`, but also allows
-    comparing ``{}``.  Two ``{}`` are considered equal.
+    This works the same as a regular :eql:op:`=<eq>` operator, but also allows
+    comparing an empty ``{}`` set.  Two empty sets are considered equal.
 
     .. code-block:: edgeql-repl
 
@@ -136,9 +169,8 @@ Generic
 
     Less than operator.
 
-    Return ``true`` if the value of the left expression is less than
-    the value of the right expression. In EdgeQL any values can be
-    compared to each other as long as they are of the same type:
+    The operator returns ``true`` if the value of the left expression is less
+    than the value of the right expression:
 
     .. code-block:: edgeql-repl
 
@@ -151,6 +183,26 @@ Generic
         db> select (1, 'hello') < (1, 'world');
         {true}
 
+    .. warning::
+
+        When either operand in a comparison is an empty set, the result will
+        not be a ``bool`` but instead an empty set.
+
+        .. code-block:: edgeql-repl
+
+            db> select 1 < <int16>{};
+            {}
+
+        If one of the operands in a comparison could be an empty set, you may
+        want to coalesce the result of the comparison with ``false`` to ensure
+        your result is boolean.
+
+        .. code-block:: edgeql-repl
+
+            db> select (1 < <int16>{}) ?? false;
+            {false}
+
+
 ----------
 
 
@@ -158,9 +210,8 @@ Generic
 
     Greater than operator.
 
-    Return ``true`` if the value of the left expression is greater
-    than the value of the right expression. In EdgeQL any values can be
-    compared to each other as long as they are of the same type:
+    The operator returns ``true`` if the value of the left expression is
+    greater than the value of the right expression:
 
     .. code-block:: edgeql-repl
 
@@ -173,6 +224,25 @@ Generic
         db> select (1, 'hello') > (1, 'world');
         {false}
 
+    .. warning::
+
+        When either operand in a comparison is an empty set, the result will
+        not be a ``bool`` but instead an empty set.
+
+        .. code-block:: edgeql-repl
+
+            db> select 1 > <int16>{};
+            {}
+
+        If one of the operands in a comparison could be an empty set, you may
+        want to coalesce the result of the comparison with ``false`` to ensure
+        your result is boolean.
+
+        .. code-block:: edgeql-repl
+
+            db> select (1 > <int16>{}) ?? false;
+            {false}
+
 
 ----------
 
@@ -181,10 +251,8 @@ Generic
 
     Less or equal operator.
 
-    Return ``true`` if the value of the left expression is less than
-    or equal to the value of the right expression. In EdgeQL any
-    values can be compared to each other as long as they are of the
-    same type:
+    The operator returns ``true`` if the value of the left expression is less
+    than or equal to the value of the right expression:
 
     .. code-block:: edgeql-repl
 
@@ -199,6 +267,25 @@ Generic
         db> select (1, 'hello') <= (1, 'world');
         {true}
 
+    .. warning::
+
+        When either operand in a comparison is an empty set, the result will
+        not be a ``bool`` but instead an empty set.
+
+        .. code-block:: edgeql-repl
+
+            db> select 1 <= <int16>{};
+            {}
+
+        If one of the operands in a comparison could be an empty set, you may
+        want to coalesce the result of the comparison with ``false`` to ensure
+        your result is boolean.
+
+        .. code-block:: edgeql-repl
+
+            db> select (1 <= <int16>{}) ?? false;
+            {false}
+
 
 ----------
 
@@ -207,10 +294,8 @@ Generic
 
     Greater or equal operator.
 
-    Return ``true`` if the value of the left expression is greater
-    than or equal to the value of the right expression. In EdgeQL any
-    values can be compared to each other as long as they are of the
-    same type:
+    The operator returns ``true`` if the value of the left expression is
+    greater than or equal to the value of the right expression:
 
     .. code-block:: edgeql-repl
 
@@ -225,6 +310,25 @@ Generic
         db> select (1, 'hello') >= (1, 'world');
         {false}
 
+    .. warning::
+
+        When either operand in a comparison is an empty set, the result will
+        not be a ``bool`` but instead an empty set.
+
+        .. code-block:: edgeql-repl
+
+            db> select 1 >= <int16>{};
+            {}
+
+        If one of the operands in a comparison could be an empty set, you may
+        want to coalesce the result of the comparison with ``false`` to ensure
+        your result is boolean.
+
+        .. code-block:: edgeql-repl
+
+            db> select (1 >= <int16>{}) ?? false;
+            {false}
+
 
 ----------
 
@@ -235,12 +339,10 @@ Generic
 
     :index: length count array
 
-    A polymorphic function to calculate a "length" of its first
-    argument.
+    Returns the number of elements of a given value.
 
-    Return the number of characters in a :eql:type:`str`, or the
-    number of bytes in :eql:type:`bytes`, or the number of elements in
-    an :eql:type:`array`.
+    This function works with the :eql:type:`str`, :eql:type:`bytes` and
+    :eql:type:`array` types:
 
     .. code-block:: edgeql-repl
 
@@ -267,14 +369,23 @@ Generic
                   std::contains(haystack: range<anypoint>, \
                                 needle: anypoint) \
                   -> std::bool
+                  std::contains(haystack: multirange<anypoint>, \
+                                needle: multirange<anypoint>) \
+                  -> std::bool
+                  std::contains(haystack: multirange<anypoint>, \
+                                needle: range<anypoint>) \
+                  -> std::bool
+                  std::contains(haystack: multirange<anypoint>, \
+                                needle: anypoint) \
+                  -> std::bool
 
     :index: find strpos strstr position array
 
-    A polymorphic function to test if the *haystack* contains the *needle*.
+    Returns true if the given sub-value exists within the given value.
 
-    When the *haystack* is :eql:type:`str` or :eql:type:`bytes`,
-    return ``true`` if *needle* is contained as a subsequence in it
-    and ``false`` otherwise.
+    When *haystack* is a :eql:type:`str` or a :eql:type:`bytes` value,
+    this function will return ``true`` if it contains *needle* as a
+    subsequence within it or ``false`` otherwise:
 
     .. code-block:: edgeql-repl
 
@@ -284,24 +395,25 @@ Generic
         db> select contains(b'qwerty', b'42');
         {false}
 
-    When the *haystack* is an :eql:type:`array`, return ``true`` if
-    the array contains the specified element and ``false`` otherwise.
+    When *haystack* is an :eql:type:`array`, the function will return
+    ``true`` if the array contains the element specified as *needle* or
+    ``false`` otherwise:
 
     .. code-block:: edgeql-repl
 
         db> select contains([2, 5, 7, 2, 100], 2);
         {true}
 
-    When the *haystack* is a :ref:`range <ref_std_range>`, return ``true`` if
-    it contains either the specified sub-range or element and ``false``
-    otherwise.
+    When *haystack* is a :ref:`range <ref_std_range>`, the function will
+    return ``true`` if it contains either the specified sub-range or element.
+    The function will return ``false`` otherwise.
 
     .. code-block:: edgeql-repl
 
-        db> select contains(range(1, 10), range(2,5));
+        db> select contains(range(1, 10), range(2, 5));
         {true}
 
-        db> select contains(range(1, 10), range(2,15));
+        db> select contains(range(1, 10), range(2, 15));
         {false}
 
         db> select contains(range(1, 10), 2);
@@ -309,6 +421,54 @@ Generic
 
         db> select contains(range(1, 10), 10);
         {false}
+
+    When *haystack* is a :ref:`multirange <ref_std_multirange>`, the function
+    will return ``true`` if it contains either the specified multirange,
+    sub-range or element. The function will return ``false`` otherwise.
+
+    .. code-block:: edgeql-repl
+
+        db> select contains(
+        ...   multirange([
+        ...     range(1, 4), range(7),
+        ...   ]),
+        ...   multirange([
+        ...     range(1, 2), range(8, 10),
+        ...   ]),
+        ... );
+        {true}
+
+        db> select contains(
+        ...   multirange([
+        ...     range(1, 4), range(8, 10),
+        ...   ]),
+        ...   range(8),
+        ... );
+        {false}
+
+        db> select contains(
+        ...   multirange([
+        ...     range(1, 4), range(8, 10),
+        ...   ]),
+        ...   3,
+        ... );
+        {true}
+
+    When *haystack* is :ref:`JSON <ref_std_json>`, the function will return
+    ``true`` if the json data contains the element specified as *needle* or
+    ``false`` otherwise:
+
+    .. code-block:: edgeql-repl
+
+        db> with haystack := to_json('{
+        ...   "city": "Baerlon",
+        ...   "city": "Caemlyn"
+        ... }'),
+        ... needle := to_json('{
+        ...   "city": "Caemlyn"
+        ... }'),
+        ... select contains(haystack, needle);
+        {true}
 
 
 ----------
@@ -321,16 +481,16 @@ Generic
 
     :index: find strpos strstr position array
 
-    A polymorphic function to find index of an element in a sequence.
+    Returns the index of a given sub-value in a given value.
 
-    When the *haystack* is :eql:type:`str` or :eql:type:`bytes`,
-    return the index of the first occurrence of *needle* in it.
+    When *haystack* is a :eql:type:`str` or a :eql:type:`bytes` value, the
+    function will return the index of the first occurrence of *needle* in it.
 
-    When the *haystack* is an :eql:type:`array`, return the index of
-    the first occurrence of the specific *needle* element. For
-    :eql:type:`array` inputs it is also possible to provide an
-    optional *from_pos* argument to specify the position from
-    which to start the search.
+    When *haystack* is an :eql:type:`array`, this will return the index of the
+    the first occurrence of the element passed as *needle*. For
+    :eql:type:`array` inputs it is also possible to provide an optional
+    *from_pos* argument to specify the position from which to start the
+    search.
 
     If the *needle* is not found, return ``-1``.
 
@@ -347,5 +507,3 @@ Generic
 
         db> select find([2, 5, 7, 2, 100], 2, 1);
         {3}
-
-

@@ -17,9 +17,13 @@
 #
 
 
+import base64
 import decimal
 import json
+import math
 import os.path
+import random
+import uuid
 
 import edgedb
 
@@ -28,6 +32,8 @@ from edb.tools import test
 
 
 class TestEdgeQLFunctions(tb.QueryTestCase):
+    NO_FACTOR = True
+
     SCHEMA = os.path.join(os.path.dirname(__file__), 'schemas',
                           'issues.esdl')
 
@@ -256,6 +262,7 @@ class TestEdgeQLFunctions(tb.QueryTestCase):
                     ORDER BY Issue.number);
             """)
 
+    @tb.needs_factoring
     async def test_edgeql_functions_array_agg_11(self):
         await self.assert_query_result(
             r"""
@@ -312,6 +319,7 @@ class TestEdgeQLFunctions(tb.QueryTestCase):
                 SELECT array_agg(array_agg(User.name));
             ''')
 
+    @tb.needs_factoring
     async def test_edgeql_functions_array_agg_15(self):
         await self.assert_query_result(
             r'''
@@ -757,6 +765,7 @@ class TestEdgeQLFunctions(tb.QueryTestCase):
             [2],
         )
 
+    @tb.needs_factoring
     async def test_edgeql_functions_enumerate_03(self):
         await self.assert_query_result(
             r'''SELECT enumerate((SELECT User.name ORDER BY User.name));''',
@@ -807,6 +816,7 @@ class TestEdgeQLFunctions(tb.QueryTestCase):
             [],
         )
 
+    @tb.needs_factoring
     async def test_edgeql_functions_enumerate_07(self):
         # Check that enumerate of a function works when the tuple type
         # appears in the schema (like tuple<int64, int64> does)
@@ -839,6 +849,23 @@ class TestEdgeQLFunctions(tb.QueryTestCase):
                 {"te": [[0, 3000]]},
                 {"te": [[0, 3000]]}
             ])
+        )
+
+    async def test_edgeql_functions_enumerate_09(self):
+        await self.assert_query_result(
+            'SELECT enumerate(sum({1,2,3}))',
+            [[0, 6]]
+        )
+        await self.assert_query_result(
+            'SELECT enumerate(count(Issue))',
+            [[0, 4]]
+        )
+        await self.assert_query_result(
+            '''
+            WITH x := (SELECT enumerate(array_agg((select User)))),
+            SELECT (x.0, array_unpack(x.1).name)
+            ''',
+            [[0, 'Elvis'], [0, 'Yury']]
         )
 
     async def test_edgeql_functions_array_get_01(self):
@@ -993,6 +1020,238 @@ class TestEdgeQLFunctions(tb.QueryTestCase):
             [2],
         )
 
+    async def test_edgeql_functions_array_set_01(self):
+        # Positive indexes
+        await self.assert_query_result(
+            r'''SELECT array_set([1, 2, 3, 4], 0, 9);''',
+            [[9, 2, 3, 4]],
+        )
+
+        await self.assert_query_result(
+            r'''SELECT array_set([1, 2, 3, 4], 1, 9);''',
+            [[1, 9, 3, 4]],
+        )
+
+        await self.assert_query_result(
+            r'''SELECT array_set([1, 2, 3, 4], 2, 9);''',
+            [[1, 2, 9, 4]],
+        )
+
+        await self.assert_query_result(
+            r'''SELECT array_set([1, 2, 3, 4], 3, 9);''',
+            [[1, 2, 3, 9]],
+        )
+
+        # Negative indexes
+        await self.assert_query_result(
+            r'''SELECT array_set([1, 2, 3, 4], -1, 9);''',
+            [[1, 2, 3, 9]],
+        )
+
+        await self.assert_query_result(
+            r'''SELECT array_set([1, 2, 3, 4], -2, 9);''',
+            [[1, 2, 9, 4]],
+        )
+
+        await self.assert_query_result(
+            r'''SELECT array_set([1, 2, 3, 4], -3, 9);''',
+            [[1, 9, 3, 4]],
+        )
+
+        await self.assert_query_result(
+            r'''SELECT array_set([1, 2, 3, 4], -4, 9);''',
+            [[9, 2, 3, 4]],
+        )
+
+        # Size 1 array
+        await self.assert_query_result(
+            r'''SELECT array_set([1], 0, 9);''',
+            [[9]],
+        )
+
+        await self.assert_query_result(
+            r'''SELECT array_set([1], -1, 9);''',
+            [[9]],
+        )
+
+    async def test_edgeql_functions_array_set_02(self):
+        with self.assertRaisesRegex(
+            edgedb.InvalidValueError,
+            'array index 4 is out of bounds'
+        ):
+            await self.con.query(
+                r'''SELECT array_set([1, 2, 3, 4], 4, 9);''',
+            )
+
+    async def test_edgeql_functions_array_set_03(self):
+        with self.assertRaisesRegex(
+            edgedb.InvalidValueError,
+            'array index -5 is out of bounds'
+        ):
+            await self.con.query(
+                r'''SELECT array_set([1, 2, 3, 4], -5, 9);''',
+            )
+
+    async def test_edgeql_functions_array_set_04(self):
+        with self.assertRaisesRegex(
+            edgedb.InvalidValueError,
+            'array index 1 is out of bounds'
+        ):
+            await self.con.query(
+                r'''SELECT array_set([1], 1, 9);''',
+            )
+
+    async def test_edgeql_functions_array_set_05(self):
+        with self.assertRaisesRegex(
+            edgedb.InvalidValueError,
+            'array index -2 is out of bounds'
+        ):
+            await self.con.query(
+                r'''SELECT array_set([1], -2, 9);''',
+            )
+
+    async def test_edgeql_functions_array_set_06(self):
+        with self.assertRaisesRegex(
+            edgedb.InvalidValueError,
+            'array index 0 is out of bounds'
+        ):
+            await self.con.query(
+                r'''SELECT array_set(<array<int64>>[], 0, 9);''',
+            )
+
+    async def test_edgeql_functions_array_set_07(self):
+        with self.assertRaisesRegex(
+            edgedb.InvalidValueError,
+            'array index -1 is out of bounds'
+        ):
+            await self.con.query(
+                r'''SELECT array_set(<array<int64>>[], -1, 9);''',
+            )
+
+    async def test_edgeql_functions_array_insert_01(self):
+        # Positive indexes
+        await self.assert_query_result(
+            r'''SELECT array_insert([1, 2, 3, 4], 0, 9);''',
+            [[9, 1, 2, 3, 4]],
+        )
+
+        await self.assert_query_result(
+            r'''SELECT array_insert([1, 2, 3, 4], 1, 9);''',
+            [[1, 9, 2, 3, 4]],
+        )
+
+        await self.assert_query_result(
+            r'''SELECT array_insert([1, 2, 3, 4], 2, 9);''',
+            [[1, 2, 9, 3, 4]],
+        )
+
+        await self.assert_query_result(
+            r'''SELECT array_insert([1, 2, 3, 4], 3, 9);''',
+            [[1, 2, 3, 9, 4]],
+        )
+
+        await self.assert_query_result(
+            r'''SELECT array_insert([1, 2, 3, 4], 4, 9);''',
+            [[1, 2, 3, 4, 9]],
+        )
+
+        # Negative indexes
+        await self.assert_query_result(
+            r'''SELECT array_insert([1, 2, 3, 4], -1, 9);''',
+            [[1, 2, 3, 9, 4]],
+        )
+
+        await self.assert_query_result(
+            r'''SELECT array_insert([1, 2, 3, 4], -2, 9);''',
+            [[1, 2, 9, 3, 4]],
+        )
+
+        await self.assert_query_result(
+            r'''SELECT array_insert([1, 2, 3, 4], -3, 9);''',
+            [[1, 9, 2, 3, 4]],
+        )
+
+        await self.assert_query_result(
+            r'''SELECT array_insert([1, 2, 3, 4], -4, 9);''',
+            [[9, 1, 2, 3, 4]],
+        )
+
+        # Size 1 array
+        await self.assert_query_result(
+            r'''SELECT array_insert([1], 0, 9);''',
+            [[9, 1]],
+        )
+
+        await self.assert_query_result(
+            r'''SELECT array_insert([1], 1, 9);''',
+            [[1, 9]],
+        )
+
+        await self.assert_query_result(
+            r'''SELECT array_insert([1], -1, 9);''',
+            [[9, 1]],
+        )
+
+        # Size 0 array
+        await self.assert_query_result(
+            r'''SELECT array_insert(<array<int64>>[], 0, 9);''',
+            [[9]],
+        )
+
+    async def test_edgeql_functions_array_insert_02(self):
+        with self.assertRaisesRegex(
+            edgedb.InvalidValueError,
+            'array index 5 is out of bounds'
+        ):
+            await self.con.query(
+                r'''SELECT array_insert([1, 2, 3, 4], 5, 9);''',
+            )
+
+    async def test_edgeql_functions_array_insert_03(self):
+        with self.assertRaisesRegex(
+            edgedb.InvalidValueError,
+            'array index -5 is out of bounds'
+        ):
+            await self.con.query(
+                r'''SELECT array_insert([1, 2, 3, 4], -5, 9);''',
+            )
+
+    async def test_edgeql_functions_array_insert_04(self):
+        with self.assertRaisesRegex(
+            edgedb.InvalidValueError,
+            'array index 2 is out of bounds'
+        ):
+            await self.con.query(
+                r'''SELECT array_insert([1], 2, 9);''',
+            )
+
+    async def test_edgeql_functions_array_insert_05(self):
+        with self.assertRaisesRegex(
+            edgedb.InvalidValueError,
+            'array index -2 is out of bounds'
+        ):
+            await self.con.query(
+                r'''SELECT array_insert([1], -2, 9);''',
+            )
+
+    async def test_edgeql_functions_array_insert_06(self):
+        with self.assertRaisesRegex(
+            edgedb.InvalidValueError,
+            'array index 1 is out of bounds'
+        ):
+            await self.con.query(
+                r'''SELECT array_insert(<array<int64>>[], 1, 9);''',
+            )
+
+    async def test_edgeql_functions_array_insert_07(self):
+        with self.assertRaisesRegex(
+            edgedb.InvalidValueError,
+            'array index -1 is out of bounds'
+        ):
+            await self.con.query(
+                r'''SELECT array_insert(<array<int64>>[], -1, 9);''',
+            )
+
     @test.xerror(
         "Known collation issue on Heroku Postgres",
         unless=os.getenv("EDGEDB_TEST_BACKEND_VENDOR") != "heroku-postgres"
@@ -1049,6 +1308,16 @@ class TestEdgeQLFunctions(tb.QueryTestCase):
                 ORDER BY x;
             ''',
             [['Ab'], ['a']],
+        )
+
+        await self.assert_query_result(
+            r'''
+            select re_match(
+                r"(foo)?bar",
+                'barbar',
+            )
+            ''',
+            [[""]],
         )
 
     async def test_edgeql_functions_re_match_02(self):
@@ -1132,17 +1401,14 @@ class TestEdgeQLFunctions(tb.QueryTestCase):
             [['Ab'], ['a'], ['a'], ['aB'], ['ab']],
         )
 
-    async def test_edgeql_functions_re_match_all_02(self):
         await self.assert_query_result(
             r'''
-                WITH
-                    MODULE schema,
-                    C2 := ScalarType
-                SELECT
-                    count(re_match_all('(\\w+)', ScalarType.name)) =
-                    2 * count(C2);
+            select re_match_all(
+                r"(foo)?bar",
+                'barbar',
+            )
             ''',
-            [True],
+            [[""], [""]],
         )
 
     async def test_edgeql_functions_re_test_01(self):
@@ -2348,7 +2614,7 @@ class TestEdgeQLFunctions(tb.QueryTestCase):
             r'''
                 SELECT <str>cal::to_local_datetime(
                     <datetime>'2018-05-07T20:01:22.306916+00:00',
-                    'US/Pacific');
+                    'America/Los_Angeles');
             ''',
             ['2018-05-07T13:01:22.306916'],
         )
@@ -2467,7 +2733,7 @@ class TestEdgeQLFunctions(tb.QueryTestCase):
             r'''
                 SELECT <str>cal::to_local_date(
                     <datetime>'2018-05-07T20:01:22.306916+00:00',
-                    'US/Pacific');
+                    'America/Los_Angeles');
             ''',
             ['2018-05-07'],
         )
@@ -2538,7 +2804,7 @@ class TestEdgeQLFunctions(tb.QueryTestCase):
             r'''
                 SELECT <str>cal::to_local_time(
                     <datetime>'2018-05-07T20:01:22.306916+00:00',
-                    'US/Pacific');
+                    'America/Los_Angeles');
             ''',
             ['13:01:22.306916'],
         )
@@ -2563,6 +2829,54 @@ class TestEdgeQLFunctions(tb.QueryTestCase):
                 await self.con.query(r'''
                     SELECT
                         cal::to_local_datetime('00:00:00 0715');
+                ''')
+
+    async def test_edgeql_functions_to_local_time_05(self):
+        with self.assertRaisesRegex(
+            edgedb.InvalidValueError,
+            'std::cal::local_time field value out of range'
+        ):
+            async with self.con.transaction():
+                # including time zone
+                await self.con.query(r'''
+                    SELECT
+                        cal::to_local_time('24:00:00');
+                ''')
+
+    async def test_edgeql_functions_to_local_time_06(self):
+        with self.assertRaisesRegex(
+            edgedb.InvalidValueError,
+            'std::cal::local_time field value out of range'
+        ):
+            async with self.con.transaction():
+                # including time zone
+                await self.con.query(r'''
+                    SELECT
+                        cal::to_local_time(23, 59, 60);
+                ''')
+
+    async def test_edgeql_functions_to_local_time_07(self):
+        with self.assertRaisesRegex(
+            edgedb.InvalidValueError,
+            'std::cal::local_time field value out of range'
+        ):
+            async with self.con.transaction():
+                # including time zone
+                await self.con.query(r'''
+                    SELECT
+                        <cal::local_time>'23:59:59.999999999999';
+                ''')
+
+    async def test_edgeql_functions_to_local_time_08(self):
+        with self.assertRaisesRegex(
+            edgedb.InvalidValueError,
+            'std::cal::local_time field value out of range'
+        ):
+            async with self.con.transaction():
+                # including time zone
+                await self.con.query(r'''
+                    SELECT
+                        <cal::local_time><json>'24:00:00';
                 ''')
 
     async def test_edgeql_functions_to_duration_01(self):
@@ -2756,7 +3070,7 @@ class TestEdgeQLFunctions(tb.QueryTestCase):
         await self.assert_query_result(
             r'''
             WITH DT := <datetime>'2018-05-07 15:01:22.306916-05'
-            SELECT to_str(DT, 'FMDDth of FMMonth, YYYY');
+            SELECT to_str(DT, 'FMDDth "of" FMMonth, YYYY');
             ''',
             {'7th of May, 2018'},
         )
@@ -2839,7 +3153,7 @@ class TestEdgeQLFunctions(tb.QueryTestCase):
         await self.assert_query_result(
             r'''
             WITH DT := <cal::local_date>'2018-05-07'
-            SELECT to_str(DT, 'FMDDth of FMMonth, YYYY');
+            SELECT to_str(DT, 'FMDDth "of" FMMonth, YYYY');
             ''',
             {'7th of May, 2018'},
         )
@@ -3050,6 +3364,191 @@ class TestEdgeQLFunctions(tb.QueryTestCase):
                 await self.con.query(
                     r'''SELECT to_str(<cal::local_time>'15:01:22', '');''',)
 
+    async def test_edgeql_functions_string_bytes_conversion(self):
+        string = "Паляниця"
+
+        await self.assert_query_result(
+            r'''
+            WITH
+                input := <bytes>$input,
+                string := to_str(input),
+                binary := to_bytes(string),
+            SELECT
+                binary = input;
+            ''',
+            {True},
+            variables={
+                "input": string.encode("utf-8"),
+            },
+        )
+
+    async def test_edgeql_functions_string_bytes_conversion_error(self):
+        with self.assertRaisesRegex(
+            edgedb.InvalidValueError,
+            r'invalid byte sequence for encoding "UTF8": 0x00',
+        ):
+            await self.con.execute(
+                r'''
+                SELECT to_str(b'\x00')
+                ''',
+            )
+
+    async def test_edgeql_functions_int_bytes_conversion_01(self):
+        # Make sure we can convert the bytes to ints and back
+        for num in range(256):
+            byte = num.to_bytes()
+            for numbytes in [2, 4, 8]:
+                raw = byte * numbytes
+                typename = f'int{numbytes * 8}'
+                await self.assert_query_result(
+                    f'''
+                    WITH
+                        val_b := <{typename}>$val_b,
+                        val_l := <{typename}>$val_l,
+                        bin := <bytes>$bin,
+                    SELECT (
+                        val_b = to_{typename}(bin, Endian.Big),
+                        val_l = to_{typename}(bin, Endian.Little),
+                        bin = to_bytes(val_b, Endian.Big),
+                        bin = to_bytes(val_l, Endian.Little),
+                    )
+                    ''',
+                    {(True, True, True, True)},
+                    variables={
+                        "val_b": int.from_bytes(raw, 'big', signed=True),
+                        "val_l": int.from_bytes(raw, 'little', signed=True),
+                        "bin": raw,
+                    },
+                    msg=f'Failed to convert {raw!r} to int or vice versa'
+                )
+
+    async def test_edgeql_functions_int_bytes_conversion_02(self):
+        with self.assertRaisesRegex(
+            edgedb.InvalidValueError,
+            r'to_int16.*the argument must be exactly 2 bytes long',
+        ):
+            async with self.con.transaction():
+                await self.con.execute(
+                    r'''
+                    SELECT to_int16(b'\x01', Endian.Big)
+                    ''',
+                )
+
+        with self.assertRaisesRegex(
+            edgedb.InvalidValueError,
+            r'to_int16.*the argument must be exactly 2 bytes long',
+        ):
+            async with self.con.transaction():
+                await self.con.execute(
+                    r'''
+                    SELECT to_int16(
+                        to_bytes(<int32>123, Endian.Big),
+                        Endian.Big,
+                    )
+                    ''',
+                )
+
+    async def test_edgeql_functions_int_bytes_conversion_03(self):
+        with self.assertRaisesRegex(
+            edgedb.InvalidValueError,
+            r'to_int32.*the argument must be exactly 4 bytes long',
+        ):
+            async with self.con.transaction():
+                await self.con.execute(
+                    r'''
+                    SELECT to_int32(
+                        to_bytes(<int16>23, Endian.Big),
+                        Endian.Big,
+                    )
+                    ''',
+                )
+
+        with self.assertRaisesRegex(
+            edgedb.InvalidValueError,
+            r'to_int32.*the argument must be exactly 4 bytes long',
+        ):
+            async with self.con.transaction():
+                await self.con.execute(
+                    r'''
+                    SELECT to_int32(
+                        to_bytes(<int64>16908295, Endian.Big),
+                        Endian.Big,
+                    )
+                    ''',
+                )
+
+    async def test_edgeql_functions_int_bytes_conversion_04(self):
+        with self.assertRaisesRegex(
+            edgedb.InvalidValueError,
+            r'to_int64.*the argument must be exactly 8 bytes long',
+        ):
+            async with self.con.transaction():
+                await self.con.execute(
+                    r'''
+                    SELECT to_int64(
+                        to_bytes(<int16>23, Endian.Big),
+                        Endian.Big,
+                    )
+                    ''',
+                )
+
+        with self.assertRaisesRegex(
+            edgedb.InvalidValueError,
+            r'to_int64.*the argument must be exactly 8 bytes long',
+        ):
+            async with self.con.transaction():
+                await self.con.execute(
+                    r'''
+                    SELECT to_int64(
+                        b'\x00' ++ to_bytes(62620574343574340, Endian.Big),
+                        Endian.Big,
+                    )
+                    ''',
+                )
+
+    async def test_edgeql_functions_uuid_bytes_conversion_01(self):
+        uuid_val = uuid.uuid4()
+
+        await self.assert_query_result(
+            r'''
+            WITH
+                uuid_input := <uuid>$uuid_input,
+                bin_input := <bytes>$bin_input,
+            SELECT (
+                bin_input = to_bytes(uuid_input),
+                uuid_input = to_uuid(bin_input),
+            )
+            ''',
+            {(True, True)},
+            variables={
+                "uuid_input": uuid_val,
+                "bin_input": uuid_val.bytes,
+            },
+        )
+
+    async def test_edgeql_functions_uuid_bytes_conversion_02(self):
+        with self.assertRaisesRegex(
+            edgedb.InvalidValueError,
+            r'to_uuid.*the argument must be exactly 16 bytes long',
+        ):
+            async with self.con.transaction():
+                await self.con.execute(
+                    r'''
+                    SELECT to_uuid(to_bytes(uuid_generate_v4())[:10])
+                    ''',
+                )
+
+        with self.assertRaisesRegex(
+            edgedb.InvalidValueError,
+            r'to_uuid.*the argument must be exactly 16 bytes long',
+        ):
+            async with self.con.transaction():
+                await self.con.execute(
+                    r'''
+                    SELECT to_uuid(b'\xff\xff' ++ to_bytes(uuid_generate_v4()))
+                    ''',
+                )
+
     async def test_edgeql_functions_array_join_01(self):
         await self.assert_query_result(
             r'''SELECT array_join(['one', 'two', 'three'], ', ');''',
@@ -3064,6 +3563,43 @@ class TestEdgeQLFunctions(tb.QueryTestCase):
         await self.assert_query_result(
             r'''SELECT array_join(<array<str>>[], ', ');''',
             [''],
+        )
+
+    async def test_edgeql_functions_array_join_02(self):
+        await self.assert_query_result(
+            r'''SELECT array_join(['one', 'two', 'three'], {', ', '@!'});''',
+            {'one, two, three', 'one@!two@!three'},
+        )
+
+    async def test_edgeql_functions_array_join_03(self):
+        await self.assert_query_result(
+            r'''SELECT array_join([b'one', b'two', b'three'], b', ');''',
+            [base64.b64encode(b'one, two, three').decode()],
+            [b'one, two, three'],
+        )
+
+        await self.assert_query_result(
+            r'''SELECT array_join([b'one', b'two', b'three'], b'');''',
+            [base64.b64encode(b'onetwothree').decode()],
+            [b'onetwothree'],
+        )
+
+        await self.assert_query_result(
+            r'''SELECT array_join(<array<bytes>>[], b', ');''',
+            [base64.b64encode(b'').decode()],
+            [b''],
+        )
+
+    async def test_edgeql_functions_array_join_04(self):
+        await self.assert_query_result(
+            r'''
+            SELECT array_join([b'one', b'two', b'three'], {b', ', b'@!'});
+            ''',
+            {
+                base64.b64encode(b'one, two, three').decode(),
+                base64.b64encode(b'one@!two@!three').decode(),
+            },
+            {b'one, two, three', b'one@!two@!three'},
         )
 
     async def test_edgeql_functions_str_split_01(self):
@@ -4561,7 +5097,7 @@ class TestEdgeQLFunctions(tb.QueryTestCase):
     async def test_edgeql_functions_str_pad_03(self):
         await self.assert_query_result(
             r'''
-                WITH l := {0, 2, 10, 20}
+                FOR l IN {0, 2, 10, 20}
                 SELECT len(str_pad_start('Hello', l)) = l;
             ''',
             [True, True, True, True],
@@ -4569,7 +5105,7 @@ class TestEdgeQLFunctions(tb.QueryTestCase):
 
         await self.assert_query_result(
             r'''
-                WITH l := {0, 2, 10, 20}
+                FOR l IN {0, 2, 10, 20}
                 SELECT len(str_pad_end('Hello', l)) = l;
             ''',
             [True, True, True, True],
@@ -4965,6 +5501,47 @@ class TestEdgeQLFunctions(tb.QueryTestCase):
             r'''SELECT math::log(<decimal>{1, 10, 32}, base := <decimal>2);''',
             {0, 3.321928094887362, 5},
         )
+
+    async def test_edgeql_functions_math_log_02(self):
+        async with self.assertRaisesRegexTx(
+            edgedb.errors.InvalidValueError,
+            ''
+        ):
+            await self.con.query('SELECT math::ln(-1)')
+        async with self.assertRaisesRegexTx(
+            edgedb.errors.InvalidValueError,
+            ''
+        ):
+            await self.con.query('SELECT math::lg(-1)')
+        async with self.assertRaisesRegexTx(
+            edgedb.errors.InvalidValueError,
+            ''
+        ):
+            await self.con.query('SELECT math::log(-1, base := 10)')
+
+    async def test_edgeql_function_math_sqrt_01(self):
+        await self.assert_query_result(
+            r'''SELECT math::sqrt({1, 2, 25});''',
+            {1, 1.4142135623730951, 5},
+        )
+        with self.assertRaises(edgedb.errors.InvalidValueError):
+            await self.con.query('SELECT math::sqrt(-1)')
+
+    async def test_edgeql_function_math_sqrt_02(self):
+        await self.assert_query_result(
+            '''SELECT math::sqrt({1.0, 2.0, 25.0});''',
+            {1.0, 1.4142135623730951, 5.0},
+        )
+        with self.assertRaises(edgedb.errors.InvalidValueError):
+            await self.con.query('SELECT math::sqrt(-1.0)')
+
+    async def test_edgeql_function_math_sqrt_03(self):
+        await self.assert_query_result(
+            '''SELECT math::sqrt({1n, 2n, 25n});''',
+            {1, 1.4142135623730951, 5},
+        )
+        with self.assertRaises(edgedb.errors.InvalidValueError):
+            await self.con.query('SELECT math::sqrt(-1n)')
 
     async def test_edgeql_functions_math_mean_01(self):
         await self.assert_query_result(
@@ -5479,6 +6056,780 @@ class TestEdgeQLFunctions(tb.QueryTestCase):
                 SELECT math::var_pop(<int64>{});
             ''')
 
+    async def test_edgeql_functions_math_pi_01(self):
+        await self.assert_query_result(
+            r'''SELECT math::pi() IS float64;''',
+            {True},
+        )
+        await self.assert_query_result(
+            r'''SELECT math::pi();''',
+            {math.pi},
+            abs_tol=0.0000000005,
+        )
+
+    async def test_edgeql_functions_math_acos_01(self):
+        await self.assert_query_result(
+            r'''SELECT math::acos(-1);''',
+            {math.pi},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::acos(-math::sqrt(2) / 2);''',
+            {math.pi * 3 / 4},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::acos(-0.0);''',
+            {math.pi / 2},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::acos(0.0);''',
+            {math.pi / 2},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::acos(math::sqrt(2) / 2);''',
+            {math.pi / 4},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''WITH x := math::acos(1) SELECT (x, <str>x);''',
+            [(0.0, '0')],
+        )
+
+        await self.assert_query_result(
+            r'''SELECT <str>math::acos(<float64>"NaN");''',
+            {"NaN"},
+        )
+
+    async def test_edgeql_functions_math_acos_02(self):
+        with self.assertRaisesRegex(
+                edgedb.NumericOutOfRangeError,
+                r"input is out of range"):
+            await self.con.query(r'''
+                SELECT math::acos(-1.001);
+            ''')
+
+    async def test_edgeql_functions_math_acos_03(self):
+        with self.assertRaisesRegex(
+                edgedb.NumericOutOfRangeError,
+                r"input is out of range"):
+            await self.con.query(r'''
+                SELECT math::acos(1.001);
+            ''')
+
+    async def test_edgeql_functions_math_acos_04(self):
+        with self.assertRaisesRegex(
+                edgedb.NumericOutOfRangeError,
+                r"input is out of range"):
+            await self.con.query(r'''
+                SELECT math::acos(<float64>"-inf");
+            ''')
+
+    async def test_edgeql_functions_math_acos_05(self):
+        with self.assertRaisesRegex(
+                edgedb.NumericOutOfRangeError,
+                r"input is out of range"):
+            await self.con.query(r'''
+                SELECT math::acos(<float64>"inf");
+            ''')
+
+    async def test_edgeql_functions_math_asin_01(self):
+        await self.assert_query_result(
+            r'''SELECT math::asin(-1);''',
+            {-math.pi / 2},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::asin(-math::sqrt(2) / 2);''',
+            {-math.pi / 4},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''WITH x := math::asin(-0.0) SELECT (x, <str>x);''',
+            [[-0.0, '-0']],
+        )
+        await self.assert_query_result(
+            r'''WITH x := math::asin(0.0) SELECT (x, <str>x);''',
+            [[0.0, '0']],
+        )
+        await self.assert_query_result(
+            r'''SELECT math::asin(math::sqrt(2) / 2);''',
+            {math.pi / 4},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::asin(1);''',
+            {math.pi / 2},
+            abs_tol=0.0000000005,
+        )
+
+        await self.assert_query_result(
+            r'''SELECT <str>math::asin(<float64>"NaN");''',
+            {"NaN"},
+        )
+
+    async def test_edgeql_functions_math_asin_02(self):
+        with self.assertRaisesRegex(
+                edgedb.NumericOutOfRangeError,
+                r"input is out of range"):
+            await self.con.query(r'''
+                SELECT math::asin(-1.001);
+            ''')
+
+    async def test_edgeql_functions_math_asin_03(self):
+        with self.assertRaisesRegex(
+                edgedb.NumericOutOfRangeError,
+                r"input is out of range"):
+            await self.con.query(r'''
+                SELECT math::asin(1.001);
+            ''')
+
+    async def test_edgeql_functions_math_asin_04(self):
+        with self.assertRaisesRegex(
+                edgedb.NumericOutOfRangeError,
+                r"input is out of range"):
+            await self.con.query(r'''
+                SELECT math::asin(<float64>"-inf");
+            ''')
+
+    async def test_edgeql_functions_math_asin_05(self):
+        with self.assertRaisesRegex(
+                edgedb.NumericOutOfRangeError,
+                r"input is out of range"):
+            await self.con.query(r'''
+                SELECT math::asin(<float64>"inf");
+            ''')
+
+    async def test_edgeql_functions_math_atan_01(self):
+        await self.assert_query_result(
+            r'''SELECT math::atan(<float64>"-inf");''',
+            {-math.pi / 2},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::atan(-1000000000);''',
+            {-math.pi / 2},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::atan(-math::sqrt(3));''',
+            {-math.pi / 3},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::atan(-1);''',
+            {-math.pi / 4},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::atan(-1 / math::sqrt(3));''',
+            {-math.pi / 6},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''WITH x := math::atan(-0.0) SELECT (x, <str>x);''',
+            [[-0.0, '-0']],
+        )
+        await self.assert_query_result(
+            r'''WITH x := math::atan(0.0) SELECT (x, <str>x);''',
+            [[0.0, '0']],
+        )
+        await self.assert_query_result(
+            r'''SELECT math::atan(1 / math::sqrt(3));''',
+            {math.pi / 6},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::atan(1);''',
+            {math.pi / 4},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::atan(math::sqrt(3));''',
+            {math.pi / 3},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::atan(1000000000);''',
+            {math.pi / 2},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::atan(<float64>"inf");''',
+            {math.pi / 2},
+            abs_tol=0.0000000005,
+        )
+
+        await self.assert_query_result(
+            r'''SELECT <str>math::atan(<float64>"NaN");''',
+            {"NaN"},
+        )
+
+    async def test_edgeql_functions_math_atan2_01(self):
+        await self.assert_query_result(
+            r'''SELECT math::atan2(-0.0, -1);''',
+            {-math.pi},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::atan2(-2, -2);''',
+            {-math.pi * 3 / 4},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::atan2(-3, -0.0);''',
+            {-math.pi / 2},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::atan2(-4, 0.0);''',
+            {-math.pi / 2},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::atan2(-5, 5);''',
+            {-math.pi / 4},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''WITH x := math::atan2(-0.0, 6) SELECT (x, <str>x);''',
+            [[-0.0, '-0']],
+        )
+        await self.assert_query_result(
+            r'''WITH x := math::atan2(0.0, 6) SELECT (x, <str>x);''',
+            [[0.0, '0']],
+        )
+        await self.assert_query_result(
+            r'''SELECT math::atan2(8, 8);''',
+            {math.pi / 4},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::atan2(9, 0.0);''',
+            {math.pi / 2},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::atan2(10, -0.0);''',
+            {math.pi / 2},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::atan2(11, -11);''',
+            {math.pi * 3 / 4},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::atan2(0.0, -12);''',
+            {math.pi},
+            abs_tol=0.0000000005,
+        )
+
+        await self.assert_query_result(
+            r'''SELECT math::atan2(-0.0, -0.0);''',
+            {-math.pi},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''WITH x := math::atan2(-0.0, 0.0) SELECT (x, <str>x);''',
+            [[-0.0, '-0']],
+        )
+        await self.assert_query_result(
+            r'''WITH x := math::atan2(0.0, 0.0) SELECT (x, <str>x);''',
+            [[0.0, '0']],
+        )
+        await self.assert_query_result(
+            r'''SELECT math::atan2(0.0, -0.0);''',
+            {math.pi},
+            abs_tol=0.0000000005,
+        )
+
+        await self.assert_query_result(
+            r'''SELECT math::atan2(-0.0, -<float64>"inf");''',
+            {-math.pi},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::atan2(-<float64>"inf", -<float64>"inf");''',
+            {-math.pi * 3 / 4},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::atan2(-<float64>"inf", -0.0);''',
+            {-math.pi / 2},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::atan2(-<float64>"inf", 0.0);''',
+            {-math.pi / 2},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::atan2(-<float64>"inf", <float64>"inf");''',
+            {-math.pi / 4},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''
+            WITH x := math::atan2(-0.0, <float64>"inf")
+            SELECT (x, <str>x);
+            ''',
+            [[-0.0, '-0']],
+        )
+        await self.assert_query_result(
+            r'''
+            WITH x := math::atan2(0.0, <float64>"inf")
+            SELECT (x, <str>x);
+            ''',
+            [[0.0, '0']],
+        )
+        await self.assert_query_result(
+            r'''SELECT math::atan2(<float64>"inf", <float64>"inf");''',
+            {math.pi / 4},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::atan2(<float64>"inf", 0.0);''',
+            {math.pi / 2},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::atan2(<float64>"inf", -0.0);''',
+            {math.pi / 2},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::atan2(<float64>"inf", -<float64>"inf");''',
+            {math.pi * 3 / 4},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::atan2(0.0, -<float64>"inf");''',
+            {math.pi},
+            abs_tol=0.0000000005,
+        )
+
+        await self.assert_query_result(
+            r'''SELECT <str>math::atan2(<float64>"NaN", 1);''',
+            {"NaN"},
+        )
+        await self.assert_query_result(
+            r'''SELECT <str>math::atan2(1, <float64>"NaN");''',
+            {"NaN"},
+        )
+        await self.assert_query_result(
+            r'''SELECT <str>math::atan2(<float64>"NaN", <float64>"NaN");''',
+            {"NaN"},
+        )
+
+    async def test_edgeql_functions_math_cos_01(self):
+        await self.assert_query_result(
+            r'''SELECT math::cos(-math::pi() * 2);''',
+            {1.0},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::cos(-math::pi() * 7 / 4);''',
+            {math.sqrt(2) / 2},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::cos(-math::pi() * 3 / 2);''',
+            {0.0},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::cos(-math::pi() * 5 / 4);''',
+            {-math.sqrt(2) / 2},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::cos(-math::pi());''',
+            {-1.0},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::cos(-math::pi() * 3 / 4);''',
+            {-math.sqrt(2) / 2},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::cos(-math::pi() / 2);''',
+            {0.0},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::cos(-math::pi() / 4);''',
+            {math.sqrt(2) / 2},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::cos(-0.0);''',
+            {1.0},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::cos(0.0);''',
+            {1.0},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::cos(math::pi() / 4);''',
+            {math.sqrt(2) / 2},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::cos(math::pi() / 2);''',
+            {0.0},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::cos(math::pi() * 3 / 4);''',
+            {-math.sqrt(2) / 2},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::cos(math::pi());''',
+            {-1.0},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::cos(math::pi() * 5 / 4);''',
+            {-math.sqrt(2) / 2},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::cos(math::pi() * 3 / 2);''',
+            {0.0},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::cos(math::pi() * 7 / 4);''',
+            {math.sqrt(2) / 2},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::cos(math::pi() * 2);''',
+            {1.0},
+            abs_tol=0.0000000005,
+        )
+
+        await self.assert_query_result(
+            r'''SELECT <str>math::cos(<float64>"NaN");''',
+            {"NaN"},
+        )
+
+    async def test_edgeql_functions_math_cos_02(self):
+        with self.assertRaisesRegex(
+                edgedb.NumericOutOfRangeError,
+                r"input is out of range"):
+            await self.con.query(r'''
+                SELECT math::cos(<float64>"-inf");
+            ''')
+
+    async def test_edgeql_functions_math_cos_03(self):
+        with self.assertRaisesRegex(
+                edgedb.NumericOutOfRangeError,
+                r"input is out of range"):
+            await self.con.query(r'''
+                SELECT math::cos(<float64>"inf");
+            ''')
+
+    async def test_edgeql_functions_math_cot_01(self):
+        await self.assert_query_result(
+            r'''SELECT math::cot(-math::pi() * 7 / 4);''',
+            {1.0},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::cot(-math::pi() * 3 / 2);''',
+            {0.0},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::cot(-math::pi() * 5 / 4);''',
+            {-1.0},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::cot(-math::pi() * 3 / 4);''',
+            {1.0},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::cot(-math::pi() / 2);''',
+            {0.0},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::cot(-math::pi() / 4);''',
+            {-1.0},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT <str>math::cot(-0.0);''',
+            {"-Infinity"},
+        )
+        await self.assert_query_result(
+            r'''SELECT <str>math::cot(0.0);''',
+            {"Infinity"},
+        )
+        await self.assert_query_result(
+            r'''SELECT math::cot(math::pi() / 4);''',
+            {1.0},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::cot(math::pi() / 2);''',
+            {0.0},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::cot(math::pi() * 3 / 4);''',
+            {-1.0},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::cot(math::pi() * 5 / 4);''',
+            {1.0},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::cot(math::pi() * 3 / 2);''',
+            {0.0},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::cot(math::pi() * 7 / 4);''',
+            {-1.0},
+            abs_tol=0.0000000005,
+        )
+
+        await self.assert_query_result(
+            r'''SELECT <str>math::cot(<float64>"NaN");''',
+            {"NaN"},
+        )
+
+    async def test_edgeql_functions_math_cot_02(self):
+        with self.assertRaisesRegex(
+                edgedb.NumericOutOfRangeError,
+                r"input is out of range"):
+            await self.con.query(r'''
+                SELECT math::cot(<float64>"-inf");
+            ''')
+
+    async def test_edgeql_functions_math_cot_03(self):
+        with self.assertRaisesRegex(
+                edgedb.NumericOutOfRangeError,
+                r"input is out of range"):
+            await self.con.query(r'''
+                SELECT math::cot(<float64>"inf");
+            ''')
+
+    async def test_edgeql_functions_math_sin_01(self):
+        await self.assert_query_result(
+            r'''SELECT math::sin(-math::pi() * 2);''',
+            {0.0},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::sin(-math::pi() * 7 / 4);''',
+            {math.sqrt(2) / 2},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::sin(-math::pi() * 3 / 2);''',
+            {1.0},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::sin(-math::pi() * 5 / 4);''',
+            {math.sqrt(2) / 2},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::sin(-math::pi());''',
+            {0.0},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::sin(-math::pi() * 3 / 4);''',
+            {-math.sqrt(2) / 2},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::sin(-math::pi() / 2);''',
+            {-1.0},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::sin(-math::pi() / 4);''',
+            {-math.sqrt(2) / 2},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''WITH x := math::sin(-0.0) SELECT (x, <str>x);''',
+            [[-0.0, '-0']],
+        )
+        await self.assert_query_result(
+            r'''WITH x := math::sin(0.0) SELECT (x, <str>x);''',
+            [[0.0, '0']],
+        )
+        await self.assert_query_result(
+            r'''SELECT math::sin(math::pi() / 4);''',
+            {math.sqrt(2) / 2},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::sin(math::pi() / 2);''',
+            {1.0},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::sin(math::pi() * 3 / 4);''',
+            {math.sqrt(2) / 2},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::sin(math::pi());''',
+            {0.0},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::sin(math::pi() * 5 / 4);''',
+            {-math.sqrt(2) / 2},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::sin(math::pi() * 3 / 2);''',
+            {-1.0},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::sin(math::pi() * 7 / 4);''',
+            {-math.sqrt(2) / 2},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::sin(math::pi() * 2);''',
+            {0.0},
+            abs_tol=0.0000000005,
+        )
+
+        await self.assert_query_result(
+            r'''SELECT <str>math::sin(<float64>"NaN");''',
+            {"NaN"},
+        )
+
+    async def test_edgeql_functions_math_sin_02(self):
+        with self.assertRaisesRegex(
+                edgedb.NumericOutOfRangeError,
+                r"input is out of range"):
+            await self.con.query(r'''
+                SELECT math::sin(<float64>"-inf");
+            ''')
+
+    async def test_edgeql_functions_math_sin_03(self):
+        with self.assertRaisesRegex(
+                edgedb.NumericOutOfRangeError,
+                r"input is out of range"):
+            await self.con.query(r'''
+                SELECT math::sin(<float64>"inf");
+            ''')
+
+    async def test_edgeql_functions_math_tan_01(self):
+        await self.assert_query_result(
+            r'''SELECT math::tan(-math::pi() * 2);''',
+            {0.0},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::tan(-math::pi() * 7 / 4);''',
+            {1.0},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::tan(-math::pi() * 5 / 4);''',
+            {-1.0},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::tan(-math::pi());''',
+            {0.0},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::tan(-math::pi() * 3 / 4);''',
+            {1.0},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::tan(-math::pi() / 4);''',
+            {-1.0},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''WITH x := math::tan(-0.0) SELECT (x, <str>x);''',
+            [[-0.0, '-0']],
+        )
+        await self.assert_query_result(
+            r'''WITH x := math::tan(0.0) SELECT (x, <str>x);''',
+            [[0.0, '0']],
+        )
+        await self.assert_query_result(
+            r'''SELECT math::tan(math::pi() / 4);''',
+            {1.0},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::tan(math::pi() * 3 / 4);''',
+            {-1.0},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::tan(math::pi());''',
+            {0.0},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::tan(math::pi() * 5 / 4);''',
+            {1.0},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::tan(math::pi() * 7 / 4);''',
+            {-1.0},
+            abs_tol=0.0000000005,
+        )
+        await self.assert_query_result(
+            r'''SELECT math::tan(math::pi() * 2);''',
+            {0.0},
+            abs_tol=0.0000000005,
+        )
+
+        await self.assert_query_result(
+            r'''SELECT <str>math::tan(<float64>"NaN");''',
+            {"NaN"},
+        )
+
+    async def test_edgeql_functions_math_tan_02(self):
+        with self.assertRaisesRegex(
+                edgedb.NumericOutOfRangeError,
+                r"input is out of range"):
+            await self.con.query(r'''
+                SELECT math::tan(<float64>"-inf");
+            ''')
+
+    async def test_edgeql_functions_math_tan_03(self):
+        with self.assertRaisesRegex(
+                edgedb.NumericOutOfRangeError,
+                r"input is out of range"):
+            await self.con.query(r'''
+                SELECT math::tan(<float64>"inf");
+            ''')
+
     async def test_edgeql_functions__genseries_01(self):
         await self.assert_query_result(
             r'''
@@ -5720,7 +7071,7 @@ class TestEdgeQLFunctions(tb.QueryTestCase):
             r'''
             with
                 val := <int16>1234,
-                X := {(2, 2), (10, 10), (20, 20), (40, 40)}
+            for X in {(2, 2), (10, 10), (20, 20), (40, 40)}
             select bit_lshift(bit_lshift(val, X.0), X.1) =
                    bit_lshift(val, X.0 + X.1);
             ''',
@@ -5751,7 +7102,7 @@ class TestEdgeQLFunctions(tb.QueryTestCase):
             r'''
             with
                 val := <int32>1234,
-                X := {(2, 2), (10, 10), (20, 20), (40, 40)}
+            for X in {(2, 2), (10, 10), (20, 20), (40, 40)}
             select bit_lshift(bit_lshift(val, X.0), X.1) =
                    bit_lshift(val, X.0 + X.1);
             ''',
@@ -5786,7 +7137,7 @@ class TestEdgeQLFunctions(tb.QueryTestCase):
             r'''
             with
                 val := <int64>1234,
-                X := {(2, 2), (10, 10), (20, 20), (40, 40)}
+            for X in {(2, 2), (10, 10), (20, 20), (40, 40)}
             select bit_lshift(bit_lshift(val, X.0), X.1) =
                    bit_lshift(val, X.0 + X.1);
             ''',
@@ -5830,7 +7181,7 @@ class TestEdgeQLFunctions(tb.QueryTestCase):
             r'''
             with
                 val := <int16>1234,
-                X := {(2, 2), (10, 10), (20, 20), (40, 40)}
+            for X in {(2, 2), (10, 10), (20, 20), (40, 40)}
             select bit_rshift(bit_rshift(val, X.0), X.1) =
                    bit_rshift(val, X.0 + X.1);
             ''',
@@ -5870,7 +7221,7 @@ class TestEdgeQLFunctions(tb.QueryTestCase):
             r'''
             with
                 val := <int32>1234,
-                X := {(2, 2), (10, 10), (20, 20), (40, 40)}
+            for X in {(2, 2), (10, 10), (20, 20), (40, 40)}
             select bit_rshift(bit_rshift(val, X.0), X.1) =
                    bit_rshift(val, X.0 + X.1);
             ''',
@@ -5910,7 +7261,7 @@ class TestEdgeQLFunctions(tb.QueryTestCase):
             r'''
             with
                 val := <int64>1234,
-                X := {(2, 2), (10, 10), (20, 20), (40, 40)}
+            for X in {(2, 2), (10, 10), (20, 20), (40, 40)}
             select bit_rshift(bit_rshift(val, X.0), X.1) =
                    bit_rshift(val, X.0 + X.1);
             ''',
@@ -5954,7 +7305,7 @@ class TestEdgeQLFunctions(tb.QueryTestCase):
             r'''
             with
                 val := <int16>-1234,
-                X := {(2, 2), (10, 10), (20, 20), (40, 40)}
+            for X in {(2, 2), (10, 10), (20, 20), (40, 40)}
             select bit_rshift(bit_rshift(val, X.0), X.1) =
                    bit_rshift(val, X.0 + X.1);
             ''',
@@ -5994,7 +7345,7 @@ class TestEdgeQLFunctions(tb.QueryTestCase):
             r'''
             with
                 val := <int32>-1234,
-                X := {(2, 2), (10, 10), (20, 20), (40, 40)}
+            for X in {(2, 2), (10, 10), (20, 20), (40, 40)}
             select bit_rshift(bit_rshift(val, X.0), X.1) =
                    bit_rshift(val, X.0 + X.1);
             ''',
@@ -6034,11 +7385,146 @@ class TestEdgeQLFunctions(tb.QueryTestCase):
             r'''
             with
                 val := <int64>-1234,
-                X := {(2, 2), (10, 10), (20, 20), (40, 40)}
+            for X in {(2, 2), (10, 10), (20, 20), (40, 40)}
             select bit_rshift(bit_rshift(val, X.0), X.1) =
                    bit_rshift(val, X.0 + X.1);
             ''',
             [True, True, True, True],
+        )
+
+    async def test_edgeql_functions_bitwise_15(self):
+        # bit_count counts the number of bits
+
+        # bit_count(0)
+        await self.assert_query_result(
+            r'''select bit_count(<int16>0);''',
+            {0},
+        )
+        await self.assert_query_result(
+            r'''select bit_count(<int32>0);''',
+            {0},
+        )
+        await self.assert_query_result(
+            r'''select bit_count(<int64>0);''',
+            {0},
+        )
+
+        # bit_count(1)
+        await self.assert_query_result(
+            r'''select bit_count(<int16>1);''',
+            {1},
+        )
+        await self.assert_query_result(
+            r'''select bit_count(<int32>1);''',
+            {1},
+        )
+        await self.assert_query_result(
+            r'''select bit_count(<int64>1);''',
+            {1},
+        )
+
+        # bit_count(255)
+        await self.assert_query_result(
+            r'''select bit_count(<int16>255);''',
+            {8},
+        )
+        await self.assert_query_result(
+            r'''select bit_count(<int32>255);''',
+            {8},
+        )
+        await self.assert_query_result(
+            r'''select bit_count(<int64>255);''',
+            {8},
+        )
+
+        # bit_count(256)
+        await self.assert_query_result(
+            r'''select bit_count(<int16>256);''',
+            {1},
+        )
+        await self.assert_query_result(
+            r'''select bit_count(<int32>256);''',
+            {1},
+        )
+        await self.assert_query_result(
+            r'''select bit_count(<int64>256);''',
+            {1},
+        )
+
+        # bit_count(max)
+        await self.assert_query_result(
+            r'''select bit_count(<int16>32767);''',
+            {15},
+        )
+        await self.assert_query_result(
+            r'''select bit_count(<int32>2147483647);''',
+            {31},
+        )
+        await self.assert_query_result(
+            r'''select bit_count(<int64>9223372036854775807);''',
+            {63},
+        )
+
+        # bit_count(min)
+        await self.assert_query_result(
+            r'''select bit_count(<int16>-32768);''',
+            {1},
+        )
+        await self.assert_query_result(
+            r'''select bit_count(<int32>-2147483648);''',
+            {1},
+        )
+        await self.assert_query_result(
+            r'''select bit_count(<int64>-9223372036854775808);''',
+            {1},
+        )
+
+        # bit_count(-1)
+        await self.assert_query_result(
+            r'''select bit_count(<int16>-1);''',
+            {16},
+        )
+        await self.assert_query_result(
+            r'''select bit_count(<int32>-1);''',
+            {32},
+        )
+        await self.assert_query_result(
+            r'''select bit_count(<int64>-1);''',
+            {64},
+        )
+
+        # bit_count(bytes)
+        await self.assert_query_result(
+            r'''select bit_count(b'');''',
+            {0},
+        )
+        await self.assert_query_result(
+            r'''select bit_count(b'\x00');''',
+            {0},
+        )
+        await self.assert_query_result(
+            r'''select bit_count(b'\x01');''',
+            {1},
+        )
+        await self.assert_query_result(
+            r'''select bit_count(b'\xff');''',
+            {8},
+        )
+        await self.assert_query_result(
+            r'''select bit_count(b'\x01\x01');''',
+            {2},
+        )
+        await self.assert_query_result(
+            r'''select bit_count(b'\xff\xff');''',
+            {16},
+        )
+        await self.assert_query_result(
+            r'''select bit_count(b'\x01\x01\x01\x01');''',
+            {4},
+        )
+        await self.assert_query_result(
+            r'''select bit_count(b'\xff\xff\xff\xff');''',
+            {32},
         )
 
     async def test_edgeql_functions_range_contains_01(self):
@@ -6362,6 +7848,203 @@ class TestEdgeQLFunctions(tb.QueryTestCase):
             [False],
         )
 
+    async def test_edgeql_functions_range_contains_09(self):
+        # Test `contains` for numeric multiranges.
+        for st in ['int32', 'int64', 'float32', 'float64', 'decimal']:
+            await self.assert_query_result(
+                f'''select contains(
+                        multirange([
+                            range(<{st}>1, <{st}>4),
+                            range(<{st}>7),
+                        ]),
+                        multirange([
+                            range(<{st}>1, <{st}>2),
+                            range(<{st}>8, <{st}>10),
+                        ]),
+                    )
+                ''',
+                [True],
+            )
+
+            await self.assert_query_result(
+                f'''select contains(
+                        multirange([
+                            range(<{st}>1, <{st}>4),
+                            range(<{st}>7),
+                        ]),
+                        range(<{st}>8),
+                    )
+                ''',
+                [True],
+            )
+
+            await self.assert_query_result(
+                f'''select contains(
+                        multirange([
+                            range(<{st}>1, <{st}>4),
+                            range(<{st}>7),
+                        ]),
+                        <{st}>3,
+                    )
+                ''',
+                [True],
+            )
+
+    async def test_edgeql_functions_range_contains_10(self):
+        # Test `contains` for datetime multiranges.
+        await self.assert_query_result(
+            f'''select contains(
+                    multirange([
+                        range(<datetime>'2022-06-01T00:00:00Z',
+                              <datetime>'2022-06-10T00:00:00Z'),
+                        range(<datetime>'2022-06-12T00:00:00Z',
+                              <datetime>'2022-06-17T00:00:00Z'),
+                        range(<datetime>'2022-06-20T00:00:00Z'),
+                    ]),
+                    multirange([
+                        range(<datetime>'2022-06-01T00:00:00Z',
+                              <datetime>'2022-06-05T00:00:00Z'),
+                        range(<datetime>'2022-06-21T00:00:00Z',
+                              <datetime>'2022-06-22T00:00:00Z'),
+                    ]),
+                )
+            ''',
+            [True],
+        )
+
+        await self.assert_query_result(
+            f'''select contains(
+                    multirange([
+                        range(<datetime>'2022-06-01T00:00:00Z',
+                              <datetime>'2022-06-10T00:00:00Z'),
+                        range(<datetime>'2022-06-12T00:00:00Z',
+                              <datetime>'2022-06-17T00:00:00Z'),
+                        range(<datetime>'2022-06-20T00:00:00Z'),
+                    ]),
+                    range(<datetime>'2022-06-01T00:00:00Z',
+                          <datetime>'2022-06-05T00:00:00Z'),
+                )
+            ''',
+            [True],
+        )
+
+        await self.assert_query_result(
+            f'''select contains(
+                    multirange([
+                        range(<datetime>'2022-06-01T00:00:00Z',
+                              <datetime>'2022-06-10T00:00:00Z'),
+                        range(<datetime>'2022-06-12T00:00:00Z',
+                              <datetime>'2022-06-17T00:00:00Z'),
+                        range(<datetime>'2022-06-20T00:00:00Z'),
+                    ]),
+                    <datetime>'2022-06-05T00:00:00Z',
+                )
+            ''',
+            [True],
+        )
+
+        await self.assert_query_result(
+            f'''select contains(
+                    multirange([
+                        range(<cal::local_datetime>'2022-06-01T00:00:00',
+                              <cal::local_datetime>'2022-06-10T00:00:00'),
+                        range(<cal::local_datetime>'2022-06-12T00:00:00',
+                              <cal::local_datetime>'2022-06-17T00:00:00'),
+                        range(<cal::local_datetime>'2022-06-20T00:00:00'),
+                    ]),
+                    multirange([
+                        range(<cal::local_datetime>'2022-06-01T00:00:00',
+                              <cal::local_datetime>'2022-06-05T00:00:00'),
+                        range(<cal::local_datetime>'2022-06-21T00:00:00',
+                              <cal::local_datetime>'2022-06-22T00:00:00')
+                    ]),
+                )
+            ''',
+            [True],
+        )
+
+        await self.assert_query_result(
+            f'''select contains(
+                    multirange([
+                        range(<cal::local_datetime>'2022-06-01T00:00:00',
+                              <cal::local_datetime>'2022-06-10T00:00:00'),
+                        range(<cal::local_datetime>'2022-06-12T00:00:00',
+                              <cal::local_datetime>'2022-06-17T00:00:00'),
+                        range(<cal::local_datetime>'2022-06-20T00:00:00'),
+                    ]),
+                    range(<cal::local_datetime>'2022-06-01T00:00:00',
+                          <cal::local_datetime>'2022-06-05T00:00:00'),
+                )
+            ''',
+            [True],
+        )
+
+        await self.assert_query_result(
+            f'''select contains(
+                    multirange([
+                        range(<cal::local_datetime>'2022-06-01T00:00:00',
+                              <cal::local_datetime>'2022-06-10T00:00:00'),
+                        range(<cal::local_datetime>'2022-06-12T00:00:00',
+                              <cal::local_datetime>'2022-06-17T00:00:00'),
+                        range(<cal::local_datetime>'2022-06-20T00:00:00'),
+                    ]),
+                    <cal::local_datetime>'2022-06-05T00:00:00',
+                )
+            ''',
+            [True],
+        )
+
+        await self.assert_query_result(
+            f'''select contains(
+                    multirange([
+                        range(<cal::local_date>'2022-06-01',
+                              <cal::local_date>'2022-06-10'),
+                        range(<cal::local_date>'2022-06-12',
+                              <cal::local_date>'2022-06-17'),
+                        range(<cal::local_date>'2022-06-20'),
+                    ]),
+                    multirange([
+                        range(<cal::local_date>'2022-06-01',
+                              <cal::local_date>'2022-06-05'),
+                        range(<cal::local_date>'2022-06-21',
+                              <cal::local_date>'2022-06-22')
+                    ]),
+                )
+            ''',
+            [True],
+        )
+
+        await self.assert_query_result(
+            f'''select contains(
+                    multirange([
+                        range(<cal::local_date>'2022-06-01',
+                              <cal::local_date>'2022-06-10'),
+                        range(<cal::local_date>'2022-06-12',
+                              <cal::local_date>'2022-06-17'),
+                        range(<cal::local_date>'2022-06-20'),
+                    ]),
+                    range(<cal::local_date>'2022-06-01',
+                          <cal::local_date>'2022-06-05'),
+                )
+            ''',
+            [True],
+        )
+
+        await self.assert_query_result(
+            f'''select contains(
+                    multirange([
+                        range(<cal::local_date>'2022-06-01',
+                              <cal::local_date>'2022-06-10'),
+                        range(<cal::local_date>'2022-06-12',
+                              <cal::local_date>'2022-06-17'),
+                        range(<cal::local_date>'2022-06-20'),
+                    ]),
+                    <cal::local_date>'2022-06-05',
+                )
+            ''',
+            [True],
+        )
+
     async def test_edgeql_functions_range_overlaps_01(self):
         # Test `overlaps` for numeric ranges.
         for st in ['int32', 'int64', 'float32', 'float64', 'decimal']:
@@ -6405,6 +8088,449 @@ class TestEdgeQLFunctions(tb.QueryTestCase):
                         range(<{st}>{{}}, <{st}>5),
                         range(<{st}>2));''',
                 [True],
+            )
+
+    async def test_edgeql_functions_range_overlaps_02(self):
+        # Test `overlaps` for numeric multiranges.
+        for st in ['int32', 'int64', 'float32', 'float64', 'decimal']:
+            await self.assert_query_result(
+                f'''select overlaps(
+                        multirange([
+                            range(<{st}>1, <{st}>4),
+                            range(<{st}>7),
+                        ]),
+                        multirange([
+                            range(<{st}>0, <{st}>2),
+                            range(<{st}>5, <{st}>6),
+                        ]),
+                    )
+                ''',
+                [True],
+            )
+
+            await self.assert_query_result(
+                f'''select overlaps(
+                        multirange([
+                            range(<{st}>1, <{st}>4),
+                            range(<{st}>7),
+                        ]),
+                        range(<{st}>8),
+                    )
+                ''',
+                [True],
+            )
+
+    async def test_edgeql_functions_range_adjacent_01(self):
+        # Test `adjacent` for numeric ranges.
+        for st in ['int32', 'int64', 'float32', 'float64', 'decimal']:
+            await self.assert_query_result(
+                f'''select adjacent(
+                        range(<{st}>1, <{st}>5),
+                        range(<{st}>5, <{st}>6));''',
+                [True],
+            )
+
+            await self.assert_query_result(
+                f'''select adjacent(
+                        range(<{st}>1, <{st}>5),
+                        range(<{st}>4, <{st}>6));''',
+                [False],
+            )
+
+            await self.assert_query_result(
+                f'''select adjacent(
+                        range(<{st}>1),
+                        range(<{st}>0, <{st}>1));''',
+                [True],
+            )
+
+            await self.assert_query_result(
+                f'''select adjacent(
+                        range(<{st}>{{}}, <{st}>1),
+                        range(<{st}>1));''',
+                [True],
+            )
+
+    async def test_edgeql_functions_range_adjacent_02(self):
+        # Test `adjacent` for numeric multiranges.
+        for st in ['int32', 'int64', 'float32', 'float64', 'decimal']:
+            await self.assert_query_result(
+                f'''select adjacent(
+                        multirange([
+                            range(<{st}>1, <{st}>4),
+                            range(<{st}>7),
+                        ]),
+                        multirange([
+                            range(<{st}>-10, <{st}>-2),
+                            range(<{st}>0, <{st}>1),
+                        ]),
+                    )
+                ''',
+                [True],
+            )
+
+            await self.assert_query_result(
+                f'''select adjacent(
+                        multirange([
+                            range(<{st}>1, <{st}>4),
+                            range(<{st}>7),
+                        ]),
+                        range(<{st}>{{}}, <{st}>1),
+                    )
+                ''',
+                [True],
+            )
+
+    async def test_edgeql_functions_range_strictly_below_01(self):
+        # Test `strictly_below` for numeric ranges.
+        for st in ['int32', 'int64', 'float32', 'float64', 'decimal']:
+            await self.assert_query_result(
+                f'''select strictly_below(
+                        range(<{st}>1, <{st}>4),
+                        range(<{st}>4, <{st}>5));''',
+                [True],
+            )
+
+            await self.assert_query_result(
+                f'''select strictly_below(
+                        range(<{st}>1, <{st}>4),
+                        range(<{st}>1, <{st}>5));''',
+                [False],
+            )
+
+            await self.assert_query_result(
+                f'''select strictly_below(
+                        range(<{st}>2, <{st}>3),
+                        range(<{st}>10));''',
+                [True],
+            )
+
+            await self.assert_query_result(
+                f'''select strictly_below(
+                        range(<{st}>1),
+                        range(<{st}>{{}}, <{st}>10));''',
+                [False],
+            )
+
+    async def test_edgeql_functions_range_strictly_below_02(self):
+        # Test `strictly_below` for numeric multiranges.
+        for st in ['int32', 'int64', 'float32', 'float64', 'decimal']:
+            await self.assert_query_result(
+                f'''select strictly_below(
+                        multirange([
+                            range(<{st}>-10, <{st}>-2),
+                            range(<{st}>1, <{st}>5),
+                        ]),
+                        multirange([
+                            range(<{st}>6, <{st}>9),
+                            range(<{st}>20),
+                        ]),
+                    )
+                ''',
+                [True],
+            )
+
+            await self.assert_query_result(
+                f'''select strictly_below(
+                        multirange([
+                            range(<{st}>-10, <{st}>-2),
+                            range(<{st}>1, <{st}>5),
+                        ]),
+                        multirange([
+                            range(<{st}>2, <{st}>9),
+                            range(<{st}>20),
+                        ]),
+                    )
+                ''',
+                [False],
+            )
+
+            await self.assert_query_result(
+                f'''select strictly_below(
+                        range(<{st}>{{}}, <{st}>3),
+                        multirange([
+                            range(<{st}>3, <{st}>4),
+                            range(<{st}>7),
+                        ]),
+                    )
+                ''',
+                [True],
+            )
+
+            await self.assert_query_result(
+                f'''select strictly_below(
+                        multirange([
+                            range(<{st}>1, <{st}>4),
+                            range(<{st}>7),
+                        ]),
+                        range(<{st}>10),
+                    )
+                ''',
+                [False],
+            )
+
+    async def test_edgeql_functions_range_strictly_above_01(self):
+        # Test `strictly_above` for numeric ranges.
+        for st in ['int32', 'int64', 'float32', 'float64', 'decimal']:
+            await self.assert_query_result(
+                f'''select strictly_above(
+                        range(<{st}>4, <{st}>5),
+                        range(<{st}>1, <{st}>3));''',
+                [True],
+            )
+
+            await self.assert_query_result(
+                f'''select strictly_above(
+                        range(<{st}>1, <{st}>5),
+                        range(<{st}>1, <{st}>3));''',
+                [False],
+            )
+
+            await self.assert_query_result(
+                f'''select strictly_above(
+                        range(<{st}>5),
+                        range(<{st}>2, <{st}>3));''',
+                [True],
+            )
+
+            await self.assert_query_result(
+                f'''select strictly_above(
+                        range(<{st}>{{}}, <{st}>10),
+                        range(<{st}>1));''',
+                [False],
+            )
+
+    async def test_edgeql_functions_range_strictly_above_02(self):
+        # Test `strictly_above` for numeric multiranges.
+        for st in ['int32', 'int64', 'float32', 'float64', 'decimal']:
+            await self.assert_query_result(
+                f'''select strictly_above(
+                        multirange([
+                            range(<{st}>3, <{st}>4),
+                            range(<{st}>7),
+                        ]),
+                        multirange([
+                            range(<{st}>-10, <{st}>-2),
+                            range(<{st}>1, <{st}>3),
+                        ]),
+                    )
+                ''',
+                [True],
+            )
+
+            await self.assert_query_result(
+                f'''select strictly_above(
+                        multirange([
+                            range(<{st}>1, <{st}>4),
+                            range(<{st}>7),
+                        ]),
+                        multirange([
+                            range(<{st}>-10, <{st}>-2),
+                            range(<{st}>1, <{st}>3),
+                        ]),
+                    )
+                ''',
+                [False],
+            )
+
+            await self.assert_query_result(
+                f'''select strictly_above(
+                        multirange([
+                            range(<{st}>3, <{st}>4),
+                            range(<{st}>7),
+                        ]),
+                        range(<{st}>{{}}, <{st}>1),
+                    )
+                ''',
+                [True],
+            )
+
+            await self.assert_query_result(
+                f'''select strictly_above(
+                        range(<{st}>{{}}, <{st}>10),
+                        multirange([
+                            range(<{st}>3, <{st}>4),
+                            range(<{st}>7),
+                        ]),
+                    )
+                ''',
+                [False],
+            )
+
+    async def test_edgeql_functions_range_bounded_above_01(self):
+        # Test `bounded_above` for numeric ranges.
+        for st in ['int32', 'int64', 'float32', 'float64', 'decimal']:
+            await self.assert_query_result(
+                f'''select bounded_above(
+                        range(<{st}>1, <{st}>4),
+                        range(<{st}>4, <{st}>5));''',
+                [True],
+            )
+
+            await self.assert_query_result(
+                f'''select bounded_above(
+                        range(<{st}>1, <{st}>5),
+                        range(<{st}>2, <{st}>4));''',
+                [False],
+            )
+
+            await self.assert_query_result(
+                f'''select bounded_above(
+                        range(<{st}>2, <{st}>3),
+                        range(<{st}>10));''',
+                [True],
+            )
+
+            await self.assert_query_result(
+                f'''select bounded_above(
+                        range(<{st}>1),
+                        range(<{st}>{{}}, <{st}>10));''',
+                [False],
+            )
+
+    async def test_edgeql_functions_range_bounded_above_02(self):
+        # Test `bounded_above` for numeric multiranges.
+        for st in ['int32', 'int64', 'float32', 'float64', 'decimal']:
+            await self.assert_query_result(
+                f'''select bounded_above(
+                        multirange([
+                            range(<{st}>-10, <{st}>-2),
+                            range(<{st}>1, <{st}>5),
+                        ]),
+                        multirange([
+                            range(<{st}>6, <{st}>9),
+                            range(<{st}>20),
+                        ]),
+                    )
+                ''',
+                [True],
+            )
+
+            await self.assert_query_result(
+                f'''select bounded_above(
+                        multirange([
+                            range(<{st}>-10, <{st}>-2),
+                            range(<{st}>20),
+                        ]),
+                        multirange([
+                            range(<{st}>1, <{st}>3),
+                            range(<{st}>6, <{st}>9),
+                        ]),
+                    )
+                ''',
+                [False],
+            )
+
+            await self.assert_query_result(
+                f'''select bounded_above(
+                        multirange([
+                            range(<{st}>1, <{st}>4),
+                            range(<{st}>7),
+                        ]),
+                        range(<{st}>10),
+                    )
+                ''',
+                [True],
+            )
+
+            await self.assert_query_result(
+                f'''select bounded_above(
+                        range(<{st}>{{}}, <{st}>10),
+                        multirange([
+                            range(<{st}>3, <{st}>4),
+                            range(<{st}>7, <{st}>9),
+                        ]),
+                    )
+                ''',
+                [False],
+            )
+
+    async def test_edgeql_functions_range_bounded_below_01(self):
+        # Test `bounded_below` for numeric ranges.
+        for st in ['int32', 'int64', 'float32', 'float64', 'decimal']:
+            await self.assert_query_result(
+                f'''select bounded_below(
+                        range(<{st}>1, <{st}>4),
+                        range(<{st}>1, <{st}>5));''',
+                [True],
+            )
+
+            await self.assert_query_result(
+                f'''select bounded_below(
+                        range(<{st}>1, <{st}>4),
+                        range(<{st}>4, <{st}>5));''',
+                [False],
+            )
+
+            await self.assert_query_result(
+                f'''select bounded_below(
+                        range(<{st}>2, <{st}>3),
+                        range(<{st}>1));''',
+                [True],
+            )
+
+            await self.assert_query_result(
+                f'''select bounded_below(
+                        range(<{st}>{{}}, <{st}>3),
+                        range(<{st}>1));''',
+                [False],
+            )
+
+    async def test_edgeql_functions_range_bounded_below_02(self):
+        # Test `bounded_below` for numeric multiranges.
+        for st in ['int32', 'int64', 'float32', 'float64', 'decimal']:
+            await self.assert_query_result(
+                f'''select bounded_below(
+                        multirange([
+                            range(<{st}>1, <{st}>2),
+                            range(<{st}>4, <{st}>7),
+                        ]),
+                        multirange([
+                            range(<{st}>0, <{st}>9),
+                            range(<{st}>20),
+                        ]),
+                    )
+                ''',
+                [True],
+            )
+
+            await self.assert_query_result(
+                f'''select bounded_below(
+                        multirange([
+                            range(<{st}>-10, <{st}>-2),
+                            range(<{st}>1, <{st}>5),
+                        ]),
+                        multirange([
+                            range(<{st}>2, <{st}>9),
+                            range(<{st}>20),
+                        ]),
+                    )
+                ''',
+                [False],
+            )
+
+            await self.assert_query_result(
+                f'''select bounded_below(
+                        multirange([
+                            range(<{st}>1, <{st}>4),
+                            range(<{st}>7),
+                        ]),
+                        range(<{st}>1),
+                    )
+                ''',
+                [True],
+            )
+
+            await self.assert_query_result(
+                f'''select bounded_below(
+                        range(<{st}>{{}}, <{st}>3),
+                        multirange([
+                            range(<{st}>1, <{st}>4),
+                            range(<{st}>7),
+                        ]),
+                    )
+                ''',
+                [False],
             )
 
     async def test_edgeql_functions_range_unpack_01(self):
@@ -6712,3 +8838,291 @@ class TestEdgeQLFunctions(tb.QueryTestCase):
                     range(<cal::local_date>{},
                           <cal::local_date>'2022-06-01'));
             """)
+
+    async def test_edgeql_functions_multirange_unpack_01(self):
+        # Test `multirange_unpack` for numeric multiranges.
+        for st in ['int32', 'int64', 'float32', 'float64', 'decimal']:
+            await self.assert_query_result(
+                f'''select multirange_unpack(
+                        multirange([
+                            range(<{st}>4, <{st}>8),
+                            range(<{st}>0, <{st}>2),
+                            range(<{st}>10),
+                        ]),
+                    )
+                ''',
+                [
+                    {
+                        "lower": 0,
+                        "inc_lower": True,
+                        "upper": 2,
+                        "inc_upper": False,
+                    },
+                    {
+                        "lower": 4,
+                        "inc_lower": True,
+                        "upper": 8,
+                        "inc_upper": False,
+                    },
+                    {
+                        "lower": 10,
+                        "inc_lower": True,
+                        "upper": None,
+                        "inc_upper": False,
+                    },
+                ],
+                json_only=True,
+            )
+
+    async def test_edgeql_functions_encoding_base64_fuzz(self):
+        for _ in range(10):
+            value = random.randbytes(random.randrange(0, 1000))
+            await self.assert_query_result(
+                r"""
+                WITH
+                    MODULE std::enc,
+                    value := <bytes>$value,
+                    standard_encoded := base64_encode(
+                        value),
+                    standard_decoded := base64_decode(
+                        standard_encoded),
+                    standard_unpadded_encoded := base64_encode(
+                        value,
+                        padding := false),
+                    standard_unpadded_decoded := base64_decode(
+                        standard_unpadded_encoded,
+                        padding := false),
+                    urlsafe_encoded := base64_encode(
+                        value,
+                        alphabet := Base64Alphabet.urlsafe),
+                    urlsafe_decoded := base64_decode(
+                        urlsafe_encoded,
+                        alphabet := Base64Alphabet.urlsafe),
+                    urlsafe_unpadded_encoded := base64_encode(
+                        value,
+                        alphabet := Base64Alphabet.urlsafe,
+                        padding := false),
+                    urlsafe_unpadded_decoded := base64_decode(
+                        urlsafe_unpadded_encoded,
+                        alphabet := Base64Alphabet.urlsafe,
+                        padding := false),
+                SELECT {
+                    standard_encoded :=
+                        standard_encoded,
+                    standard_crosscheck :=
+                        standard_decoded = value,
+                    standard_unpadded_encoded :=
+                        standard_unpadded_encoded,
+                    standard_unpadded_crosscheck :=
+                        standard_unpadded_decoded = value,
+                    urlsafe_encoded :=
+                        urlsafe_encoded,
+                    urlsafe_crosscheck :=
+                        urlsafe_decoded = value,
+                    urlsafe_unpadded_encoded :=
+                        urlsafe_unpadded_encoded,
+                    urlsafe_unpadded_crosscheck :=
+                        urlsafe_unpadded_decoded = value,
+                }
+                """,
+                [{
+                    "standard_encoded":
+                        base64.b64encode(value)
+                              .decode("utf-8"),
+                    "standard_crosscheck": True,
+                    "standard_unpadded_encoded":
+                        base64.b64encode(value)
+                              .decode("utf-8").rstrip('='),
+                    "standard_unpadded_crosscheck": True,
+                    "urlsafe_encoded":
+                        base64.urlsafe_b64encode(value)
+                              .decode("utf-8"),
+                    "urlsafe_crosscheck": True,
+                    "urlsafe_unpadded_encoded":
+                        base64.urlsafe_b64encode(value)
+                              .decode("utf-8").rstrip('='),
+                    "urlsafe_unpadded_crosscheck": True,
+                }],
+                variables={
+                    "value": value,
+                },
+            )
+
+    async def test_edgeql_functions_encoding_base64_bad(self):
+        async with self.assertRaisesRegexTx(
+            edgedb.InvalidValueError,
+            r'invalid symbol "~" found while decoding base64 sequence',
+        ):
+            await self.con.execute(
+                'select std::enc::base64_decode("~")'
+            )
+
+        async with self.assertRaisesRegexTx(
+            edgedb.InvalidValueError,
+            r'invalid base64 end sequence',
+        ):
+            await self.con.execute(
+                'select std::enc::base64_decode("AA")'
+            )
+
+    async def test_edgeql_call_type_as_function_01(self):
+        async with self.assertRaisesRegexTx(
+            edgedb.errors.InvalidReferenceError,
+            "does not exist",
+            _hint="did you mean to cast to 'str'?",
+        ):
+            await self.con.execute(f"""
+                select str(1);
+            """)
+
+        async with self.assertRaisesRegexTx(
+            edgedb.errors.InvalidReferenceError,
+            "does not exist",
+            _hint="did you mean to cast to 'int32'?",
+        ):
+            await self.con.execute(f"""
+                select int32(1);
+            """)
+
+        async with self.assertRaisesRegexTx(
+            edgedb.errors.InvalidReferenceError,
+            "does not exist",
+            _hint="did you mean to cast to 'std::cal::local_date'?",
+        ):
+            await self.con.execute(f"""
+                select cal::local_date(1);
+            """)
+
+    async def test_edgeql_functions_complex_types_01(self):
+        await self.con.execute('''
+            create function foo(x: File | URL) -> File | URL using (
+                x
+            );
+        ''')
+        await self.assert_query_result(
+            'select foo(<File>{})',
+            [],
+        )
+        await self.assert_query_result(
+            'select foo(<URL>{})',
+            [],
+        )
+        await self.assert_query_result(
+            'select foo(<File | URL>{})',
+            [],
+        )
+        await self.assert_query_result(
+            'select foo((select File)).name',
+            ['screenshot.png'],
+            sort=True,
+        )
+        await self.assert_query_result(
+            'select foo((select URL)).name',
+            ['edgedb.com'],
+            sort=True,
+        )
+        await self.assert_query_result(
+            'select foo((select {File, URL})).name',
+            ['edgedb.com', 'screenshot.png'],
+            sort=True,
+        )
+
+    async def test_edgeql_functions_complex_types_02(self):
+        await self.con.execute('''
+            create function foo(x: str) -> optional File | URL using (
+                select {File, URL} filter .name = x limit 1
+            );
+        ''')
+        await self.assert_query_result(
+            'select foo(<str>{})',
+            [],
+        )
+        await self.assert_query_result(
+            'select foo("haha")',
+            [],
+        )
+        await self.assert_query_result(
+            'select foo("screenshot.png").name',
+            ['screenshot.png'],
+            sort=True,
+        )
+        await self.assert_query_result(
+            'select foo("edgedb.com").name',
+            ['edgedb.com'],
+            sort=True,
+        )
+        await self.assert_query_result(
+            'select foo({"edgedb.com", "screenshot.png"}).name',
+            ['edgedb.com', 'screenshot.png'],
+            sort=True,
+        )
+
+    async def test_edgeql_functions_complex_types_03(self):
+        await self.con.execute('''
+            create function foo(x: File | URL) -> str using (
+                x.name
+            );
+        ''')
+        await self.assert_query_result(
+            'select foo(<File>{})',
+            [],
+        )
+        await self.assert_query_result(
+            'select foo(<URL>{})',
+            [],
+        )
+        await self.assert_query_result(
+            'select foo(<File | URL>{})',
+            [],
+        )
+        await self.assert_query_result(
+            'select foo((select File))',
+            ['screenshot.png'],
+            sort=True,
+        )
+        await self.assert_query_result(
+            'select foo((select URL))',
+            ['edgedb.com'],
+            sort=True,
+        )
+        await self.assert_query_result(
+            'select foo((select {File, URL}))',
+            ['edgedb.com', 'screenshot.png'],
+            sort=True,
+        )
+
+    async def test_edgeql_functions_complex_types_04(self):
+        await self.con.execute('''
+            create function foo(x: File | URL) -> str using (
+                if x is URL
+                then assert_exists(x[is URL]).address
+                else '~/' ++ x.name
+            );
+        ''')
+        await self.assert_query_result(
+            'select foo(<File>{})',
+            [],
+        )
+        await self.assert_query_result(
+            'select foo(<URL>{})',
+            [],
+        )
+        await self.assert_query_result(
+            'select foo(<File | URL>{})',
+            [],
+        )
+        await self.assert_query_result(
+            'select foo((select File))',
+            ['~/screenshot.png'],
+            sort=True,
+        )
+        await self.assert_query_result(
+            'select foo((select URL))',
+            ['https://edgedb.com'],
+            sort=True,
+        )
+        await self.assert_query_result(
+            'select foo((select {File, URL}))',
+            ['https://edgedb.com', '~/screenshot.png'],
+            sort=True,
+        )

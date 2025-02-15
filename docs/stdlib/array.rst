@@ -24,16 +24,16 @@ Arrays
       - Comparison operators
 
     * - :eql:func:`len`
-      - Return number of elements in the array.
+      - Returns the number of elements in the array.
 
     * - :eql:func:`contains`
-      - Check if an element is in the array.
+      - Checks if an element is in the array.
 
     * - :eql:func:`find`
-      - Find the index of an element in the array.
+      - Finds the index of an element in the array.
 
     * - :eql:func:`array_join`
-      - Render an array to a string.
+      - Renders an array to a string or byte-string.
 
     * - :eql:func:`array_fill`
       - :eql:func-desc:`array_fill`
@@ -77,9 +77,9 @@ For example:
 Empty arrays
 ^^^^^^^^^^^^
 
-An empty array can also be created, but it must be used together with
-a type cast, since EdgeDB cannot infer the type of an array that contains no
-elements.
+You can also create an empty array, but it must be done by providing the type
+information using type casting. EdgeDB cannot infer the type of an empty array
+created otherwise. For example:
 
 .. code-block:: edgeql-repl
 
@@ -101,12 +101,12 @@ Reference
 
     :index: array
 
-    Arrays represent a one-dimensional homogeneous ordered list.
+    An ordered list of values of the same type.
 
     Array indexing starts at zero.
 
-    With the exception of other array types, any type can be used as an
-    array element type.
+    An array can contain any type except another array. In EdgeDB, arrays are
+    always one-dimensional.
 
     An array type is created implicitly when an :ref:`array
     constructor <ref_std_array_constructor>` is used:
@@ -116,13 +116,36 @@ Reference
         db> select [1, 2];
         {[1, 2]}
 
-    The syntax of an array type declaration can be found in :ref:`this
-    section <ref_datamodel_arrays>`.
+    The array types themselves are denoted by ``array`` followed by their
+    sub-type in angle brackets. These may appear in cast operations:
 
-    See also the list of standard
-    :ref:`array functions <ref_std_array>` and
-    generic functions such as :eql:func:`len`.
+    .. code-block:: edgeql-repl
 
+        db> select <array<str>>[1, 4, 7];
+        {['1', '4', '7']}
+        db> select <array<bigint>>[1, 4, 7];
+        {[1n, 4n, 7n]}
+
+    Array types may also appear in schema declarations:
+
+    .. code-block:: sdl
+        :version-lt: 3.0
+
+        type Person {
+            property str_array -> array<str>;
+            property json_array -> array<json>;
+        }
+
+    .. code-block:: sdl
+
+        type Person {
+            str_array: array<str>;
+            json_array: array<json>;
+        }
+
+    See also the list of standard :ref:`array functions <ref_std_array>`, as
+    well as :ref:`generic functions <ref_std_generic>` such as
+    :eql:func:`len`.
 
 
 ----------
@@ -130,7 +153,7 @@ Reference
 
 .. eql:operator:: arrayidx: array<anytype> [ int64 ] -> anytype
 
-    Array indexing.
+    Accesses the array element at a given index.
 
     Example:
 
@@ -141,7 +164,8 @@ Reference
         db> select [(x := 1, y := 1), (x := 2, y := 3.3)][1];
         {(x := 2, y := 3.3)}
 
-    Negative indexing is supported:
+    This operator also allows accessing elements from the end of the array
+    using a negative index:
 
     .. code-block:: edgeql-repl
 
@@ -161,12 +185,16 @@ Reference
 
 .. eql:operator:: arrayslice: array<anytype> [ int64 : int64 ] -> anytype
 
-    Array slicing.
+    Produces a sub-array from an existing array.
 
-    An omitted lower bound defaults to zero, and an omitted upper
-    bound defaults to the size of the array.
+    Omitting the lower bound of an array slice will default to a lower bound
+    of zero.
 
-    The upper bound is non-inclusive.
+    Omitting the upper bound will default the upper bound to the length of the
+    array.
+
+    The lower bound of an array slice is inclusive while the upper bound is
+    not.
 
     Examples:
 
@@ -181,8 +209,11 @@ Reference
         db> select [1, 2, 3][:-2];
         {[1]}
 
-    Referencing an array slice beyond the array boundaries will result in
-    an empty array (unlike a direct reference to a specific index):
+    Referencing an array slice beyond the array boundaries will result in an
+    empty array (unlike a direct reference to a specific index). Slicing with
+    a lower bound less than the minimum index or a upper bound greater than
+    the maximum index are functionally equivalent to not specifying those
+    bounds for your slice:
 
     .. code-block:: edgeql-repl
 
@@ -197,7 +228,7 @@ Reference
 
 .. eql:operator:: arrayplus: array<anytype> ++ array<anytype> -> array<anytype>
 
-    Array concatenation.
+    Concatenates two arrays of the same type into one.
 
     .. code-block:: edgeql-repl
 
@@ -212,9 +243,9 @@ Reference
 
     :index: aggregate array set
 
-    Return an array made from all of the input set elements.
+    Returns an array made from all of the input set elements.
 
-    The ordering of the input set will be preserved if specified.
+    The ordering of the input set will be preserved if specified:
 
     .. code-block:: edgeql-repl
 
@@ -235,14 +266,14 @@ Reference
 
     :index: array access get
 
-    Return the element of *array* at the specified *index*.
+    Returns the element of a given *array* at the specified *index*.
 
-    If *index* is out of array bounds, the *default* or ``{}`` (empty set)
-    is returned.
+    If the index is out of the array's bounds, the *default* argument or
+    ``{}`` (empty set) will be returned.
 
-    This works the same as :eql:op:`array indexing operator <arrayidx>`
-    except that if the index is outside array boundaries an empty set
-    of the array element type is returned instead of raising an exception.
+    This works the same as the :eql:op:`array indexing operator <arrayidx>`,
+    except that if the index is out of bounds, an empty set
+    of the array element's type is returned instead of raising an exception:
 
     .. code-block:: edgeql-repl
 
@@ -261,33 +292,48 @@ Reference
 
     :index: set array unpack
 
-    Return array elements as a set.
+    Returns the elements of an array as a set.
 
     .. note::
 
         The ordering of the returned set is not guaranteed.
+        However, if it is wrapped in a call to :eql:func:`enumerate`,
+        the assigned indexes are guaranteed to match the array.
 
     .. code-block:: edgeql-repl
 
         db> select array_unpack([2, 3, 5]);
         {3, 2, 5}
 
+        db> select enumerate(array_unpack([2, 3, 5]));
+        {(1, 3), (0, 2), (2, 5)}
+
 
 ----------
 
 
 .. eql:function:: std::array_join(array: array<str>, delimiter: str) -> str
+                  std::array_join(array: array<bytes>, \
+                                  delimiter: bytes) -> bytes
 
     :index: join array_to_string implode
 
-    Render an array to a string.
+    Renders an array to a string or byte-string.
 
     Join a string array into a single string using a specified *delimiter*:
 
     .. code-block:: edgeql-repl
 
-        db> select to_str(['one', 'two', 'three'], ', ');
+        db> select array_join(['one', 'two', 'three'], ', ');
         {'one, two, three'}
+
+    Similarly, an array of :eql:type:`bytes` can be joined as a single value
+    using a specified *delimiter*:
+
+    .. code-block:: edgeql-repl
+
+        db> select array_join([b'\x01', b'\x02', b'\x03'], b'\xff');
+        {b'\x01\xff\x02\xff\x03'}
 
 
 ----------
@@ -297,9 +343,9 @@ Reference
 
     :index: fill
 
-    Make a new array of specified size and filled with specified value.
+    Returns an array of the specified size, filled with the provided value.
 
-    Create anarray of size *n* where every element has the value *val*.
+    Create an array of size *n* where every element has the value *val*.
 
     .. code-block:: edgeql-repl
 
@@ -317,7 +363,7 @@ Reference
                                      new: anytype) \
                   -> array<anytype>
 
-    Return an array where all occurrences of a particualr value are replaced.
+    Returns an array with all occurrences of one value replaced by another.
 
     Return an array where every *old* value is replaced with *new*.
 

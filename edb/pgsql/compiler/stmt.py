@@ -19,7 +19,9 @@
 
 from __future__ import annotations
 
-from typing import *
+from typing import Optional
+
+from edb import errors
 
 from edb.ir import ast as irast
 from edb.ir import utils as irutils
@@ -30,23 +32,29 @@ from . import astutils
 from . import clauses
 from . import context
 from . import dispatch
+from . import enums as pgce
 from . import group
 from . import dml
+from . import output
 from . import pathctx
 
 
 @dispatch.compile.register(irast.SelectStmt)
 def compile_SelectStmt(
-        stmt: irast.SelectStmt, *,
-        ctx: context.CompilerContextLevel) -> pgast.BaseExpr:
+    stmt: irast.SelectStmt, *, ctx: context.CompilerContextLevel
+) -> pgast.BaseExpr:
 
     if ctx.singleton_mode:
+        if not irutils.is_trivial_select(stmt):
+            raise errors.UnsupportedFeatureError(
+                'Clause on SELECT statement in simple expression')
+
         return dispatch.compile(stmt.result, ctx=ctx)
 
     parent_ctx = ctx
     with parent_ctx.substmt() as ctx:
         # Common setup.
-        clauses.compile_dml_bindings(stmt, ctx=ctx)
+        clauses.compile_volatile_bindings(stmt, ctx=ctx)
 
         query = ctx.stmt
 
@@ -55,31 +63,30 @@ def compile_SelectStmt(
 
         iterator_set = stmt.iterator_stmt
         last_iterator: Optional[irast.Set] = None
-        if iterator_set and irutils.contains_dml(stmt):
-            # If we have iterators and we contain nested DML
-            # statements, we need to hoist the iterators into CTEs and
-            # then explicitly join them back into the query.
-            iterator = dml.compile_iterator_cte(iterator_set, ctx=ctx)
-            ctx.path_scope = ctx.path_scope.new_child()
-            dml.merge_iterator(iterator, ctx.rel, ctx=ctx)
+        if iterator_set:
+            if irutils.contains_dml(stmt):
+                # If we have iterators and we contain nested DML
+                # statements, we need to hoist the iterators into CTEs and
+                # then explicitly join them back into the query.
+                iterator = dml.compile_iterator_cte(iterator_set, ctx=ctx)
+                ctx.path_scope = ctx.path_scope.new_child()
+                dml.merge_iterator(iterator, ctx.rel, ctx=ctx)
 
-            ctx.enclosing_cte_iterator = iterator
-            last_iterator = stmt.iterator_stmt
+                ctx.enclosing_cte_iterator = iterator
+                last_iterator = stmt.iterator_stmt
 
-        else:
-            if iterator_set:
+            else:
                 # Process FOR clause.
                 with ctx.new() as ictx:
                     clauses.setup_iterator_volatility(last_iterator, ctx=ictx)
                     iterator_rvar = clauses.compile_iterator_expr(
-                        query, iterator_set, ctx=ictx)
-                for aspect in {'identity', 'value'}:
+                        query, iterator_set, is_dml=False, ctx=ictx)
+                for aspect in {pgce.PathAspect.IDENTITY, pgce.PathAspect.VALUE}:
                     pathctx.put_path_rvar(
                         query,
                         path_id=iterator_set.path_id,
                         rvar=iterator_rvar,
                         aspect=aspect,
-                        env=ctx.env,
                     )
                 last_iterator = iterator_set
 
@@ -98,27 +105,28 @@ def compile_SelectStmt(
                 query.where_clause = astutils.extend_binop(
                     query.where_clause,
                     clauses.compile_filter_clause(
-                        stmt.where, stmt.where_card, ctx=ctx))
+                        stmt.where, stmt.where_card, ctx=ictx))
 
             # The ORDER BY clause
             if stmt.orderby is not None:
-                with ctx.new() as ictx:
+                with ictx.new() as octx:
                     query.sort_clause = clauses.compile_orderby_clause(
-                        stmt.orderby, ctx=ictx)
+                        stmt.orderby, ctx=octx)
 
-        if outvar.nullable and query is ctx.toplevel_stmt:
-            # A nullable var has bubbled up to the top,
-            # filter out NULLs.
-            valvar: pgast.BaseExpr = pathctx.get_path_value_var(
+        # Need to filter out NULLs in certain cases:
+        if outvar.nullable and (
+            # A nullable var has bubbled up to the top
+            query is ctx.toplevel_stmt
+            # The cardinality is being overridden, so we need to make
+            # sure there aren't extra NULLs in single set
+            or stmt.card_inference_override
+            # There is a LIMIT or OFFSET clause and NULLs would interfere
+            or stmt.limit
+            or stmt.offset
+        ):
+            valvar = pathctx.get_path_value_var(
                 query, stmt.result.path_id, env=ctx.env)
-            if isinstance(valvar, pgast.TupleVar):
-                valvar = pgast.ImplicitRowExpr(
-                    args=[e.val for e in valvar.elements])
-
-            query.where_clause = astutils.extend_binop(
-                query.where_clause,
-                pgast.NullTest(arg=valvar, negated=True)
-            )
+            output.add_null_test(valvar, query)
 
         # The OFFSET clause
         query.limit_offset = clauses.compile_limit_offset_clause(
@@ -133,20 +141,20 @@ def compile_SelectStmt(
 
 @dispatch.compile.register(irast.GroupStmt)
 def compile_GroupStmt(
-        stmt: irast.GroupStmt, *,
-        ctx: context.CompilerContextLevel) -> pgast.BaseExpr:
+    stmt: irast.GroupStmt, *, ctx: context.CompilerContextLevel
+) -> pgast.BaseExpr:
     return group.compile_group(stmt, ctx=ctx)
 
 
 @dispatch.compile.register(irast.InsertStmt)
 def compile_InsertStmt(
-        stmt: irast.InsertStmt, *,
-        ctx: context.CompilerContextLevel) -> pgast.Query:
+    stmt: irast.InsertStmt, *, ctx: context.CompilerContextLevel
+) -> pgast.Query:
 
     parent_ctx = ctx
     with parent_ctx.substmt() as ctx:
         # Common DML bootstrap.
-        parts = dml.init_dml_stmt(stmt, parent_ctx=parent_ctx, ctx=ctx)
+        parts = dml.init_dml_stmt(stmt, ctx=ctx)
 
         top_typeref = stmt.subject.typeref
         if top_typeref.material_type is not None:
@@ -162,19 +170,18 @@ def compile_InsertStmt(
         )
 
         # Wrap up.
-        return dml.fini_dml_stmt(
-            stmt, ctx.rel, parts, parent_ctx=parent_ctx, ctx=ctx)
+        return dml.fini_dml_stmt(stmt, ctx.rel, parts, ctx=ctx)
 
 
 @dispatch.compile.register(irast.UpdateStmt)
 def compile_UpdateStmt(
-        stmt: irast.UpdateStmt, *,
-        ctx: context.CompilerContextLevel) -> pgast.Query:
+    stmt: irast.UpdateStmt, *, ctx: context.CompilerContextLevel
+) -> pgast.Query:
 
     parent_ctx = ctx
     with parent_ctx.substmt() as ctx:
         # Common DML bootstrap.
-        parts = dml.init_dml_stmt(stmt, parent_ctx=parent_ctx, ctx=ctx)
+        parts = dml.init_dml_stmt(stmt, ctx=ctx)
         range_cte = parts.range_cte
         assert range_cte is not None
 
@@ -191,27 +198,30 @@ def compile_UpdateStmt(
                 ctx=ctx,
             )
 
-        return dml.fini_dml_stmt(
-            stmt, ctx.rel, parts, parent_ctx=parent_ctx, ctx=ctx)
+        return dml.fini_dml_stmt(stmt, ctx.rel, parts, ctx=ctx)
 
 
 @dispatch.compile.register(irast.DeleteStmt)
 def compile_DeleteStmt(
-        stmt: irast.DeleteStmt, *,
-        ctx: context.CompilerContextLevel) -> pgast.Query:
+    stmt: irast.DeleteStmt, *, ctx: context.CompilerContextLevel
+) -> pgast.Query:
 
     parent_ctx = ctx
     with parent_ctx.substmt() as ctx:
         # Common DML bootstrap
-        parts = dml.init_dml_stmt(stmt, parent_ctx=parent_ctx, ctx=ctx)
+        parts = dml.init_dml_stmt(stmt, ctx=ctx)
 
         range_cte = parts.range_cte
         assert range_cte is not None
         ctx.toplevel_stmt.append_cte(range_cte)
 
-        for delete_cte, _ in parts.dml_ctes.values():
-            ctx.toplevel_stmt.append_cte(delete_cte)
+        for typeref, (delete_cte, _) in parts.dml_ctes.items():
+            dml.process_delete_body(
+                ir_stmt=stmt,
+                delete_cte=delete_cte,
+                typeref=typeref,
+                ctx=ctx,
+            )
 
         # Wrap up.
-        return dml.fini_dml_stmt(
-            stmt, ctx.rel, parts, parent_ctx=parent_ctx, ctx=ctx)
+        return dml.fini_dml_stmt(stmt, ctx.rel, parts, ctx=ctx)

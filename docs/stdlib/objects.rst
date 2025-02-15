@@ -14,10 +14,10 @@ Base Objects
       - Root for user-defined object types
 
 
-``std::BaseObject`` is the root of the object type hierarchy and all
-object types in EdgeDB, including system types, extend ``std::BaseObject``
-directly or indirectly.  User-defined object types extend from ``std::Object``,
-which is a subtype of ``std::BaseObject``.
+``std::BaseObject`` is the root of the object type hierarchy and all object
+types in EdgeDB, including system types, extend it either directly or
+indirectly.  User-defined object types extend from :eql:type:`std::Object`
+type, which is a subtype of ``std::BaseObject``.
 
 
 ---------
@@ -25,11 +25,12 @@ which is a subtype of ``std::BaseObject``.
 
 .. eql:type:: std::BaseObject
 
-    Root object type.
+    The root object type.
 
     Definition:
 
     .. code-block:: sdl
+        :version-lt: 3.0
 
         abstract type std::BaseObject {
             # Universally unique object identifier
@@ -43,9 +44,23 @@ which is a subtype of ``std::BaseObject``.
             required readonly link __type__ -> schema::ObjectType;
         }
 
-    Subtypes may override the ``id`` property, but only to valid uuid
-    generation functions. Currently, these
-    are :eql:func:`uuid_generate_v1mc` and :eql:func:`uuid_generate_v4`.
+    .. code-block:: sdl
+
+        abstract type std::BaseObject {
+            # Universally unique object identifier
+            required id: uuid {
+                default := (select std::uuid_generate_v1mc());
+                readonly := true;
+                constraint exclusive;
+            }
+
+            # Object type in the information schema.
+            required readonly __type__: schema::ObjectType;
+        }
+
+    Subtypes may override the ``id`` property, but only with a valid UUID
+    generation function. Currently, these are :eql:func:`uuid_generate_v1mc`
+    and :eql:func:`uuid_generate_v4`.
 
 
 ---------
@@ -53,7 +68,7 @@ which is a subtype of ``std::BaseObject``.
 
 .. eql:type:: std::Object
 
-    Root object type for user-defined types.
+    The root object type for user-defined types.
 
     Definition:
 

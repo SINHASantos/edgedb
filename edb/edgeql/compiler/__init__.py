@@ -126,7 +126,21 @@ dispatch.py
 
 
 from __future__ import annotations
-from typing import *
+from typing import (
+    Any,
+    Callable,
+    Optional,
+    Tuple,
+    TypeVar,
+    AbstractSet,
+    Mapping,
+    Dict,
+    List,
+    Set,
+    cast,
+    overload,
+    TYPE_CHECKING,
+)
 
 # WARNING: this package is in a tight import loop with various modules
 # in edb.schema, so no direct imports from either this package or
@@ -134,8 +148,6 @@ from typing import *
 # use the lazy-loading mechanism.
 
 import functools
-
-from edb import errors
 
 from edb.edgeql import ast as qlast
 from edb.edgeql import codegen as qlcodegen
@@ -148,7 +160,6 @@ from .options import CompilerOptions as CompilerOptions  # "as" for reexport
 
 if TYPE_CHECKING:
     from edb.schema import schema as s_schema
-    from edb.schema import types as s_types
 
     from edb.ir import ast as irast
     from edb.ir import staeval as ireval
@@ -170,15 +181,50 @@ else:
 #: Compiler modules lazy-load guard.
 _LOADED = False
 
+Tf = TypeVar('Tf', bound=Callable[..., Any])
 
-def compiler_entrypoint(func: Callable[..., Any]) -> Callable[..., Any]:
+
+def compiler_entrypoint(func: Tf) -> Tf:
     @functools.wraps(func)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
         if not _LOADED:
             _load()
         return func(*args, **kwargs)
 
-    return wrapper
+    return cast(Tf, wrapper)
+
+
+@overload
+def compile_ast_to_ir(
+    tree: qlast.Expr | qlast.Command,
+    schema: s_schema.Schema,
+    *,
+    script_info: Optional[irast.ScriptInfo] = None,
+    options: Optional[CompilerOptions] = None,
+) -> irast.Statement:
+    pass
+
+
+@overload
+def compile_ast_to_ir(
+    tree: qlast.ConfigOp,
+    schema: s_schema.Schema,
+    *,
+    script_info: Optional[irast.ScriptInfo] = None,
+    options: Optional[CompilerOptions] = None,
+) -> irast.ConfigCommand:
+    pass
+
+
+@overload
+def compile_ast_to_ir(
+    tree: qlast.Base,
+    schema: s_schema.Schema,
+    *,
+    script_info: Optional[irast.ScriptInfo] = None,
+    options: Optional[CompilerOptions] = None,
+) -> irast.Statement | irast.ConfigCommand:
+    pass
 
 
 @compiler_entrypoint
@@ -188,8 +234,8 @@ def compile_ast_to_ir(
     *,
     script_info: Optional[irast.ScriptInfo] = None,
     options: Optional[CompilerOptions] = None,
-) -> irast.Command:
-    """Compile given EdgeQL AST into EdgeDB IR.
+) -> irast.Statement | irast.ConfigCommand:
+    """Compile given EdgeQL AST into Gel IR.
 
     This is the normal compiler entry point.  It assumes that *tree*
     represents a complete statement.
@@ -229,6 +275,10 @@ def compile_ast_to_ir(
 
     ctx = stmtctx_mod.init_context(schema=schema, options=options)
 
+    if isinstance(tree, qlast.Expr) and ctx.implicit_limit:
+        tree = qlast.SelectQuery(result=tree, implicit=True)
+        tree.limit = qlast.Constant.integer(ctx.implicit_limit)
+
     if not script_info:
         script_info = stmtctx_mod.preprocess_script([tree], ctx=ctx)
 
@@ -255,7 +305,7 @@ def compile_ast_to_ir(
         debug.dump(scopes)
 
     if debug.flags.edgeql_compile or debug.flags.edgeql_compile_ir:
-        debug.header('EdgeDB IR')
+        debug.header('Gel IR')
         debug.dump(ir_expr, schema=getattr(ir_expr, 'schema', None))
 
     return ir_expr
@@ -268,7 +318,7 @@ def compile_ast_fragment_to_ir(
     *,
     options: Optional[CompilerOptions] = None,
 ) -> irast.Statement:
-    """Compile given EdgeQL AST fragment into EdgeDB IR.
+    """Compile given EdgeQL AST fragment into Gel IR.
 
     Unlike :func:`~compile_ast_to_ir` above, this does not assume
     that the AST *tree* is a complete statement.  The expression
@@ -295,14 +345,7 @@ def compile_ast_fragment_to_ir(
     ctx = stmtctx_mod.init_context(schema=schema, options=options)
     ir_set = dispatch_mod.compile(tree, ctx=ctx)
 
-    result_type: s_types.Type
-    try:
-        result_type = inference_mod.infer_type(ir_set, ctx.env)
-    except errors.QueryError:
-        # Not all fragments can be resolved into a concrete type,
-        # that's OK.
-        # XXX: Is it really? This doesn't come up in the tests at all.
-        result_type = cast(s_types.Type, None)
+    result_type = ctx.env.set_types[ir_set]
 
     return irast.Statement(
         expr=ir_set,
@@ -320,10 +363,11 @@ def compile_ast_fragment_to_ir(
         view_shapes_metadata={},
         schema_refs=frozenset(),
         schema_ref_exprs=None,
-        new_coll_types=frozenset(),
         scope_tree=ctx.path_scope,
         type_rewrites={},
         singletons=[],
+        triggers=(),
+        warnings=tuple(ctx.env.warnings),
     )
 
 
@@ -369,6 +413,26 @@ def evaluate_to_python_val(
     """
     tree = qlparser.parse_fragment(expr)
     return evaluate_ast_to_python_val(tree, schema, modaliases=modaliases)
+
+
+def evaluate_ir_statement_to_python_val(
+    ir: irast.Statement,
+) -> Any:
+    """Evaluate the given EdgeQL IR AST as a constant expression.
+
+    Args:
+        ir:
+            EdgeQL IR Statement AST.
+
+    Returns:
+        The result of the evaluation as a Python value and the associated IR.
+
+    Raises:
+        If the expression is not constant, or is otherwise not supported by
+        the const evaluator, the function will raise
+        :exc:`ir.staeval.UnsupportedExpressionError`.
+    """
+    return ireval.evaluate_to_python_val(ir.expr, schema=ir.schema)
 
 
 def evaluate_ast_to_python_val_and_ir(
@@ -513,12 +577,12 @@ def normalize(
 
 @compiler_entrypoint
 def renormalize_compat(
-    tree: qlast.Base,
+    tree: qlast.Base_T,
     orig_text: str,
     *,
     schema: s_schema.Schema,
     localnames: AbstractSet[str] = frozenset(),
-) -> qlast.Base:
+) -> qlast.Base_T:
     """Renormalize an expression normalized with imprint_expr_context().
 
     This helper takes the original, unmangled expression, an EdgeQL AST

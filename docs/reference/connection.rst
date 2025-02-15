@@ -28,6 +28,9 @@ There are several ways to uniquely identify an EdgeDB instance.
   * - Instance name
     - ``--instance/-I <name>``
     - ``EDGEDB_INSTANCE``
+  * - Secret key (required in some EdgeDB Cloud scenarios; see description)
+    - ``--secret-key``
+    - ``EDGEDB_SECRET_KEY``
   * - DSN
     - ``--dsn <dsn>``
     - ``EDGEDB_DSN``
@@ -51,7 +54,7 @@ Let's dig into each of these a bit more.
 
 **Instance name**
   All local instances (instances created on your local machine using the CLI)
-  are associated with a name. This name is that's needed to connect; under the
+  are associated with a name. This name is what's needed to connect; under the
   hood, the CLI stores the instance credentials (username, password, etc) on
   your file system in the EdgeDB :ref:`config directory
   <ref_cli_edgedb_paths>`. The CLI and client libraries look up these
@@ -62,28 +65,71 @@ Let's dig into each of these a bit more.
   locally, so you can connect to a remote instance using just its name, just
   like a local instance.
 
+  If you have authenticated with EdgeDB Cloud in the CLI using the
+  :ref:`ref_cli_edgedb_cloud_login` command, you can address your own EdgeDB
+  Cloud instances using the instance name format
+  ``<org-name>/<instance-name>``. If you are not authenticated,
+
+.. _ref_reference_connection_secret_key:
+
+**Secret key**
+  If you want to connect to an EdgeDB Cloud instance in either of these
+  scenarios:
+
+  - from a client binding
+  - from the CLI to an instance not belonging to the currently authenticated
+    EdgeDB Cloud user
+
+  you will need to provide a secret key in addition to the instance name.
+  Generate a dedicated secret key for the instance via the CLI with
+  :ref:`ref_cli_edgedb_cloud_secretkey_create` or via the web UI's "Secret
+  Keys" pane in your instance dashboard.
+
 **DSN**
   DSNs (data source names, also referred to as "connection strings") are a
   convenient and flexible way to specify connection information with a simple
   string. It takes the following form:
 
-  .. code-block::
+  .. versionchanged:: _default
 
-    edgedb://USERNAME:PASSWORD@HOSTNAME:PORT/DATABASE
+    .. code-block::
 
-    # example
-    edgedb://alice:pa$$w0rd@example.com:1234/my_db
+      edgedb://USERNAME:PASSWORD@HOSTNAME:PORT/DATABASE
+
+      # example
+      edgedb://alice:pa$$w0rd@example.com:1234/my_db
+
+  .. versionchanged:: 5.0
+
+    .. code-block::
+
+      edgedb://USERNAME:PASSWORD@HOSTNAME:PORT/BRANCH
+
+      # example
+      edgedb://alice:pa$$w0rd@example.com:1234/my_branch
 
   All components of the DSN are optional; technically ``edgedb://`` is a valid
   DSN. The unspecified values will fall back to their defaults:
 
-  .. code-block::
+  .. versionchanged:: _default
 
-    Host: "localhost"
-    Port: 5656
-    User: "edgedb"
-    Password: null
-    Database name: "edgedb"
+    .. code-block::
+
+      Host: "localhost"
+      Port: 5656
+      User: "edgedb"
+      Password: null
+      Database name: "edgedb"
+
+  .. versionchanged:: 5.0
+
+    .. code-block::
+
+      Host: "localhost"
+      Port: 5656
+      User: "edgedb"
+      Password: null
+      Branch name: "main"
 
   DSNs also accept query parameters to support advanced use cases. Read the
   :ref:`DSN Specification <ref_dsn>` reference for details.
@@ -103,16 +149,31 @@ Let's dig into each of these a bit more.
   file into version control could present a security risk and is not
   recommended.
 
-  .. code-block:: json
+  .. versionchanged:: _default
 
-    {
-      "host": "localhost",
-      "port": 10702,
-      "user": "testuser",
-      "password": "testpassword",
-      "database": "edgedb",
-      "tls_cert_data": "-----BEGIN CERTIFICATE-----\nabcdef..."
-    }
+    .. code-block:: json
+
+      {
+        "host": "localhost",
+        "port": 10702,
+        "user": "testuser",
+        "password": "testpassword",
+        "database": "edgedb",
+        "tls_cert_data": "-----BEGIN CERTIFICATE-----\nabcdef..."
+      }
+
+  .. versionchanged:: 5.0
+
+    .. code-block:: json
+
+      {
+        "host": "localhost",
+        "port": 10702,
+        "user": "testuser",
+        "password": "testpassword",
+        "branch": "main",
+        "tls_cert_data": "-----BEGIN CERTIFICATE-----\nabcdef..."
+      }
 
   Relative paths are resolved relative to the current working directory.
 
@@ -125,7 +186,7 @@ Let's dig into each of these a bit more.
   instance's credentials, and connect automatically.
 
   For more information on how this works, check out the `release post
-  </blog/introducing-edgedb-projects>`_ for ``edgedb project``.
+  <https://www.edgedb.com/blog/introducing-edgedb-projects>`_ for ``edgedb project``.
 
 .. _ref_reference_connection_priority:
 
@@ -144,14 +205,14 @@ for production), or rely on ``edgedb project`` (recommended for development).
    such, explicitly provided parameters are given the highest priority.
 
    In the context of the client libraries, this means passing an option
-   explicitly into the ``connect`` call. Here's how this looks using the
+   explicitly into the ``client creation`` call. Here's how this looks using the
    JavaScript library:
 
    .. code-block:: javascript
 
       import * as edgedb from "edgedb";
 
-      const pool = await edgedb.connect({
+      const pool = await edgedb.createClient({
         instance: "my_instance"
       });
 
@@ -193,12 +254,11 @@ for production), or rely on ``edgedb project`` (recommended for development).
 
    .. code-block:: javascript
 
-      import * as edgedb from "edgedb";
+      import { createClient } from "edgedb";
 
-      const pool = edgedb.connect();
-      pool.query(`select 2 + 2;`).then(result => {
-        // do stuff
-      })
+      const client = createClient();
+      const result = await client.querySingle("select 2 + 2;");
+      console.log(result); // 4
 
    .. warning::
 
@@ -224,7 +284,7 @@ connection fails.
 
 .. warning::
 
-   Within a given priority level, you cannot specify multiple instances
+   Within a given priority level, you cannot specify multiple instances of
    "instance selection parameters" simultaneously. For instance, specifying
    both ``EDGEDB_INSTANCE`` and ``EDGEDB_DSN`` environment variables will
    result in an error.
@@ -244,27 +304,57 @@ configuration.
 The following "granular" parameters will override any value set by the
 instance-level configuration object.
 
-.. list-table::
+.. versionchanged:: _default
 
-  * - **Environment variable**
-    - **CLI flag**
-  * - ``EDGEDB_DATABASE``
-    - ``--database/-d <name>``
-  * - ``EDGEDB_USER``
-    - ``--user/-u <user>``
-  * - ``EDGEDB_PASSWORD``
-    - ``--password <pass>``
-  * - ``EDGEDB_TLS_CA_FILE``
-    - ``--tls-ca-file <path>``
-  * - ``EDGEDB_CLIENT_TLS_SECURITY``
-    - ``--tls-security``
-  * - ``EDGEDB_CLIENT_SECURITY``
-    - N/A
+  .. list-table::
 
-**EDGEDB_DATABASE**
-  Each EdgeDB *instance* can contain multiple *databases*. When in instance is
-  created, a default database named ``edgedb`` is created. Unless otherwise
-  specified, all incoming connections connect to the ``edgedb`` database.
+    * - **Environment variable**
+      - **CLI flag**
+    * - ``EDGEDB_DATABASE``
+      - ``--database/-d <name>``
+    * - ``EDGEDB_USER``
+      - ``--user/-u <user>``
+    * - ``EDGEDB_PASSWORD``
+      - ``--password <pass>``
+    * - ``EDGEDB_TLS_CA_FILE``
+      - ``--tls-ca-file <path>``
+    * - ``EDGEDB_CLIENT_TLS_SECURITY``
+      - ``--tls-security``
+    * - ``EDGEDB_CLIENT_SECURITY``
+      - N/A
+
+  **EDGEDB_DATABASE**
+    Each EdgeDB *instance* can contain multiple *databases*. When an instance is
+    created, a default database named ``edgedb`` is created. Unless otherwise
+    specified, all incoming connections connect to the ``edgedb`` database.
+
+
+.. versionchanged:: 5.0
+
+  .. list-table::
+
+    * - **Environment variable**
+      - **CLI flag**
+    * - ``EDGEDB_BRANCH``
+      - ``--branch/-b <name>``
+    * - ``EDGEDB_USER``
+      - ``--user/-u <user>``
+    * - ``EDGEDB_PASSWORD``
+      - ``--password <pass>``
+    * - ``EDGEDB_TLS_CA_FILE``
+      - ``--tls-ca-file <path>``
+    * - ``EDGEDB_TLS_SERVER_NAME``
+      - ``--tls-server-name``
+    * - ``EDGEDB_CLIENT_TLS_SECURITY``
+      - ``--tls-security``
+    * - ``EDGEDB_CLIENT_SECURITY``
+      - N/A
+
+  **EDGEDB_BRANCH**
+    Each EdgeDB *instance* can be branched multiple times. When an instance is
+    created, a default branch named ``main`` is created. For CLI-managed
+    instances, connections are made to the currently active branch. In other
+    cases, incoming connections connect to the ``main`` branch by default.
 
 **EDGEDB_USER/EDGEDB_PASSWORD**
   These are the credentials of the database user account to connect to the
@@ -285,6 +375,10 @@ instance-level configuration object.
   and provide a path to its location on the filesystem. Otherwise TLS will fail
   to connect.
 
+**EDGEDB_TLS_SERVER_NAME (SNI)**
+  If for some reason target instance IP address can't be resolved from the
+  hostname, you can provide SNI.
+
 **EDGEDB_CLIENT_TLS_SECURITY**
   Sets the TLS security mode. Determines whether certificate and hostname
   verification is enabled. Possible values:
@@ -292,7 +386,7 @@ instance-level configuration object.
   - ``"strict"`` (**default**) — certificates and hostnames will be verified
   - ``"no_host_verification"`` — verify certificates but not hostnames
   - ``"insecure"`` — client libraries will trust self-signed TLS certificates.
-    useful for self-signed or custom certificates.
+    Useful for self-signed or custom certificates.
 
   This setting defaults to ``"strict"`` unless a custom certificate is
   supplied, in which case it is set to ``"no_host_verification"``.
@@ -313,9 +407,10 @@ instance-level configuration object.
 Override behavior
 ^^^^^^^^^^^^^^^^^
 
-When specified, the connection parameters (user, password, and database) will
-*override* the corresponding element of a DSN, credentials file, etc. For
-instance, consider the following environment variables:
+When specified, the connection parameters (user, password, and
+:versionreplace:`database;5.0:branch`) will *override* the corresponding
+element of a DSN, credentials file, etc. For instance, consider the following
+environment variables:
 
 .. code-block::
 
@@ -330,21 +425,20 @@ modified DSN: ``edgedb://newuser:newpass@hostname.com:5656``.
 Overriding across priority levels
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-This override behavior only happens *same or lower priority level*. For
+Override behavior can only happen at the *same or lower priority level*. For
 instance:
 
 - ``EDGEDB_PASSWORD`` **will** override the password specified in
   ``EDGEDB_DSN``
-- ``EDGEDB_PASSWORD`` **will be ignored** if a DSN is passed explicitly using
-  the ``--dsn`` flag. Explicit parameters take precedence over environment
-  variables. To override the password of an explicit DSN, you need to pass it
-  explicitly as well:
+- ``EDGEDB_PASSWORD`` **will be ignored** if a DSN is passed
+  explicitly using the ``--dsn`` flag. Explicit parameters take
+  precedence over environment variables. To override the password of
+  an explicit DSN, you need to pass it explicitly as well:
 
   .. code-block:: bash
 
      $ edgedb --dsn edgedb://username:oldpass@hostname.com --password qwerty
      # connects to edgedb://username:qwerty@hostname.com
 
-- ``EDGEDB_PASSWORD`` **will** override the stored password associated with a
-  project-linked instance. (This is unlikely to be desirable.)
-
+- ``EDGEDB_PASSWORD`` **will** override the stored password associated
+  with a project-linked instance. (This is unlikely to be desirable.)

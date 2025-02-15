@@ -20,7 +20,6 @@
 """Patches to apply to databases"""
 
 from __future__ import annotations
-from typing import *
 
 
 def get_version_key(num_patches: int):
@@ -36,12 +35,29 @@ def get_version_key(num_patches: int):
     the key based on the number of schema layout patches that we can
     *see*, we still compute the right key.
     """
-    num_major = sum(p == 'edgeql+schema' for p, _ in PATCHES[:num_patches])
+    num_major = sum(
+        p.startswith('edgeql+schema') for p, _ in PATCHES[:num_patches])
     if num_major == 0:
         return ''
     else:
         return f'_v{num_major}'
 
 
+"""
+The actual list of patches. The patches are (kind, script) pairs.
+
+The current kinds are:
+ * sql - simply runs a SQL script
+ * metaschema-sql - create a function from metaschema
+ * edgeql - runs an edgeql DDL command
+ * edgeql+schema - runs an edgeql DDL command and updates the std schemas
+ * edgeql+user_ext|<extname> - updates extensions installed in user databases
+ *                           - should be paired with an ext-pkg patch
+ * ...+config - updates config views
+ * ext-pkg - installs an extension package given a name
+ * repair - fix up inconsistencies in *user* schemas
+ * sql-introspection - refresh all sql introspection views
+ * ...+testmode - only run the patch in testmode. Works with any patch kind.
+"""
 PATCHES: list[tuple[str, str]] = [
 ]

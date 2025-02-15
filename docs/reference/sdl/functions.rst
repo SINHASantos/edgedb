@@ -40,7 +40,7 @@ commands <ref_eql_ddl_functions>`.
     function <name> ([ <argspec> ] [, ... ]) -> <returnspec>
     "{"
         [ <annotation-declarations> ]
-        [ volatility := {'Immutable' | 'Stable' | 'Volatile'} ]
+        [ volatility := {'Immutable' | 'Stable' | 'Volatile' | 'Modifying'} ]
         [ using ( <expr> ) ; ]
         [ using <language> <functionbody> ; ]
         [ ... ]
@@ -101,6 +101,8 @@ This declaration defines a new constraint with the following options:
     argument as a *whole set*, as opposed to being called on the input
     product element-by-element.
 
+    User defined functions can not use ``set of`` arguments.
+
     The ``optional`` qualifier indicates that the function will be called
     if the argument is an empty set.  The default behavior is to return
     an empty set if the argument is not marked as ``optional``.
@@ -127,23 +129,26 @@ This declaration defines a new constraint with the following options:
 
 The valid SDL sub-declarations are listed below:
 
-:eql:synopsis:`volatility := {'Immutable' | 'Stable' | 'Volatile'}`
+:eql:synopsis:`volatility := {'Immutable' | 'Stable' | 'Volatile' | 'Modifying'}`
     Function volatility determines how aggressively the compiler can
     optimize its invocations.
 
-    If not explicitly specified the function volatility is set to
-    ``Volatile`` by default.
+    If not explicitly specified the function volatility is
+    :ref:`inferred <ref_reference_volatility>` from the function body.
 
-    * A ``Volatile`` function can modify the database and can return
-      different results on successive calls with the same arguments.
+    * An ``Immutable`` function cannot modify the database and is
+      guaranteed to return the same results given the same arguments
+      *in all statements*.
 
     * A ``Stable`` function cannot modify the database and is
       guaranteed to return the same results given the same
       arguments *within a single statement*.
 
-    * An ``Immutable`` function cannot modify the database and is
-      guaranteed to return the same results given the same arguments
-      *forever*.
+    * A ``Volatile`` function cannot modify the database and can return
+      different results on successive calls with the same arguments.
+
+    * A ``Modifying`` function can modify the database and can return
+      different results on successive calls with the same arguments.
 
 :eql:synopsis:`using ( <expr> )`
     Specified the body of the function.  :eql:synopsis:`<expr>` is an
@@ -178,6 +183,8 @@ are called *overloaded functions*.
   * - :ref:`Schema > Functions <ref_datamodel_functions>`
   * - :ref:`DDL > Functions <ref_eql_ddl_functions>`
   * - :ref:`Reference > Function calls <ref_reference_function_call>`
-  * - :ref:`Introspection > Functions <ref_eql_introspection_functions>`
+  * - :ref:`Introspection > Functions <ref_datamodel_introspection_functions>`
   * - :ref:`Cheatsheets > Functions <ref_cheatsheet_functions>`
+  * - `Tutorial > Advanced EdgeQL > User-Defined Functions
+      </tutorial/advanced-edgeql/user-def-functions>`_
 

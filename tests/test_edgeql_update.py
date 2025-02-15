@@ -255,7 +255,7 @@ class TestUpdate(tb.QueryTestCase):
         )
 
     async def test_edgeql_update_returning_01(self):
-        orig1, orig2, orig3 = self.original
+        _orig1, orig2, _orig3 = self.original
 
         await self.assert_query_result(
             r"""
@@ -326,7 +326,7 @@ class TestUpdate(tb.QueryTestCase):
         )
 
     async def test_edgeql_update_returning_03(self):
-        orig1, orig2, orig3 = self.original
+        _orig1, _orig2, _orig3 = self.original
 
         await self.assert_query_result(
             r"""
@@ -541,6 +541,16 @@ class TestUpdate(tb.QueryTestCase):
                 UPDATE foo SET { bar := 2 };
             ''')
 
+    async def test_edgeql_update_bad_02(self):
+        async with self.assertRaisesRegexTx(
+            edgedb.QueryError,
+            r'update standard library type',
+        ):
+            await self.con.execute('''\
+                UPDATE schema::Migration SET { script := 'foo'};
+            ''')
+
+    @tb.ignore_warnings('more than one.* in a FILTER clause')
     async def test_edgeql_update_filter_01(self):
         await self.assert_query_result(
             r"""
@@ -562,6 +572,7 @@ class TestUpdate(tb.QueryTestCase):
             ['bad test'] * 3,
         )
 
+    @tb.ignore_warnings('more than one.* in a FILTER clause')
     async def test_edgeql_update_filter_02(self):
         await self.assert_query_result(
             r"""
@@ -866,6 +877,7 @@ class TestUpdate(tb.QueryTestCase):
             ]
         )
 
+    @tb.ignore_warnings('more than one.* in a FILTER clause')
     async def test_edgeql_update_multiple_08(self):
         await self.con.execute("""
             INSERT UpdateTest {
@@ -2151,32 +2163,6 @@ class TestUpdate(tb.QueryTestCase):
             ]
         )
 
-    async def test_edgeql_update_in_conditional_bad_01(self):
-        with self.assertRaisesRegex(
-                edgedb.QueryError,
-                'UPDATE statements cannot be used'):
-            await self.con.execute(r'''
-                SELECT
-                    (SELECT UpdateTest)
-                    ??
-                    (UPDATE UpdateTest SET { name := 'no way' });
-            ''')
-
-    async def test_edgeql_update_in_conditional_bad_02(self):
-        with self.assertRaisesRegex(
-                edgedb.QueryError,
-                'UPDATE statements cannot be used'):
-            await self.con.execute(r'''
-                SELECT
-                    (SELECT UpdateTest FILTER .name = 'foo')
-                    IF EXISTS UpdateTest
-                    ELSE (
-                        (SELECT UpdateTest)
-                        UNION
-                        (UPDATE UpdateTest SET { name := 'no way' })
-                    );
-            ''')
-
     async def test_edgeql_update_correlated_bad_01(self):
         with self.assertRaisesRegex(
                 edgedb.QueryError,
@@ -2219,7 +2205,7 @@ class TestUpdate(tb.QueryTestCase):
             edgedb.QueryError,
             "cannot update link 'readonly_tag': "
             "it is declared as read-only",
-            _position=147,
+            _position=148,
         ):
             await self.con.execute(r'''
                 UPDATE UpdateTest
@@ -2470,7 +2456,8 @@ class TestUpdate(tb.QueryTestCase):
                         @note
                     } ORDER BY .name
                 } FILTER
-                    .name LIKE 'update-test-subtract-%';
+                    .name LIKE 'update-test-subtract-%'
+                  ORDER BY .name;
             """,
             [
                 {
@@ -2519,7 +2506,8 @@ class TestUpdate(tb.QueryTestCase):
                         @note
                     } ORDER BY .name
                 } FILTER
-                    .name LIKE 'update-test-subtract-%';
+                    .name LIKE 'update-test-subtract-%'
+                  ORDER BY .name;
             """,
             [
                 {
@@ -2864,7 +2852,7 @@ class TestUpdate(tb.QueryTestCase):
                 ) FILTER false;
             """)
 
-    async def test_edgeql_insert_multi_required_01(self):
+    async def test_edgeql_update_insert_multi_required_01(self):
         await self.con.execute("""
             insert MultiRequiredTest {
               name := "___",
@@ -2880,7 +2868,7 @@ class TestUpdate(tb.QueryTestCase):
             };
         """)
 
-    async def test_edgeql_insert_multi_required_02(self):
+    async def test_edgeql_update_insert_multi_required_02(self):
         await self.con.execute("""
             insert MultiRequiredTest {
               name := "___",
@@ -3262,16 +3250,18 @@ class TestUpdate(tb.QueryTestCase):
                 SELECT _ {
                     name,
                     str_tags ORDER BY _.str_tags
-                };
+                }
+                 ORDER BY .name;
+
             """,
             [
                 {
-                    'name': 'add-dupes-scalar-foo',
-                    'str_tags': ['baz', 'baz', 'foo', 'foo', 'foo', 'foo'],
-                },
-                {
                     'name': 'add-dupes-scalar-bar',
                     'str_tags': ['bar', 'bar', 'bar', 'bar', 'baz'],
+                },
+                {
+                    'name': 'add-dupes-scalar-foo',
+                    'str_tags': ['baz', 'baz', 'foo', 'foo', 'foo', 'foo'],
                 },
             ]
         )
@@ -3372,6 +3362,17 @@ class TestUpdate(tb.QueryTestCase):
                     {'name': 'wow', '@weight': 10},
                 ],
             }]
+        )
+
+    async def test_edgeql_update_assert_calls_01(self):
+        await self.assert_query_result(
+            r"""
+            select assert_exists(assert_single((
+              select (update UpdateTest filter .name = 'update-test1'
+                      set {comment := "test"}) { comment }
+            )));
+            """,
+            [{"comment": "test"}]
         )
 
     async def test_edgeql_update_covariant_01(self):
@@ -3478,7 +3479,7 @@ class TestUpdate(tb.QueryTestCase):
             UPDATE UpdateTestSubType
             FILTER .name = "update-covariant"
             SET {
-                statuses := (SELECT Status FILTER .name = {
+                statuses := (SELECT Status FILTER .name IN {
                                  "Broke a Type System",
                                  "Downloaded a Car",
                              })
@@ -3494,7 +3495,7 @@ class TestUpdate(tb.QueryTestCase):
                 UPDATE UpdateTestSubType
                 FILTER .name = "update-covariant"
                 SET {
-                    statuses := (SELECT Status FILTER .name = {
+                    statuses := (SELECT Status FILTER .name IN {
                                      "Broke a Type System",
                                      "Downloaded a Car",
                                      "Open",
@@ -3670,4 +3671,338 @@ class TestUpdate(tb.QueryTestCase):
                 delete UpdateTestCommented[is UpdateTestSubType]
             """,
             [],
+        )
+
+    async def test_edgeql_update_volatility_01(self):
+        # random should be executed once for each object
+        await self.con.execute(r"""
+            update UpdateTest set { comment := <str>random() };
+        """)
+
+        await self.assert_query_result(
+            r"""
+                select count(distinct UpdateTest.comment) = count(UpdateTest)
+            """,
+            [True],
+        )
+
+    async def test_edgeql_update_volatility_02(self):
+        # random should be executed once for each object
+        await self.con.execute(r"""
+            update UpdateTest set { str_tags := <str>random() };
+        """)
+
+        await self.assert_query_result(
+            r"""
+                select count(distinct UpdateTest.str_tags) = count(UpdateTest)
+            """,
+            [True],
+        )
+
+    async def test_edgeql_update_poly_overlay_01(self):
+        await self.con.execute(r"""
+            insert UpdateTestSubType { name := 'update-test4' };
+        """)
+
+        await self.assert_query_result(
+            r"""
+                select (
+                  update UpdateTest filter .name = 'update-test4'
+                  set { name := '!' }
+                ) { c1 := .name, c2 := [is UpdateTestSubType].name };
+            """,
+            [{"c1": "!", "c2": "!"}]
+        )
+
+    async def test_edgeql_update_poly_overlay_02(self):
+        await self.con.execute(r"""
+            insert UpdateTestSubType { name := 'update-test4' };
+        """)
+
+        await self.assert_query_result(
+            r"""
+                with X := (
+                  update UpdateTest filter .name = 'update-test4'
+                  set { name := '!' }
+                ),
+                select X[is UpdateTestSubType] { name };
+            """,
+            [{"name": "!"}]
+        )
+
+    async def test_edgeql_update_where_order_dml(self):
+        async with self.assertRaisesRegexTx(
+                edgedb.QueryError,
+                "INSERT statements cannot be used in a FILTER clause"):
+            await self.con.query('''
+                    update UpdateTest
+                    filter (INSERT UpdateTest {
+                                name := 't1',
+                            })
+                    set { name := '!' }
+            ''')
+
+        async with self.assertRaisesRegexTx(
+                edgedb.QueryError,
+                "UPDATE statements cannot be used in a FILTER clause"):
+            await self.con.query('''
+                    update UpdateTest
+                    filter (UPDATE UpdateTest set {
+                            name := 't1',
+                        })
+                    set { name := '!' }
+            ''')
+
+        async with self.assertRaisesRegexTx(
+                edgedb.QueryError,
+                "DELETE statements cannot be used in a FILTER clause"):
+            await self.con.query('''
+                    update UpdateTest
+                    filter (DELETE UpdateTest filter .name = 't1')
+                    set { name := '!' }
+            ''')
+
+    async def test_edgeql_update_union_overlay_01(self):
+        await self.assert_query_result(
+            r"""
+            WITH
+                 A := (UPDATE UpdateTest FILTER .name = 'update-test1'
+                       SET { comment := "!!!!!1!!!" }),
+                 B := (UPDATE UpdateTest FILTER .name = 'update-test2'
+                       SET { comment  := "foo" }),
+            SELECT assert_exists((SELECT {A, B} {name, comment}))
+            ORDER BY .name;
+            """,
+            [
+                {"name": "update-test1", "comment": "!!!!!1!!!"},
+                {"name": "update-test2", "comment": "foo"},
+            ]
+        )
+
+    @test.xfail("""
+        We incorrectly return 'foo' as the comment twice.
+        See #6222.
+    """)
+    async def test_edgeql_update_union_overlay_02(self):
+        await self.assert_query_result(
+            r"""
+            WITH
+                 A := (SELECT UpdateTest FILTER .name = 'update-test2'),
+                 B := (UPDATE UpdateTest FILTER .name = 'update-test2'
+                       SET { comment  := "foo" }),
+            SELECT assert_exists((SELECT {A, B} {name, comment}))
+            ORDER BY .comment;
+            """,
+            [
+                {"name": "update-test2", "comment": "foo"},
+                {"name": "update-test2", "comment": "second"},
+            ]
+        )
+
+    async def test_edgeql_update_dunder_default_01(self):
+        await self.con.execute(r"""
+            INSERT DunderDefaultTest01 { a := 1, b := 2, c := 3 };
+        """)
+
+        async with self.assertRaisesRegexTx(
+            edgedb.InvalidReferenceError,
+            r"__default__ cannot be used in this expression",
+            _hint='No default expression exists',
+        ):
+            await self.con.execute(r'''
+                UPDATE DunderDefaultTest01 set { a := __default__ };
+            ''')
+
+        async with self.assertRaisesRegexTx(
+            edgedb.InvalidReferenceError,
+            r"__default__ cannot be used in this expression",
+            _hint='Default expression uses __source__',
+        ):
+            await self.con.execute(r'''
+                UPDATE DunderDefaultTest01 set { b := __default__ };
+            ''')
+
+        await self.con.execute(r"""
+            UPDATE DunderDefaultTest01 set { c := __default__ };
+        """)
+
+        await self.assert_query_result(
+            r'''
+                SELECT DunderDefaultTest01 { a, b, c };
+            ''',
+            [
+                {'a': 1, 'b': 2, 'c': 1},
+            ]
+        )
+
+    async def test_edgeql_update_dunder_default_02(self):
+        await self.con.execute(r'''
+            INSERT DunderDefaultTest02_A { a := 1 };
+            INSERT DunderDefaultTest02_A { a := 2 };
+            INSERT DunderDefaultTest02_A { a := 3 };
+            INSERT DunderDefaultTest02_A { a := 4 };
+            INSERT DunderDefaultTest02_A { a := 5 };
+            INSERT DunderDefaultTest02_B {
+                default_with_insert := (
+                    select DunderDefaultTest02_A
+                    filter DunderDefaultTest02_A.a = 1
+                ),
+                default_with_update := (
+                    select DunderDefaultTest02_A
+                    filter DunderDefaultTest02_A.a = 2
+                ),
+                default_with_delete := (
+                    select DunderDefaultTest02_A
+                    filter DunderDefaultTest02_A.a = 3
+                ),
+                default_with_select := (
+                    select DunderDefaultTest02_A
+                    filter DunderDefaultTest02_A.a = 5
+                ),
+            };
+        ''')
+
+        async with self.assertRaisesRegexTx(
+            edgedb.InvalidReferenceError,
+            r"__default__ cannot be used in this expression",
+            _hint='Default expression uses DML',
+        ):
+            await self.con.execute(r'''
+                UPDATE DunderDefaultTest02_B set {
+                    default_with_insert := __default__
+                };
+            ''')
+
+        async with self.assertRaisesRegexTx(
+            edgedb.InvalidReferenceError,
+            r"__default__ cannot be used in this expression",
+            _hint='Default expression uses DML',
+        ):
+            await self.con.execute(r'''
+                UPDATE DunderDefaultTest02_B set {
+                    default_with_update := __default__
+                };
+            ''')
+
+        async with self.assertRaisesRegexTx(
+            edgedb.InvalidReferenceError,
+            r"__default__ cannot be used in this expression",
+            _hint='Default expression uses DML',
+        ):
+            await self.con.execute(r'''
+                UPDATE DunderDefaultTest02_B set {
+                    default_with_delete := __default__
+                };
+            ''')
+
+        await self.con.execute(r'''
+            UPDATE DunderDefaultTest02_B set {
+                default_with_select := __default__
+            };
+        ''')
+
+        await self.assert_query_result(
+            r'''
+                SELECT DunderDefaultTest02_B {
+                    a := .default_with_select.a
+                };
+            ''',
+            [
+                {'a': [4]},
+            ]
+        )
+
+    async def test_edgeql_update_empty_array_01(self):
+        with self.assertRaisesRegex(
+            edgedb.QueryError,
+            "expression returns value of indeterminate type"
+        ):
+            await self.con.execute("""
+                update UpdateTest
+                set {
+                    name := [],
+                };
+            """)
+
+    async def test_edgeql_update_empty_array_02(self):
+        with self.assertRaisesRegex(
+            edgedb.InvalidPropertyTargetError,
+            r"invalid target for property 'name' "
+            r"of object type 'default::UpdateTest': 'array<std::str>' "
+            r"\(expecting 'std::str'\)"
+        ):
+            await self.con.execute("""
+                update UpdateTest
+                set {
+                    name := ['a'] ?? [],
+                };
+            """)
+
+    async def test_edgeql_update_empty_array_03(self):
+        with self.assertRaisesRegex(
+            edgedb.InvalidPropertyTargetError,
+            r"invalid target for property 'name' "
+            r"of object type 'default::UpdateTest': 'std::int64' "
+            r"\(expecting 'std::str'\)"
+        ):
+            await self.con.execute("""
+                insert UpdateTest {
+                    name := array_unpack([1] ?? []),
+                };
+            """)
+
+    async def test_edgeql_update_empty_array_04(self):
+        with self.assertRaisesRegex(
+            edgedb.QueryError,
+            "expression returns value of indeterminate type"
+        ):
+            await self.con.execute("""
+                update UpdateTest
+                set {
+                    annotated_status := (
+                        select Status {
+                            @note := []
+                        }
+                    )
+                };
+            """)
+
+    async def test_edgeql_update_empty_array_05(self):
+        await self.assert_query_result("""
+            select ( update UpdateTest
+                set {
+                    weighted_tags := (
+                        select Tag {
+                            @note := array_join(['a'] ++ [], '')
+                        }
+                    )
+                }
+            ) { name, weighted_tags: { name, @note } } ;
+            """,
+            [
+                {
+                    'name': 'update-test1',
+                    'weighted_tags': tb.bag([
+                        {'name': 'fun', '@note': 'a'},
+                        {'name': 'boring', '@note': 'a'},
+                        {'name': 'wow', '@note': 'a'}
+                    ]),
+                },
+                {
+                    'name': 'update-test2',
+                    'weighted_tags': tb.bag([
+                        {'name': 'fun', '@note': 'a'},
+                        {'name': 'boring', '@note': 'a'},
+                        {'name': 'wow', '@note': 'a'}
+                    ]),
+                },
+                {
+                    'name': 'update-test3',
+                    'weighted_tags': tb.bag([
+                        {'name': 'fun', '@note': 'a'},
+                        {'name': 'boring', '@note': 'a'},
+                        {'name': 'wow', '@note': 'a'}
+                    ]),
+                },
+            ],
         )

@@ -19,6 +19,10 @@
 
 from __future__ import annotations
 
+from edb.common.log import early_setup
+# ruff: noqa: E402
+early_setup()
+
 import os
 import sys
 
@@ -28,8 +32,8 @@ from edb import buildmeta
 from edb.common import debug
 from edb.common import devmode as dm
 from edb.server import args as srv_args
-from edb.server import logsetup
 from edb.server import main as srv_main
+from edb.load_ext import main as load_ext_main
 
 
 @click.group(
@@ -53,13 +57,21 @@ def server(version=False, **kwargs):
     os.environ['EDGEDB_DEBUG_SERVER'] = '1'
     debug.init_debug_flags()
     kwargs['security'] = srv_args.ServerSecurityMode.InsecureDevMode
-    logsetup.setup_logging(kwargs['log_level'], kwargs['log_to'])
     srv_main.server_main(**kwargs)
+
+
+@edbcommands.command(add_help_option=False,
+                     context_settings=dict(ignore_unknown_options=True))
+@click.argument('args', nargs=-1, type=click.UNPROCESSED)
+def load_ext(args: tuple[str, ...]):
+    load_ext_main.main(args)
 
 
 # Import at the end of the file so that "edb.tools.edb.edbcommands"
 # is defined for all of the below modules when they try to import it.
 from . import cli  # noqa
+from . import config  # noqa
+from . import rm_data_dir  # noqa
 from . import dflags  # noqa
 from . import gen_errors  # noqa
 from . import gen_types  # noqa
@@ -67,6 +79,14 @@ from . import gen_meta_grammars  # noqa
 from . import gen_cast_table  # noqa
 from . import inittestdb  # noqa
 from . import test  # noqa
+from . import test_extension  # noqa
 from . import wipe  # noqa
 from . import gen_test_dumps  # noqa
+from . import gen_sql_introspection  # noqa
+from . import gen_rust_ast  # noqa
+from . import ast_inheritance_graph  # noqa
+from . import parser_demo  # noqa
+from . import ls_forbidden_functions  # noqa
+from . import redo_metaschema  # noqa
 from .profiling import cli as prof_cli  # noqa
+from .experimental_interpreter import edb_entry # noqa

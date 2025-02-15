@@ -29,6 +29,8 @@ from edb import edgeql
 from edb.server import defines as edbdef
 from edb.server.protocol import execute
 
+from edb.schema import schema as s_schema
+
 from edb.common import debug
 from edb.common import markup
 
@@ -44,9 +46,9 @@ from edb.server.pgproto.pgproto cimport WriteBuffer
 async def handle_request(
     object request,
     object response,
-    object db,
+    dbview.Database db,
     list args,
-    object server,
+    object tenant,
 ):
     if args != []:
         response.body = b'Unknown path'
@@ -61,7 +63,7 @@ async def handle_request(
     try:
         if request.method == b'POST':
             if request.content_type and b'json' in request.content_type:
-                body = json.loads(request.body)
+                body = json.loads(request.body, parse_float=decimal.Decimal)
                 if not isinstance(body, dict):
                     raise TypeError(
                         'the body of the request must be a JSON object')
@@ -125,23 +127,14 @@ async def handle_request(
             db,
             query,
             variables=variables or {},
-            globals_=globals_ or {},
+            globals_=globals_,
         )
     except Exception as ex:
         if debug.flags.server:
             markup.dump(ex)
 
-        ex_type = type(ex)
-        if not issubclass(ex_type, errors.EdgeDBError):
-            # XXX Fix this when LSP "location" objects are implemented
-            ex_type = errors.InternalServerError
+        ex = await execute.interpret_error(ex, db)
 
-        err_dct = {
-            'message': str(ex),
-            'type': str(ex_type.__name__),
-            'code': ex_type.get_code(),
-        }
-
-        response.body = json.dumps({'error': err_dct}).encode()
+        response.body = json.dumps({'error': ex.to_json()}).encode()
     else:
         response.body = b'{"data":' + result + b'}'

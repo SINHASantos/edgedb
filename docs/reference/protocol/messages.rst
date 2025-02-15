@@ -114,7 +114,7 @@ Format:
 See the :ref:`list of error codes <ref_protocol_error_codes>` for all possible
 error codes.
 
-Known headers:
+Known attributes:
 
 * 0x0001 ``HINT``: ``str`` -- error hint.
 * 0x0002 ``DETAILS``: ``str`` -- error details.
@@ -182,6 +182,8 @@ Format:
 
 .. eql:struct:: edb.protocol.TransactionState
 
+.. eql:struct:: edb.protocol.Annotation
+
 .. _ref_protocol_msg_restore_ready:
 
 RestoreReady
@@ -196,6 +198,8 @@ Format:
 
 .. eql:struct:: edb.protocol.RestoreReady
 
+.. eql:struct:: edb.protocol.Annotation
+
 .. _ref_protocol_msg_command_complete:
 
 CommandComplete
@@ -206,6 +210,8 @@ Sent by: server.
 Format:
 
 .. eql:struct:: edb.protocol.CommandComplete
+
+.. eql:struct:: edb.protocol.Annotation
 
 
 .. _ref_protocol_msg_dump:
@@ -221,6 +227,15 @@ Format:
 
 .. eql:struct:: edb.protocol.Dump
 
+.. eql:struct:: edb.protocol.Annotation
+
+.. eql:struct:: edb.protocol.DumpFlag
+
+Use:
+
+* ``DUMP_SECRETS`` to include secrets in the backup. By default, secrets are
+  not included.
+
 
 .. _ref_protocol_msg_command_data_description:
 
@@ -234,6 +249,8 @@ Format:
 .. eql:struct:: edb.protocol.CommandDataDescription
 
 .. eql:struct:: edb.protocol.enums.Cardinality
+
+.. eql:struct:: edb.protocol.Annotation
 
 
 The format of the *input_typedesc* and *output_typedesc* fields is described
@@ -275,7 +292,7 @@ Restore
 
 Sent by: client.
 
-Initiate restore to the current database.
+Initiate restore to the current :versionreplace:`database;5.0:branch`.
 See :ref:`ref_protocol_restore_flow`.
 
 Format:
@@ -325,6 +342,8 @@ Format:
 
 .. eql:struct:: edb.protocol.OutputFormat
 
+.. eql:struct:: edb.protocol.Annotation
+
 Use:
 
 * ``BINARY`` to return data encoded in binary.
@@ -356,6 +375,8 @@ Sent by: client.
 .. eql:struct:: edb.protocol.Parse
 
 .. eql:struct:: edb.protocol.Capability
+
+.. eql:struct:: edb.protocol.Annotation
 
 See RFC1004_ for more information on capability flags.
 
@@ -433,12 +454,15 @@ Format:
 
 .. eql:struct:: edb.protocol.DumpObjectDesc
 
-Known headers:
+Known attributes:
 
 * 101 ``BLOCK_TYPE`` -- block type, always "I"
 * 102 ``SERVER_TIME`` -- server time when dump is started as a floating point
   unix timestamp stringified
 * 103 ``SERVER_VERSION`` -- full version of server as string
+* 105 ``SERVER_CATALOG_VERSION`` -- the catalog version of the server, as
+  a 64-bit integer. The catalog version is an identifier that is incremented
+  whenever a change is made to the database layout or standard library.
 
 
 .. _ref_protocol_msg_dump_block:
@@ -456,7 +480,7 @@ Format:
 .. eql:struct:: edb.protocol.DumpBlock
 
 
-Known headers:
+Known attributes:
 
 * 101 ``BLOCK_TYPE`` -- block type, always "D"
 * 110 ``BLOCK_ID`` -- block identifier (16 bytes of UUID)

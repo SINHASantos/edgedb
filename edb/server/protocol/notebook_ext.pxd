@@ -21,7 +21,7 @@ from edb.server.protocol cimport frontend
 from edb.server.pgproto.pgproto cimport WriteBuffer
 
 
-cdef class NotebookConnection(frontend.FrontendConnection):
+cdef class NotebookConnection(frontend.AbstractFrontendConnection):
     cdef:
         WriteBuffer buf
 

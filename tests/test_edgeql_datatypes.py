@@ -20,9 +20,11 @@ from datetime import timedelta
 
 import edgedb
 import decimal
+import immutables
 
 from edb import errors
 from edb.ir import statypes
+from edb.server import config
 from edb.testbase import server as tb
 
 
@@ -339,7 +341,7 @@ class TestEdgeQLDT(tb.QueryTestCase):
 
         with self.assertRaisesRegex(
                 edgedb.InvalidValueError,
-                "invalid input syntax for type cal::date_duration: '1s'"):
+                "invalid input syntax for type std::cal::date_duration: '1s'"):
             async with self.con.transaction():
                 await self.con.query(r"""
                     SELECT <str><cal::date_duration>'1s'
@@ -347,7 +349,7 @@ class TestEdgeQLDT(tb.QueryTestCase):
 
         with self.assertRaisesRegex(
                 edgedb.InvalidValueError,
-                "invalid input syntax for type cal::date_duration: '1s'"):
+                "invalid input syntax for type std::cal::date_duration: '1s'"):
             async with self.con.transaction():
                 await self.con.query(r"""
                     SELECT <str><cal::date_duration><json>'1s'
@@ -988,19 +990,41 @@ class TestEdgeQLDT(tb.QueryTestCase):
             '''
         )
 
-        await self.assert_query_result(
-            r'''SELECT Obj { seq_prop } ORDER BY Obj.seq_prop;''',
-            [
-                {'seq_prop': 1}, {'seq_prop': 2}
-            ],
-        )
+        try:
+            await self.assert_query_result(
+                r'''SELECT Obj { seq_prop } ORDER BY Obj.seq_prop;''',
+                [
+                    {'seq_prop': 1}, {'seq_prop': 2}
+                ],
+            )
+        except AssertionError:
+            if self.is_repeat:
+                await self.assert_query_result(
+                    r'''SELECT Obj { seq_prop } ORDER BY Obj.seq_prop;''',
+                    [
+                        {'seq_prop': 3}, {'seq_prop': 4}
+                    ],
+                )
+            else:
+                raise
 
-        await self.assert_query_result(
-            r'''SELECT Obj2 { seq_prop };''',
-            [
-                {'seq_prop': 1}
-            ],
-        )
+        try:
+            await self.assert_query_result(
+                r'''SELECT Obj2 { seq_prop };''',
+                [
+                    {'seq_prop': 1},
+                ],
+            )
+        except AssertionError:
+            if self.is_repeat:
+                await self.assert_query_result(
+                    r'''SELECT Obj2 { seq_prop };''',
+                    [
+                        {'seq_prop': 2},
+                    ],
+                )
+            else:
+                raise
 
     async def test_edgeql_dt_enum_01(self):
         await self.assert_query_result(
@@ -1363,3 +1387,24 @@ class TestEdgeQLDT(tb.QueryTestCase):
 
             with self.assertRaises(errors.InvalidValueError):
                 statypes.ConfigMemory(text)
+
+    async def test_edgeql_as_cache_key(self):
+        def make_setting_value(name, value):
+            return config.SettingValue(
+                name, value, "session", config.ConfigScope.SESSION
+            )
+
+        def make_key():
+            return immutables.Map(
+                dict(
+                    duration=make_setting_value(
+                        "duration", statypes.Duration("123")
+                    ),
+                    memory=make_setting_value(
+                        "memory", statypes.ConfigMemory("11MiB")
+                    ),
+                )
+            )
+
+        cache = {make_key(): True}
+        self.assertIn(make_key(), cache)

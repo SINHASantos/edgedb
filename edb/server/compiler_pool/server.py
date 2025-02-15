@@ -32,11 +32,14 @@ import traceback
 import typing
 
 import click
+import httptools
 import immutables
 
 from edb.common import debug
+from edb.common import lru
 from edb.common import markup
 
+from .. import metrics
 from .. import args as srvargs
 from .. import defines
 from . import amsg
@@ -186,33 +189,31 @@ class Worker(pool_mod.Worker):
 
 class MultiSchemaPool(pool_mod.FixedPool):
     _worker_class = Worker  # type: ignore
-    _worker_mod = "remote_worker"
+    _worker_mod = "multitenant_worker"
     _workers: typing.Dict[int, Worker]  # type: ignore
     _clients: typing.Dict[int, ClientSchema]
 
     def __init__(self, cache_size, *, secret, **kwargs):
-        super().__init__(
-            dbindex=None,
-            backend_runtime_params=None,
-            std_schema=None,
-            refl_schema=None,
-            schema_class_layout=None,
-            **kwargs,
-        )
+        super().__init__(**kwargs)
         self._catalog_version = None
         self._inited = asyncio.Event()
         self._cache_size = cache_size
         self._clients = {}
         self._secret = secret
 
-    def _get_init_args_uncached(self):
+    def _init(self, kwargs: dict[str, typing.Any]) -> None:
+        # this is deferred to _init_server()
+        pass
+
+    @lru.method_cache
+    def _get_init_args(self):
         init_args = (
             self._backend_runtime_params,
             self._std_schema,
             self._refl_schema,
             self._schema_class_layout,
         )
-        return init_args
+        return init_args, pickle.dumps(init_args, -1)
 
     async def _attach_worker(self, pid: int):
         if not self._running:
@@ -225,14 +226,15 @@ class MultiSchemaPool(pool_mod.FixedPool):
         pass
 
     async def _init_server(
-        self, client_id: int,
+        self,
+        client_id: int,
         catalog_version: int,
         init_args_pickled: tuple[bytes, bytes, bytes, bytes],
     ):
         (
             std_args_pickled,
             client_args_pickled,
-            global_schema_pickled,
+            global_schema_pickle,
             system_config_pickled,
         ) = init_args_pickled
         dbs, backend_runtime_params = pickle.loads(client_args_pickled)
@@ -262,14 +264,14 @@ class MultiSchemaPool(pool_mod.FixedPool):
                 (
                     dbname,
                     PickledState(
-                        pickle.dumps(state.user_schema, -1),
+                        state.user_schema_pickle,
                         pickle.dumps(state.reflection_cache, -1),
                         pickle.dumps(state.database_config, -1),
                     ),
                 )
                 for dbname, state in dbs.items()
             ),
-            global_schema_pickled,
+            global_schema_pickle,
             system_config_pickled,
             (),
         )
@@ -381,12 +383,12 @@ class MultiSchemaPool(pool_mod.FixedPool):
             if status == 0:
                 worker.set_client_schema(client_id, client_schema)
                 if method_name == "compile":
-                    units, new_pickled_state = data[0]
+                    _units, new_pickled_state = data[0]
                     if new_pickled_state:
                         sid = worker._last_pickled_state = next_tx_state_id()
                         resp = pickle.dumps((0, (*data[0], sid)), -1)
             elif status == 1:
-                exc, tb = data
+                exc, _tb = data
                 if not isinstance(exc, state_mod.FailedStateSync):
                     worker.set_client_schema(client_id, client_schema)
             else:
@@ -401,7 +403,15 @@ class MultiSchemaPool(pool_mod.FixedPool):
             self._release_worker(worker)
 
     async def compile_in_tx(
-        self, pickled_state, state_id, txid, *compile_args, msg=None
+        self,
+        state_id,
+        client_id,
+        dbname,
+        user_schema_pickle,
+        pickled_state,
+        txid,
+        *compile_args,
+        msg=None,
     ):
         if pickled_state == state_mod.REUSE_LAST_STATE_MARKER:
             worker = await self._acquire_worker(
@@ -414,7 +424,15 @@ class MultiSchemaPool(pool_mod.FixedPool):
             worker = await self._acquire_worker()
         try:
             resp = await worker.call(
-                "compile_in_tx", pickled_state, txid, *compile_args, msg=msg
+                "compile_in_tx",
+                state_id,
+                client_id,
+                dbname,
+                user_schema_pickle,
+                pickled_state,
+                txid,
+                *compile_args,
+                msg=msg,
             )
             status, *data = pickle.loads(resp)
             if status == 0:
@@ -450,6 +468,7 @@ class MultiSchemaPool(pool_mod.FixedPool):
                 "compile",
                 "compile_notebook",
                 "compile_graphql",
+                "compile_sql",
             }:
                 pickled = await self._call_for_client(
                     client_id, method_name, args, msg
@@ -523,12 +542,62 @@ class CompilerServerProtocol(asyncio.Protocol):
         )
 
 
+class MetricsProtocol(asyncio.Protocol):
+    def __init__(self):
+        self.transport = None
+        self.parser = httptools.HttpRequestParser(self)
+        self.url = None
+
+    def connection_made(self, transport):
+        self.transport = transport
+
+    def data_received(self, data):
+        try:
+            self.parser.feed_data(data)
+        except Exception as ex:
+            logger.exception(ex)
+
+    def on_url(self, url):
+        self.url = url
+
+    def on_message_complete(self):
+        match self.parser.get_method().upper(), self.url:
+            case b"GET", b"/ready":
+                self.respond("200 OK", "OK")
+
+            case b"GET", b"/metrics":
+                self.respond(
+                    "200 OK",
+                    metrics.registry.generate(),
+                    "Content-Type: text/plain; version=0.0.4; charset=utf-8",
+                )
+
+            case _:
+                self.respond("404 Not Found", "Not Found")
+
+    def respond(self, status, content, *extra_headers, encoding="utf-8"):
+        content = content.encode(encoding)
+        response = [
+            f"HTTP/{self.parser.get_http_version()} {status}",
+            f"Content-Length: {len(content)}",
+            *extra_headers,
+            "",
+            "",
+        ]
+
+        self.transport.write("\r\n".join(response).encode("ascii"))
+        self.transport.write(content)
+        if not self.parser.should_keep_alive():
+            self.transport.close()
+
+
 async def server_main(
     listen_addresses,
     listen_port,
     pool_size,
     client_schema_cache_size,
     runstate_dir,
+    metrics_port,
 ):
     if listen_port is None:
         listen_port = defines.EDGEDB_REMOTE_COMPILER_PORT
@@ -558,32 +627,59 @@ async def server_main(
         )
         await pool.start()
         try:
-            server = await loop.create_server(
-                lambda: CompilerServerProtocol(pool, loop),
-                listen_addresses,
-                listen_port,
-                start_serving=False,
-            )
-            if len(listen_addresses) == 1:
-                logger.info(
-                    "Listening on %s:%s", listen_addresses[0], listen_port
+            async with asyncio.TaskGroup() as tg:
+                tg.create_task(
+                    _run_server(
+                        loop,
+                        listen_addresses,
+                        listen_port,
+                        lambda: CompilerServerProtocol(pool, loop),
+                        "compile",
+                    )
                 )
-            else:
-                logger.info(
-                    "Listening on [%s]:%s",
-                    ",".join(listen_addresses),
-                    listen_port,
-                )
-            try:
-                await server.serve_forever()
-            finally:
-                server.close()
-                await server.wait_closed()
+                if metrics_port:
+                    tg.create_task(
+                        _run_server(
+                            loop,
+                            listen_addresses,
+                            metrics_port,
+                            MetricsProtocol,
+                            "metrics",
+                        )
+                    )
         finally:
             await pool.stop()
     finally:
         if temp_runstate_dir is not None:
             temp_runstate_dir.cleanup()
+
+
+async def _run_server(loop, listen_addresses, listen_port, protocol, purpose):
+    server = await loop.create_server(
+        protocol,
+        listen_addresses,
+        listen_port,
+        start_serving=False,
+    )
+    if len(listen_addresses) == 1:
+        logger.info(
+            "Listening for %s on %s:%s",
+            purpose,
+            listen_addresses[0],
+            listen_port,
+        )
+    else:
+        logger.info(
+            "Listening for %s on [%s]:%s",
+            purpose,
+            ",".join(listen_addresses),
+            listen_port,
+        )
+    try:
+        await server.serve_forever()
+    finally:
+        server.close()
+        await server.wait_closed()
 
 
 @click.command()

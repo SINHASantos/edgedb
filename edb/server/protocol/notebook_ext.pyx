@@ -82,13 +82,13 @@ async def handle_request(
     object response,
     object db,
     list args,
-    object server,
+    object tenant,
 ):
     response.content_type = b'application/json'
 
     if args == ['status'] and request.method == b'GET':
         try:
-            await heartbeat_check(db, server)
+            await heartbeat_check(db, tenant)
         except Exception as ex:
             return handle_error(request, response, ex)
         else:
@@ -122,24 +122,23 @@ async def handle_request(
 
     response.status = http.HTTPStatus.OK
     try:
-        result = await execute(db, server, queries)
+        result = await execute(db, tenant, queries)
     except Exception as ex:
         return handle_error(request, response, ex)
     else:
         response.custom_headers['EdgeDB-Protocol-Version'] = \
             f'{CURRENT_PROTOCOL[0]}.{CURRENT_PROTOCOL[1]}'
+        response.custom_headers['Gel-Protocol-Version'] = \
+            f'{CURRENT_PROTOCOL[0]}.{CURRENT_PROTOCOL[1]}'
         response.body = b'{"kind": "results", "results":' + result + b'}'
 
 
-async def heartbeat_check(db, server):
-    pgcon = await server.acquire_pgcon(db.name)
-    try:
+async def heartbeat_check(db, tenant):
+    async with tenant.with_pgcon(db.name) as pgcon:
         await pgcon.sql_execute(b"SELECT 'OK';")
-    finally:
-        server.release_pgcon(db.name, pgcon)
 
 
-cdef class NotebookConnection(frontend.FrontendConnection):
+cdef class NotebookConnection(frontend.AbstractFrontendConnection):
     def __cinit__(self):
         self.buf = WriteBuffer.new()
 
@@ -153,97 +152,98 @@ cdef class NotebookConnection(frontend.FrontendConnection):
         pass
 
 
-async def execute(db, server, queries: list):
-    dbv: dbview.DatabaseConnectionView = await server.new_dbview(
+async def execute(db, tenant, queries: list):
+    dbv: dbview.DatabaseConnectionView = await tenant.new_dbview(
         dbname=db.name,
         query_cache=False,
         protocol_version=edbdef.CURRENT_PROTOCOL,
     )
-    compiler_pool = server.get_compiler_pool()
+    compiler_pool = tenant.server.get_compiler_pool()
     units = await compiler_pool.compile_notebook(
         dbv.dbname,
-        dbv.get_user_schema(),
-        dbv.get_global_schema(),
+        dbv.get_user_schema_pickle(),
+        dbv.get_global_schema_pickle(),
         dbv.reflection_cache,
         dbv.get_database_config(),
         dbv.get_compilation_system_config(),
         queries,
         CURRENT_PROTOCOL,
         50,  # implicit limit
+        client_id=tenant.client_id,
     )
     result = []
     bind_data = None
-    pgcon = await server.acquire_pgcon(db.name)
-    try:
-        await pgcon.sql_execute(b'START TRANSACTION;')
+    async with tenant.with_pgcon(db.name) as pgcon:
+        try:
+            await pgcon.sql_execute(b'START TRANSACTION;')
+            dbv.start_tx()
 
-        for is_error, unit_or_error in units:
-            if is_error:
-                result.append({
-                    'kind': 'error',
-                    'error': unit_or_error,
-                })
-            else:
-                query_unit = unit_or_error
-                query_unit_group = dbstate.QueryUnitGroup()
-                query_unit_group.append(query_unit)
-
-                if query_unit.capabilities & ~ALLOWED_CAPABILITIES:
-                    raise query_unit.capabilities.make_error(
-                        ALLOWED_CAPABILITIES,
-                        errors.UnsupportedCapabilityError,
-                    )
-                try:
-                    if query_unit.in_type_args:
-                        raise errors.QueryError(
-                            'cannot use query parameters in tutorial')
-
-                    fe_conn = NotebookConnection()
-
-                    dbv.start_implicit(query_unit)
-
-                    compiled = dbview.CompiledQuery(
-                        query_unit_group=query_unit_group)
-                    await p_execute.execute(
-                        pgcon, dbv, compiled, b'', fe_conn=fe_conn,
-                        skip_start=True,
-                    )
-
-                except Exception as ex:
-                    if debug.flags.server:
-                        markup.dump(ex)
-
-                    # TODO: copy proper error reporting from edgecon
-                    if not issubclass(type(ex), errors.EdgeDBError):
-                        ex_type = 'Error'
-                    else:
-                        ex_type = type(ex).__name__
-
+            for is_error, unit_or_error in units:
+                if is_error:
                     result.append({
                         'kind': 'error',
-                        'error': [ex_type, str(ex), {}],
+                        'error': unit_or_error,
                     })
-
-                    break
                 else:
-                    result.append({
-                        'kind': 'data',
-                        'data': (
-                            base64.b64encode(
-                                query_unit.out_type_id).decode(),
-                            base64.b64encode(
-                                query_unit.out_type_data).decode(),
-                            base64.b64encode(
-                                fe_conn._get_data()).decode(),
-                            base64.b64encode(
-                                query_unit.status).decode(),
-                        ),
-                    })
+                    query_unit = unit_or_error
+                    query_unit_group = dbstate.QueryUnitGroup()
+                    query_unit_group.append(query_unit)
 
-    finally:
-        try:
-            await pgcon.sql_execute(b'ROLLBACK;')
+                    dbv.check_capabilities(
+                        query_unit.capabilities,
+                        ALLOWED_CAPABILITIES,
+                        errors.UnsupportedCapabilityError,
+                        "disallowed in notebook",
+                    )
+                    try:
+                        if query_unit.in_type_args:
+                            raise errors.QueryError(
+                                'cannot use query parameters in tutorial')
+
+                        fe_conn = NotebookConnection()
+
+                        compiled = dbview.CompiledQuery(
+                            query_unit_group=query_unit_group)
+                        await p_execute.execute(
+                            pgcon, dbv, compiled, b'', fe_conn=fe_conn,
+                        )
+
+                    except Exception as ex:
+                        if debug.flags.server:
+                            markup.dump(ex)
+
+                        ex = await p_execute.interpret_error(
+                            ex,
+                            dbv._db,
+                            global_schema_pickle=dbv.get_global_schema_pickle(),
+                            user_schema_pickle=dbv.get_user_schema_pickle(),
+                        )
+
+                        result.append({
+                            'kind': 'error',
+                            'error': [type(ex).__name__, str(ex), {}],
+                        })
+
+                        break
+                    else:
+                        result.append({
+                            'kind': 'data',
+                            'data': (
+                                base64.b64encode(
+                                    query_unit.out_type_id).decode(),
+                                base64.b64encode(
+                                    query_unit.out_type_data).decode(),
+                                base64.b64encode(
+                                    fe_conn._get_data()).decode(),
+                                base64.b64encode(
+                                    query_unit.status).decode(),
+                            ),
+                        })
+
         finally:
-            server.release_pgcon(db.name, pgcon)
+            try:
+                await pgcon.sql_execute(b'ROLLBACK;')
+            finally:
+                tenant.remove_dbview(dbv)
 
     return json.dumps(result).encode()

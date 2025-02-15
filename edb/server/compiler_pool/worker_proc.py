@@ -102,6 +102,12 @@ def clear_exception_frames(er):
     _clear_exception_frames(er, visited)
 
 
+def listen_for_debugger():
+    if debug.flags.pydebug_listen:
+        import debugpy
+        debugpy.listen(38781)
+
+
 def main(get_handler):
     parser = argparse.ArgumentParser()
     parser.add_argument("--sockname")
@@ -109,8 +115,10 @@ def main(get_handler):
     parser.add_argument("--version-serial", type=int)
     args = parser.parse_args()
 
-    ql_parser.preload(allow_rebuild=False)
+    ql_parser.preload_spec()
     gc.freeze()
+
+    listen_for_debugger()
 
     if args.numproc is None:
         # Run a single worker process

@@ -1,4 +1,5 @@
 .. eql:section-intro-page:: reference
+.. versioned-section::
 
 .. _ref_reference_index:
 
@@ -17,12 +18,15 @@ Reference
     connection
     environment
     projects
+    edgedb_toml
     dsn
-    observability
     dump_format
     backend_ha
     configuration
+    http
+    sql_adapter
     protocol/index
+    bindings/index
     admin/index
 
 

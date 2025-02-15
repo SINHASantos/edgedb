@@ -19,9 +19,11 @@
 
 from __future__ import annotations
 
-from typing import *
+from typing import Optional, Tuple, Type, Iterable, List, Set, cast
 
 import collections
+
+from edb import errors
 
 from edb.edgeql import ast as qlast
 from edb.edgeql import qltypes
@@ -30,7 +32,7 @@ from . import abc as s_abc
 from . import annos as s_anno
 from . import constraints
 from . import delta as sd
-from . import expr as s_expr
+from . import functions as s_func
 from . import inheriting
 from . import links
 from . import properties
@@ -40,16 +42,18 @@ from . import pointers
 from . import policies
 from . import schema as s_schema
 from . import sources
+from . import triggers
 from . import types as s_types
+from . import unknown_pointers
 from . import utils
 
 
-class AccessPolicySubject(so.Object):
-    # AccessPolicySubject being its own class (instead of inlined into
-    # ObjectType) is mostly done as a hack, to allow us to ensure that
-    # access_policies comes later in the refdicts list than pointers
-    # does, so that pointers are always created before access policies
-    # when creating an inherited type.
+class ObjectTypeRefMixin(so.Object):
+    # We stick access policies and triggers in their own class as a
+    # hack, to allow us to ensure that access_policies comes later in
+    # the refdicts list than pointers does, so that pointers are
+    # always created before access policies when creating an inherited
+    # type.
     access_policies_refs = so.RefDict(
         attr='access_policies',
         requires_explicit_overloaded=True,
@@ -61,12 +65,27 @@ class AccessPolicySubject(so.Object):
         inheritable=False, ephemeral=True, coerce=True, compcoef=0.857,
         default=so.DEFAULT_CONSTRUCTOR)
 
+    triggers_refs = so.RefDict(
+        attr='triggers',
+        requires_explicit_overloaded=True,
+        backref_attr='subject',
+        ref_cls=triggers.Trigger)
+
+    triggers = so.SchemaField(
+        so.ObjectIndexByUnqualifiedName[triggers.Trigger],
+        inheritable=False, ephemeral=True, coerce=True, compcoef=0.857,
+        default=so.DEFAULT_CONSTRUCTOR)
+
 
 class ObjectType(
-    s_types.InheritingType,
     sources.Source,
     constraints.ConsistencySubject,
-    AccessPolicySubject,
+    s_types.InheritingType,
+
+    so.InheritingObject,  # Help reflection figure out the right db MRO
+    s_types.Type,  # Help reflection figure out the right db MRO
+    s_anno.AnnotationSubject,  # Help reflection figure out the right db MRO
+    ObjectTypeRefMixin,
     s_abc.ObjectType,
     qlkind=qltypes.SchemaObjectClass.TYPE,
     data_safe=False,
@@ -92,10 +111,6 @@ class ObjectType(
         default=False,
     )
 
-    @classmethod
-    def get_schema_class_displayname(cls) -> str:
-        return 'object type'
-
     def is_object_type(self) -> bool:
         return True
 
@@ -112,10 +127,7 @@ class ObjectType(
             return self.issubclass(schema, FreeObject)
 
     def is_fake_object_type(self, schema: s_schema.Schema) -> bool:
-        return (
-            self.get_name(schema).module == 'cfg'
-            or self.is_free_object_type(schema)
-        )
+        return self.is_free_object_type(schema)
 
     def is_material_object_type(self, schema: s_schema.Schema) -> bool:
         return not (
@@ -145,19 +157,21 @@ class ObjectType(
                 std_obj = schema.get('std::BaseObject', type=ObjectType)
                 return std_obj.get_displayname(schema)
             else:
-                comps = sorted(union_of.objects(schema), key=lambda o: o.id)
-                return ' | '.join(c.get_displayname(schema) for c in comps)
+                comp_dns = sorted(
+                    (c.get_displayname(schema)
+                     for c in union_of.objects(schema)))
+                return '(' + ' | '.join(comp_dns) + ')'
         else:
             intersection_of = mtype.get_intersection_of(schema)
             if intersection_of:
-                comps = sorted(intersection_of.objects(schema),
-                               key=lambda o: o.id)
-                comp_dns = (c.get_displayname(schema) for c in comps)
+                comp_dns = sorted(
+                    (c.get_displayname(schema)
+                     for c in intersection_of.objects(schema)))
                 # Elide BaseObject from display, because `& BaseObject`
                 # is a nop.
-                return ' & '.join(
+                return '(' + ' & '.join(
                     dn for dn in comp_dns if dn != 'std::BaseObject'
-                )
+                ) + ')'
             elif mtype == self:
                 return super().get_displayname(schema)
             else:
@@ -173,25 +187,24 @@ class ObjectType(
         if sn.is_qualified(name):
             raise ValueError(
                 'references to concrete pointers must not be qualified')
-        ptrs = {
-            lnk for lnk in schema.get_referrers(self, scls_type=links.Link,
-                                                field_name='target')
-            if (
-                lnk.get_shortname(schema).name == name
-                and not lnk.get_source_type(schema).is_view(schema)
-                and lnk.get_owned(schema)
-                and (not sources or lnk.get_source_type(schema) in sources)
-            )
-        }
 
-        for obj in self.get_ancestors(schema).objects(schema):
+        ptrs: Set[links.Link] = set()
+
+        ancestor_objects = self.get_ancestors(schema).objects(schema)
+
+        for obj in (self,) + ancestor_objects:
             ptrs.update(
-                lnk for lnk in schema.get_referrers(obj, scls_type=links.Link,
-                                                    field_name='target')
+                lnk for lnk in schema.get_referrers(
+                    obj, scls_type=links.Link, field_name='target')
                 if (
                     lnk.get_shortname(schema).name == name
-                    and not lnk.get_source_type(schema).is_view(schema)
-                    and lnk.get_owned(schema)
+                    and lnk.get_source_type(schema).is_material_object_type(
+                        schema)
+                    # Only grab the "base" pointers
+                    and all(
+                        b.is_non_concrete(schema)
+                        for b in lnk.get_bases(schema).objects(schema)
+                    )
                     and (not sources or lnk.get_source_type(schema) in sources)
                 )
             )
@@ -207,10 +220,16 @@ class ObjectType(
 
         return ptrs
 
+    def get_relevant_triggers(
+        self, kind: qltypes.TriggerKind, schema: s_schema.Schema
+    ) -> list[triggers.Trigger]:
+        return [
+            t for t in self.get_triggers(schema).objects(schema)
+            if kind in t.get_kinds(schema)
+        ]
+
     def implicitly_castable_to(
-        self,
-        other: s_types.Type,
-        schema: s_schema.Schema
+        self, other: s_types.Type, schema: s_schema.Schema
     ) -> bool:
         return self.issubclass(schema, other)
 
@@ -241,6 +260,7 @@ class ObjectType(
         return (
             sn.QualName(module='std', name='BaseObject'),
             sn.QualName(module='std', name='Object'),
+            sn.QualName(module='std', name='FreeObject'),
         )
 
     @classmethod
@@ -248,15 +268,15 @@ class ObjectType(
         return sn.QualName(module='std', name='Object')
 
     def _issubclass(
-        self,
-        schema: s_schema.Schema,
-        parent: so.SubclassableObject
+        self, schema: s_schema.Schema, parent: so.SubclassableObject
     ) -> bool:
         if self == parent:
             return True
 
-        my_union = self.get_union_of(schema)
-        if my_union and not self.get_is_opaque_union(schema):
+        if (
+            (my_union := self.get_union_of(schema))
+            and not self.get_is_opaque_union(schema)
+        ):
             # A union is considered a subclass of a type, if
             # ALL its components are subclasses of that type.
             return all(
@@ -264,8 +284,7 @@ class ObjectType(
                 for t in my_union.objects(schema)
             )
 
-        my_intersection = self.get_intersection_of(schema)
-        if my_intersection:
+        if my_intersection := self.get_intersection_of(schema):
             # An intersection is considered a subclass of a type, if
             # ANY of its components are subclasses of that type.
             return any(
@@ -278,8 +297,10 @@ class ObjectType(
             return True
 
         elif isinstance(parent, ObjectType):
-            parent_union = parent.get_union_of(schema)
-            if parent_union:
+            if (
+                (parent_union := parent.get_union_of(schema))
+                and not parent.get_is_opaque_union(schema)
+            ):
                 # A type is considered a subclass of a union type,
                 # if it is a subclass of ANY of the union components.
                 return (
@@ -290,8 +311,7 @@ class ObjectType(
                     )
                 )
 
-            parent_intersection = parent.get_intersection_of(schema)
-            if parent_intersection:
+            if parent_intersection := parent.get_intersection_of(schema):
                 # A type is considered a subclass of an intersection type,
                 # if it is a subclass of ALL of the intersection components.
                 return all(
@@ -304,15 +324,18 @@ class ObjectType(
     def allow_ref_propagation(
         self,
         schema: s_schema.Schema,
-        constext: sd.CommandContext,
+        context: sd.CommandContext,
         refdict: so.RefDict,
     ) -> bool:
         return not self.is_view(schema) or refdict.attr == 'pointers'
 
-    def as_type_delete_if_dead(
+    def as_type_delete_if_unused(
         self,
         schema: s_schema.Schema,
     ) -> Optional[sd.DeleteObject[ObjectType]]:
+        if not self._is_deletable(schema):
+            return None
+
         # References to aliases can only occur inside other aliases,
         # so when they go, we need to delete the reference also.
         # Compound types also need to be deleted when their last
@@ -329,6 +352,13 @@ class ObjectType(
             )
         else:
             return None
+
+    def _test_polymorphic(
+        self, schema: s_schema.Schema, other: s_types.Type
+    ) -> bool:
+        if other.is_anyobject(schema):
+            return True
+        return False
 
 
 def get_or_create_union_type(
@@ -382,7 +412,7 @@ def get_or_create_intersection_type(
     *,
     module: Optional[str] = None,
     transient: bool = False,
-) -> Tuple[s_schema.Schema, ObjectType, bool]:
+) -> Tuple[s_schema.Schema, ObjectType]:
 
     name = s_types.get_intersection_type_name(
         (c.get_name(schema) for c in components),
@@ -390,7 +420,6 @@ def get_or_create_intersection_type(
     )
 
     objtype = schema.get(name, default=None, type=ObjectType)
-    created = objtype is None
     if objtype is None:
         components = list(components)
 
@@ -434,13 +463,15 @@ def get_or_create_intersection_type(
                 schema = objtype.add_pointer(schema, ptr)
 
     assert isinstance(objtype, ObjectType)
-    return schema, objtype, created
+    return schema, objtype
 
 
 class ObjectTypeCommandContext(
     links.LinkSourceCommandContext[ObjectType],
     properties.PropertySourceContext[ObjectType],
+    unknown_pointers.UnknownPointerSourceContext[ObjectType],
     policies.AccessPolicySourceCommandContext[ObjectType],
+    triggers.TriggerSourceCommandContext[ObjectType],
     sd.ObjectCommandContext[ObjectType],
     constraints.ConsistencySubjectCommandContext,
     s_anno.AnnotationSubjectCommandContext,
@@ -455,18 +486,43 @@ class ObjectTypeCommand(
     links.LinkSourceCommand[ObjectType],
     context_class=ObjectTypeCommandContext,
 ):
+    def validate_object(
+        self, schema: s_schema.Schema, context: sd.CommandContext
+    ) -> None:
+        if (
+            not context.stdmode
+            and not context.testmode
+            and self.scls.is_material_object_type(schema)
+        ):
+            for base in self.scls.get_bases(schema).objects(schema):
+                name = base.get_name(schema)
+                if (
+                    sn.UnqualName(name.module) in s_schema.STD_MODULES
+                    and name not in (
+                        sn.QualName('std', 'BaseObject'),
+                        sn.QualName('std', 'Object'),
+                    )
+                ):
+                    raise errors.SchemaDefinitionError(
+                        f"cannot extend system type '{name}'",
+                        span=self.span,
+                    )
 
-    def get_dummy_expr_field_value(
-        self,
-        schema: s_schema.Schema,
-        context: sd.CommandContext,
-        field: so.Field[Any],
-        value: Any,
-    ) -> Optional[s_expr.Expression]:
-        if field.name == 'expr':
-            return s_expr.Expression(text=f'SELECT std::Object LIMIT 1')
-        else:
-            raise NotImplementedError(f'unhandled field {field.name!r}')
+        # Internal consistency check: our stdlib and extension types
+        # shouldn't extend std::Object, which is reserved for user
+        # types.
+        if (
+            self.scls.is_material_object_type(schema)
+            and self.classname.get_root_module_name() in s_schema.STD_MODULES
+        ):
+            for base in self.scls.get_bases(schema).objects(schema):
+                name = base.get_name(schema)
+                if name == sn.QualName('std', 'Object'):
+                    raise errors.SchemaDefinitionError(
+                        f"standard lib/extension type '{self.classname}' "
+                        f"cannot extend std::Object",
+                        hint="try BaseObject",
+                    )
 
 
 class CreateObjectType(
@@ -492,14 +548,34 @@ class CreateObjectType(
             return super()._get_ast(schema, context, parent_node=parent_node)
 
     def _get_ast_node(
-        self,
-        schema: s_schema.Schema,
-        context: sd.CommandContext
+        self, schema: s_schema.Schema, context: sd.CommandContext
     ) -> Type[qlast.DDLOperation]:
         if self.get_attribute_value('expr_type'):
             return qlast.CreateAlias
         else:
             return super()._get_ast_node(schema, context)
+
+    def _create_finalize(
+        self,
+        schema: s_schema.Schema,
+        context: sd.CommandContext,
+    ) -> s_schema.Schema:
+        if (
+            not context.canonical
+            and self.scls.is_material_object_type(schema)
+        ):
+            # Propagate changes to any functions that depend on
+            # ancestor types in order to recompute the inheritance
+            # situation.
+            schema = self._propagate_if_expr_refs(
+                schema,
+                context,
+                action='creating an object type',
+                include_ancestors=True,
+                filter=s_func.Function,
+            )
+
+        return super()._create_finalize(schema, context)
 
 
 class RenameObjectType(
@@ -516,8 +592,11 @@ class RebaseObjectType(
     pass
 
 
-class AlterObjectType(ObjectTypeCommand,
-                      inheriting.AlterInheritingObject[ObjectType]):
+class AlterObjectType(
+    ObjectTypeCommand,
+    s_types.AlterType[ObjectType],
+    inheriting.AlterInheritingObject[ObjectType],
+):
     astnode = qlast.AlterObjectType
 
     def _alter_begin(
@@ -547,7 +626,6 @@ class AlterObjectType(ObjectTypeCommand,
                 action=self.get_friendly_description(schema=schema),
                 include_ancestors=True,
                 filter=functions.Function,
-                metadata_only=False,
             )
 
         return schema
@@ -583,7 +661,7 @@ class AlterObjectType(ObjectTypeCommand,
                 # them in the schema to produce the correct as_alter_delta.
                 nschema = _delete_to_delist(delete, schema)
 
-                nschema, nunion = utils.get_union_type(
+                nschema, nunion, _ = utils.ensure_union_type(
                     nschema,
                     types=union.get_union_of(schema).objects(schema),
                     opaque=union.get_is_opaque_union(schema),
@@ -640,3 +718,26 @@ class DeleteObjectType(
             return None
         else:
             return super()._get_ast(schema, context, parent_node=parent_node)
+
+    def _delete_finalize(
+        self,
+        schema: s_schema.Schema,
+        context: sd.CommandContext,
+    ) -> s_schema.Schema:
+        if (
+            not context.canonical
+            and self.scls.is_material_object_type(schema)
+        ):
+            # Propagate changes to any functions that depend on
+            # ancestor types in order to recompute the inheritance
+            # situation.
+            schema = self._propagate_if_expr_refs(
+                schema,
+                context,
+                action='deleting an object type',
+                include_self=False,
+                include_ancestors=True,
+                filter=s_func.Function,
+            )
+
+        return super()._delete_finalize(schema, context)

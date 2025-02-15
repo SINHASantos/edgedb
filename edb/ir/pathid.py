@@ -18,9 +18,21 @@
 
 
 from __future__ import annotations
-from typing import *
+from typing import (
+    Any,
+    Optional,
+    Tuple,
+    Union,
+    AbstractSet,
+    Iterator,
+    FrozenSet,
+    cast,
+    TYPE_CHECKING,
+)
 
 from . import typeutils
+
+from edb.common import uuidgen
 
 from edb.schema import name as s_name
 from edb.schema import pointers as s_pointers
@@ -124,13 +136,25 @@ class PathId:
 
         self._hash = -1
 
+    def __getstate__(self) -> Any:
+        # We need to omit the cached _hash when we pickle because it won't
+        # be correct in a different process.
+        return tuple([
+            getattr(self, k) if k != '_hash' else -1
+            for k in PathId.__slots__
+        ])
+
+    def __setstate__(self, state: Any) -> None:
+        for k, v in zip(PathId.__slots__, state):
+            setattr(self, k, v)
+
     @classmethod
     def from_type(
         cls,
         schema: s_schema.Schema,
         t: s_types.Type,
         *,
-        env: Optional[qlcompiler_ctx.Environment] = None,
+        env: Optional[qlcompiler_ctx.Environment],
         namespace: AbstractSet[Namespace] = frozenset(),
         typename: Optional[s_name.QualName] = None,
     ) -> PathId:
@@ -174,6 +198,7 @@ class PathId:
         pointer: s_pointers.Pointer,
         *,
         namespace: AbstractSet[Namespace] = frozenset(),
+        env: Optional[qlcompiler_ctx.Environment],
     ) -> PathId:
         """Return a ``PathId`` instance for a given link or property.
 
@@ -193,19 +218,27 @@ class PathId:
         Returns:
             A ``PathId`` instance.
         """
-        if pointer.generic(schema):
+        if pointer.is_non_concrete(schema):
             raise ValueError(f'invalid PathId: {pointer} is not concrete')
 
         source = pointer.get_source(schema)
         if isinstance(source, s_pointers.Pointer):
-            prefix = cls.from_pointer(schema, source, namespace=namespace)
+            prefix = cls.from_pointer(
+                schema, source, namespace=namespace, env=env
+            )
             prefix = prefix.ptr_path()
         elif isinstance(source, s_types.Type):
-            prefix = cls.from_type(schema, source, namespace=namespace)
+            prefix = cls.from_type(schema, source, namespace=namespace, env=env)
         else:
             raise AssertionError(f'unexpected pointer source: {source!r}')
 
-        ptrref = typeutils.ptrref_from_ptrcls(schema=schema, ptrcls=pointer)
+        typeref_cache = env.type_ref_cache if env is not None else None
+        ptrref_cache = env.ptr_ref_cache if env is not None else None
+
+        ptrref = typeutils.ptrref_from_ptrcls(
+            schema=schema, ptrcls=pointer,
+            cache=ptrref_cache, typeref_cache=typeref_cache,
+        )
         return prefix.extend(ptrref=ptrref)
 
     @classmethod
@@ -224,8 +257,6 @@ class PathId:
         which case it is used instead.
 
         Args:
-            schema:
-                A schema instance where the type *t* is defined.
             typeref:
                 The descriptor of a type of the variable being defined.
             namespace:
@@ -244,6 +275,34 @@ class PathId:
         pid._norm_path = (typename,)
         pid._namespace = frozenset(namespace)
         return pid
+
+    @classmethod
+    def from_ptrref(
+        cls,
+        ptrref: irast.PointerRef,
+        *,
+        namespace: AbstractSet[Namespace] = frozenset(),
+    ) -> PathId:
+        """Return a ``PathId`` instance for a given :class:`ir.ast.PointerRef`
+
+        Args:
+            ptrref:
+                The descriptor of a ptr of the variable being defined.
+            namespace:
+                Optional namespace in which the variable is defined.
+
+        Returns:
+            A ``PathId`` instance of type described by *ptrref*.
+        """
+        pid = cls.from_typeref(ptrref.out_source, namespace=namespace)
+        pid = pid.extend(ptrref=ptrref)
+        return pid
+
+    @classmethod
+    def new_dummy(cls, name: str) -> PathId:
+        name_hint = s_name.QualName(module='__derived__', name=name)
+        typeref = irast.TypeRef(id=uuidgen.uuid1mc(), name_hint=name_hint)
+        return irast.PathId.from_typeref(typeref=typeref)
 
     def __hash__(self) -> int:
         if self._hash == -1:
@@ -602,7 +661,8 @@ class PathId:
                 yield path_id
 
     def startswith(
-            self, path_id: PathId, permissive_ptr_path: bool=False) -> bool:
+        self, path_id: PathId, permissive_ptr_path: bool = False
+    ) -> bool:
         """Return true if this ``PathId`` has *path_id* as a prefix."""
         base = self._get_prefix(len(path_id))
         return base == path_id or (
@@ -718,6 +778,8 @@ class PathId:
         result._norm_path = self._norm_path[0:size]
         result._prefix = self._prefix
         result._namespace = self._namespace
+        if rptr := result.rptr():
+            result._is_linkprop = rptr.source_ptr is not None
 
         if size < len(self._path) and self._norm_path[size][2]:  # type: ignore
             # A link property ref has been chopped off.

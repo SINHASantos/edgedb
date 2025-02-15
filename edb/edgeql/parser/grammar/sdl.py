@@ -42,11 +42,13 @@ _new_nonterm = sdl_nontem_helper._new_nonterm
 
 # top-level SDL statements
 class SDLStatement(Nonterm):
+    @parsing.inline(0)
     def reduce_SDLBlockStatement(self, *kids):
-        self.val = kids[0].val
+        pass
 
+    @parsing.inline(0)
     def reduce_SDLShortStatement_SEMICOLON(self, *kids):
-        self.val = kids[0].val
+        pass
 
 
 # a list of SDL statements with optional semicolon separators
@@ -57,72 +59,101 @@ class SDLStatements(parsing.ListNonterm, element=SDLStatement,
 
 # These statements have a block
 class SDLBlockStatement(Nonterm):
+    @parsing.inline(0)
     def reduce_ModuleDeclaration(self, *kids):
-        self.val = kids[0].val
+        pass
 
+    @parsing.inline(0)
     def reduce_ScalarTypeDeclaration(self, *kids):
-        self.val = kids[0].val
+        pass
 
+    @parsing.inline(0)
     def reduce_AnnotationDeclaration(self, *kids):
-        self.val = kids[0].val
+        pass
 
+    @parsing.inline(0)
     def reduce_ObjectTypeDeclaration(self, *kids):
-        self.val = kids[0].val
+        pass
 
+    @parsing.inline(0)
     def reduce_AliasDeclaration(self, *kids):
-        self.val = kids[0].val
+        pass
 
+    @parsing.inline(0)
     def reduce_ConstraintDeclaration(self, *kids):
-        self.val = kids[0].val
+        pass
 
+    @parsing.inline(0)
     def reduce_LinkDeclaration(self, *kids):
-        self.val = kids[0].val
+        pass
 
+    @parsing.inline(0)
     def reduce_PropertyDeclaration(self, *kids):
-        self.val = kids[0].val
+        pass
 
+    @parsing.inline(0)
     def reduce_FunctionDeclaration(self, *kids):
-        self.val = kids[0].val
+        pass
 
+    @parsing.inline(0)
     def reduce_GlobalDeclaration(self, *kids):
-        self.val = kids[0].val
+        pass
+
+    @parsing.inline(0)
+    def reduce_IndexDeclaration(self, *kids):
+        pass
 
 
 # these statements have no {} block
 class SDLShortStatement(Nonterm):
 
+    @parsing.inline(0)
     def reduce_ExtensionRequirementDeclaration(self, *kids):
-        self.val = kids[0].val
+        pass
 
+    @parsing.inline(0)
     def reduce_FutureRequirementDeclaration(self, *kids):
-        self.val = kids[0].val
+        pass
 
+    @parsing.inline(0)
     def reduce_ScalarTypeDeclarationShort(self, *kids):
-        self.val = kids[0].val
+        pass
 
+    @parsing.inline(0)
     def reduce_AnnotationDeclarationShort(self, *kids):
-        self.val = kids[0].val
+        pass
 
+    @parsing.inline(0)
     def reduce_ObjectTypeDeclarationShort(self, *kids):
-        self.val = kids[0].val
+        pass
 
+    @parsing.inline(0)
     def reduce_AliasDeclarationShort(self, *kids):
-        self.val = kids[0].val
+        pass
 
+    @parsing.inline(0)
     def reduce_ConstraintDeclarationShort(self, *kids):
-        self.val = kids[0].val
+        pass
 
+    @parsing.inline(0)
     def reduce_LinkDeclarationShort(self, *kids):
-        self.val = kids[0].val
+        pass
 
+    @parsing.inline(0)
     def reduce_PropertyDeclarationShort(self, *kids):
-        self.val = kids[0].val
+        pass
 
+    @parsing.inline(0)
     def reduce_FunctionDeclarationShort(self, *kids):
-        self.val = kids[0].val
+        pass
 
+    @parsing.inline(0)
     def reduce_GlobalDeclarationShort(self, *kids):
-        self.val = kids[0].val
+        pass
+
+    @parsing.inline(0)
+    def reduce_IndexDeclarationShort(self, *kids):
+        pass
 
 
 # A rule for an SDL block, either as part of `module` declaration or
@@ -132,12 +163,12 @@ class SDLCommandBlock(Nonterm):
     def reduce_LBRACE_OptSemicolons_RBRACE(self, *kids):
         self.val = []
 
-    def reduce_statement_without_semicolons(self, *kids):
+    def reduce_statement_without_semicolons(self, _0, _1, stmt, _2):
         r"""%reduce LBRACE \
                 OptSemicolons SDLShortStatement \
             RBRACE
         """
-        self.val = [kids[2].val]
+        self.val = [stmt.val]
 
     def reduce_statements_without_optional_trailing_semicolons(self, *kids):
         r"""%reduce LBRACE \
@@ -145,23 +176,20 @@ class SDLCommandBlock(Nonterm):
                 OptSemicolons SDLShortStatement \
             RBRACE
         """
-        self.val = kids[2].val + [kids[4].val]
+        _, _, stmts, _, stmt, _ = kids
+        self.val = stmts.val + [stmt.val]
 
+    @parsing.inline(2)
     def reduce_LBRACE_OptSemicolons_SDLStatements_RBRACE(self, *kids):
-        self.val = kids[2].val
+        pass
 
+    @parsing.inline(2)
     def reduce_statements_without_optional_trailing_semicolons2(self, *kids):
         r"""%reduce LBRACE \
                 OptSemicolons SDLStatements \
                 Semicolons \
             RBRACE
         """
-        self.val = kids[2].val
-
-
-class DotName(Nonterm):
-    def reduce_ModuleName(self, *kids):
-        self.val = '.'.join(part for part in kids[0].val)
 
 
 class SDLProductionHelper:
@@ -257,9 +285,10 @@ def sdl_commands_block(parent, *commands, opt=True):
 
 class Using(Nonterm):
     def reduce_USING_ParenExpr(self, *kids):
+        _, paren_expr = kids
         self.val = qlast.SetField(
             name='expr',
-            value=kids[1].val,
+            value=paren_expr.val,
             special_syntax=True,
         )
 
@@ -267,13 +296,14 @@ class Using(Nonterm):
 class SetField(Nonterm):
     # field := <expr>
     def reduce_Identifier_ASSIGN_Expr(self, *kids):
-        self.val = qlast.SetField(name=kids[0].val, value=kids[2].val)
+        identifier, _, expr = kids
+        self.val = qlast.SetField(name=identifier.val, value=expr.val)
 
 
 class SetAnnotation(Nonterm):
     def reduce_ANNOTATION_NodeName_ASSIGN_Expr(self, *kids):
-        self.val = qlast.CreateAnnotationValue(
-            name=kids[1].val, value=kids[3].val)
+        _, name, _, expr = kids
+        self.val = qlast.CreateAnnotationValue(name=name.val, value=expr.val)
 
 
 sdl_commands_block(
@@ -286,47 +316,46 @@ sdl_commands_block(
 class ExtensionRequirementDeclaration(Nonterm):
 
     def reduce_USING_EXTENSION_ShortNodeName_OptExtensionVersion(self, *kids):
+        _, _, name, version = kids
         self.val = qlast.CreateExtension(
-            name=kids[2].val,
-            version=kids[3].val,
+            name=name.val,
+            version=version.val,
         )
 
 
 class FutureRequirementDeclaration(Nonterm):
 
     def reduce_USING_FUTURE_ShortNodeName(self, *kids):
+        _, _, name = kids
         self.val = qlast.CreateFuture(
-            name=kids[2].val,
+            name=name.val,
         )
 
 
 class ModuleDeclaration(Nonterm):
-    def reduce_MODULE_ModuleName_SDLCommandBlock(self, *kids):
+    def reduce_MODULE_ModuleName_SDLCommandBlock(self, _, module_name, block):
+
         # Check that top-level declarations DO NOT use fully-qualified
         # names and aren't nested module blocks.
-        declarations = kids[2].val
+        declarations = block.val
         for decl in declarations:
-            if isinstance(decl, qlast.ModuleDeclaration):
-                raise errors.EdgeQLSyntaxError(
-                    "nested module declaration is not allowed",
-                    context=decl.context)
-            elif isinstance(decl, qlast.ExtensionCommand):
+            if isinstance(decl, qlast.ExtensionCommand):
                 raise errors.EdgeQLSyntaxError(
                     "'using extension' cannot be used inside a module block",
-                    context=decl.context)
+                    span=decl.span)
             elif isinstance(decl, qlast.FutureCommand):
                 raise errors.EdgeQLSyntaxError(
                     "'using future' cannot be used inside a module block",
-                    context=decl.context)
+                    span=decl.span)
             elif decl.name.module is not None:
                 raise errors.EdgeQLSyntaxError(
                     "fully-qualified name is not allowed in "
                     "a module declaration",
-                    context=decl.name.context)
+                    span=decl.name.span)
 
         self.val = qlast.ModuleDeclaration(
             # mirror what we do in CREATE MODULE
-            name=qlast.ObjectRef(module=None, name='.'.join(kids[1].val)),
+            name=qlast.ObjectRef(module=None, name='::'.join(module_name.val)),
             declarations=declarations,
         )
 
@@ -338,22 +367,24 @@ class ConstraintDeclaration(Nonterm):
     def reduce_CreateConstraint(self, *kids):
         r"""%reduce ABSTRACT CONSTRAINT NodeName OptOnExpr \
                     OptExtendingSimple CreateSDLCommandsBlock"""
+        _, _, name, on_expr, extending, commands = kids
         self.val = qlast.CreateConstraint(
-            name=kids[2].val,
-            subjectexpr=kids[3].val,
-            bases=kids[4].val,
-            commands=kids[5].val,
+            name=name.val,
+            subjectexpr=on_expr.val,
+            bases=extending.val,
+            commands=commands.val,
         )
 
     def reduce_CreateConstraint_CreateFunctionArgs(self, *kids):
         r"""%reduce ABSTRACT CONSTRAINT NodeName CreateFunctionArgs \
                     OptOnExpr OptExtendingSimple CreateSDLCommandsBlock"""
+        _, _, name, args, on_expr, extending, commands = kids
         self.val = qlast.CreateConstraint(
-            name=kids[2].val,
-            params=kids[3].val,
-            subjectexpr=kids[4].val,
-            bases=kids[5].val,
-            commands=kids[6].val,
+            name=name.val,
+            params=args.val,
+            subjectexpr=on_expr.val,
+            bases=extending.val,
+            commands=commands.val,
         )
 
 
@@ -361,20 +392,22 @@ class ConstraintDeclarationShort(Nonterm):
     def reduce_CreateConstraint(self, *kids):
         r"""%reduce ABSTRACT CONSTRAINT NodeName OptOnExpr \
                     OptExtendingSimple"""
+        _, _, name, on_expr, extending = kids
         self.val = qlast.CreateConstraint(
-            name=kids[2].val,
-            subject=kids[3].val,
-            bases=kids[4].val,
+            name=name.val,
+            subject=on_expr.val,
+            bases=extending.val,
         )
 
     def reduce_CreateConstraint_CreateFunctionArgs(self, *kids):
         r"""%reduce ABSTRACT CONSTRAINT NodeName CreateFunctionArgs \
                     OptOnExpr OptExtendingSimple"""
+        _, _, name, args, on_expr, extending = kids
         self.val = qlast.CreateConstraint(
-            name=kids[2].val,
-            params=kids[3].val,
-            subject=kids[4].val,
-            bases=kids[5].val,
+            name=name.val,
+            params=args.val,
+            subject=on_expr.val,
+            bases=extending.val,
         )
 
 
@@ -384,12 +417,13 @@ class ConcreteConstraintBlock(Nonterm):
                     NodeName OptConcreteConstraintArgList OptOnExpr \
                     OptExceptExpr \
                     CreateSDLCommandsBlock"""
+        _, name, arg_list, on_expr, except_expr, commands = kids
         self.val = qlast.CreateConcreteConstraint(
-            name=kids[1].val,
-            args=kids[2].val,
-            subjectexpr=kids[3].val,
-            except_expr=kids[4].val,
-            commands=kids[5].val,
+            name=name.val,
+            args=arg_list.val,
+            subjectexpr=on_expr.val,
+            except_expr=except_expr.val,
+            commands=commands.val,
         )
 
     def reduce_CreateDelegatedConstraint(self, *kids):
@@ -397,13 +431,14 @@ class ConcreteConstraintBlock(Nonterm):
                     NodeName OptConcreteConstraintArgList OptOnExpr \
                     OptExceptExpr \
                     CreateSDLCommandsBlock"""
+        _, _, name, arg_list, on_expr, except_expr, commands = kids
         self.val = qlast.CreateConcreteConstraint(
             delegated=True,
-            name=kids[2].val,
-            args=kids[3].val,
-            subjectexpr=kids[4].val,
-            except_expr=kids[5].val,
-            commands=kids[6].val,
+            name=name.val,
+            args=arg_list.val,
+            subjectexpr=on_expr.val,
+            except_expr=except_expr.val,
+            commands=commands.val,
         )
 
 
@@ -412,23 +447,25 @@ class ConcreteConstraintShort(Nonterm):
         r"""%reduce CONSTRAINT \
                     NodeName OptConcreteConstraintArgList OptOnExpr \
                     OptExceptExpr"""
+        _, name, arg_list, on_expr, except_expr = kids
         self.val = qlast.CreateConcreteConstraint(
-            name=kids[1].val,
-            args=kids[2].val,
-            subjectexpr=kids[3].val,
-            except_expr=kids[4].val,
+            name=name.val,
+            args=arg_list.val,
+            subjectexpr=on_expr.val,
+            except_expr=except_expr.val,
         )
 
     def reduce_CreateDelegatedConstraint(self, *kids):
         r"""%reduce DELEGATED CONSTRAINT \
                     NodeName OptConcreteConstraintArgList OptOnExpr \
                     OptExceptExpr"""
+        _, _, name, arg_list, on_expr, except_expr = kids
         self.val = qlast.CreateConcreteConstraint(
             delegated=True,
-            name=kids[2].val,
-            args=kids[3].val,
-            subjectexpr=kids[4].val,
-            except_expr=kids[5].val,
+            name=name.val,
+            args=arg_list.val,
+            subjectexpr=on_expr.val,
+            except_expr=except_expr.val,
         )
 
 
@@ -451,11 +488,12 @@ class ScalarTypeDeclaration(Nonterm):
             ABSTRACT SCALAR TYPE NodeName \
             OptExtending CreateScalarTypeSDLCommandsBlock \
         """
+        _, _, _, name, extending, commands = kids
         self.val = qlast.CreateScalarType(
             abstract=True,
-            name=kids[3].val,
-            bases=kids[4].val,
-            commands=kids[5].val,
+            name=name.val,
+            bases=extending.val,
+            commands=commands.val,
         )
 
     def reduce_ScalarTypeDeclaration(self, *kids):
@@ -463,10 +501,11 @@ class ScalarTypeDeclaration(Nonterm):
             SCALAR TYPE NodeName \
             OptExtending CreateScalarTypeSDLCommandsBlock \
         """
+        _, _, name, extending, commands = kids
         self.val = qlast.CreateScalarType(
-            name=kids[2].val,
-            bases=kids[3].val,
-            commands=kids[4].val,
+            name=name.val,
+            bases=extending.val,
+            commands=commands.val,
         )
 
 
@@ -476,10 +515,11 @@ class ScalarTypeDeclarationShort(Nonterm):
             ABSTRACT SCALAR TYPE NodeName \
             OptExtending \
         """
+        _, _, _, name, extending = kids
         self.val = qlast.CreateScalarType(
             abstract=True,
-            name=kids[3].val,
-            bases=kids[4].val,
+            name=name.val,
+            bases=extending.val,
         )
 
     def reduce_ScalarTypeDeclaration(self, *kids):
@@ -487,9 +527,10 @@ class ScalarTypeDeclarationShort(Nonterm):
             SCALAR TYPE NodeName \
             OptExtending \
         """
+        _, _, name, extending = kids
         self.val = qlast.CreateScalarType(
-            name=kids[2].val,
-            bases=kids[3].val,
+            name=name.val,
+            bases=extending.val,
         )
 
 
@@ -500,43 +541,47 @@ class AnnotationDeclaration(Nonterm):
     def reduce_CreateAnnotation(self, *kids):
         r"""%reduce ABSTRACT ANNOTATION NodeName OptExtendingSimple \
                     CreateSDLCommandsBlock"""
+        _, _, name, extending, commands = kids
         self.val = qlast.CreateAnnotation(
             abstract=True,
-            name=kids[2].val,
-            bases=kids[3].val,
+            name=name.val,
+            bases=extending.val,
             inheritable=False,
-            commands=kids[4].val,
+            commands=commands.val,
         )
 
     def reduce_CreateInheritableAnnotation(self, *kids):
         r"""%reduce ABSTRACT INHERITABLE ANNOTATION
                     NodeName OptExtendingSimple CreateSDLCommandsBlock"""
+        _, _, _, name, extending, commands = kids
         self.val = qlast.CreateAnnotation(
             abstract=True,
-            name=kids[3].val,
-            bases=kids[4].val,
+            name=name.val,
+            bases=extending.val,
             inheritable=True,
-            commands=kids[4].val,
+            commands=commands.val,
         )
 
 
 class AnnotationDeclarationShort(Nonterm):
     def reduce_CreateAnnotation(self, *kids):
         r"""%reduce ABSTRACT ANNOTATION NodeName OptExtendingSimple"""
+        _, _, name, extending = kids
         self.val = qlast.CreateAnnotation(
             abstract=True,
-            name=kids[2].val,
-            bases=kids[3].val,
+            name=name.val,
+            bases=extending.val,
             inheritable=False,
         )
 
     def reduce_CreateInheritableAnnotation(self, *kids):
         r"""%reduce ABSTRACT INHERITABLE ANNOTATION
                     NodeName OptExtendingSimple"""
+        _, _, _, name, extending = kids
         self.val = qlast.CreateAnnotation(
             abstract=True,
-            name=kids[3].val,
-            bases=kids[4].val,
+            name=name.val,
+            bases=extending.val,
             inheritable=True,
         )
 
@@ -546,42 +591,517 @@ class AnnotationDeclarationShort(Nonterm):
 #
 sdl_commands_block(
     'CreateIndex',
+    Using,
+    SetField,
+    SetAnnotation,
+)
+
+
+class IndexDeclaration(
+    Nonterm,
+    commondl.ProcessIndexMixin,
+):
+    def reduce_CreateIndex(self, *kids):
+        r"""%reduce ABSTRACT INDEX NodeName \
+                    OptExtendingSimple CreateIndexSDLCommandsBlock"""
+        _, _, name, bases, commands = kids
+        self.val = qlast.CreateIndex(
+            name=name.val,
+            bases=bases.val,
+            commands=commands.val,
+        )
+
+    def reduce_CreateIndex_CreateFunctionArgs(self, *kids):
+        r"""%reduce ABSTRACT INDEX NodeName IndexExtArgList \
+                    OptExtendingSimple CreateIndexSDLCommandsBlock"""
+        _, _, name, arg_list, bases, commands = kids
+        params, kwargs = self._process_params_or_kwargs(
+            bases.val, arg_list.val)
+        self.val = qlast.CreateIndex(
+            name=name.val,
+            params=params,
+            kwargs=kwargs,
+            bases=bases.val,
+            commands=commands.val,
+        )
+
+
+class IndexDeclarationShort(
+    Nonterm,
+    commondl.ProcessIndexMixin,
+):
+    def reduce_CreateIndex(self, *kids):
+        r"""%reduce ABSTRACT INDEX NodeName OptExtendingSimple"""
+        _, _, name, bases = kids
+        self.val = qlast.CreateIndex(
+            name=name.val,
+            bases=bases.val,
+        )
+
+    def reduce_CreateIndex_CreateFunctionArgs(self, *kids):
+        r"""%reduce ABSTRACT INDEX NodeName IndexExtArgList \
+                    OptExtendingSimple"""
+        _, _, name, arg_list, bases = kids
+        params, kwargs = self._process_params_or_kwargs(
+            bases.val, arg_list.val)
+        self.val = qlast.CreateIndex(
+            name=name.val,
+            params=params,
+            kwargs=kwargs,
+            bases=bases.val,
+        )
+
+
+sdl_commands_block(
+    'CreateConcreteIndex',
     SetField,
     SetAnnotation)
 
 
-class IndexDeclarationBlock(Nonterm):
-    def reduce_INDEX_OnExpr_OptExceptExpr_CreateIndexSDLCommandsBlock(
-            self, *kids):
-        self.val = qlast.CreateIndex(
-            name=qlast.ObjectRef(name='idx'),
-            expr=kids[1].val,
-            except_expr=kids[2].val,
-            commands=kids[3].val,
+class ConcreteIndexDeclarationBlock(Nonterm, commondl.ProcessIndexMixin):
+    def reduce_CreateConcreteAnonymousIndex(self, *kids):
+        r"""%reduce INDEX OnExpr OptExceptExpr
+                    CreateConcreteIndexSDLCommandsBlock
+        """
+        _, on_expr, except_expr, commands = kids
+        self.val = qlast.CreateConcreteIndex(
+            name=qlast.ObjectRef(module='__', name='idx'),
+            expr=on_expr.val,
+            except_expr=except_expr.val,
+            commands=commands.val,
+        )
+
+    def reduce_CreateConcreteAnonymousDeferredIndex(self, *kids):
+        r"""%reduce DEFERRED INDEX OnExpr OptExceptExpr
+                    CreateConcreteIndexSDLCommandsBlock
+        """
+        _, _, on_expr, except_expr, commands = kids
+        self.val = qlast.CreateConcreteIndex(
+            name=qlast.ObjectRef(module='__', name='idx'),
+            expr=on_expr.val,
+            except_expr=except_expr.val,
+            deferred=True,
+            commands=commands.val,
+        )
+
+    def reduce_CreateConcreteIndex(self, *kids):
+        r"""%reduce INDEX NodeName \
+                    OnExpr OptExceptExpr \
+                    CreateConcreteIndexSDLCommandsBlock \
+        """
+        _, name, on_expr, except_expr, commands = kids
+        self.val = qlast.CreateConcreteIndex(
+            name=name.val,
+            expr=on_expr.val,
+            except_expr=except_expr.val,
+            commands=commands.val,
+        )
+
+    def reduce_CreateConcreteDeferredIndex(self, *kids):
+        r"""%reduce DEFERRED INDEX NodeName \
+                    OnExpr OptExceptExpr \
+                    CreateConcreteIndexSDLCommandsBlock \
+        """
+        _, _, name, on_expr, except_expr, commands = kids
+        self.val = qlast.CreateConcreteIndex(
+            name=name.val,
+            expr=on_expr.val,
+            except_expr=except_expr.val,
+            deferred=True,
+            commands=commands.val,
+        )
+
+    def reduce_CreateConcreteIndexWithArgs(self, *kids):
+        r"""%reduce INDEX NodeName IndexExtArgList \
+                    OnExpr OptExceptExpr \
+                    CreateConcreteIndexSDLCommandsBlock \
+        """
+        _, name, arg_list, on_expr, except_expr, commands = kids
+        kwargs = self._process_arguments(arg_list.val)
+        self.val = qlast.CreateConcreteIndex(
+            name=name.val,
+            kwargs=kwargs,
+            expr=on_expr.val,
+            except_expr=except_expr.val,
+            commands=commands.val,
+        )
+
+    def reduce_CreateConcreteDeferredIndexWithArgs(self, *kids):
+        r"""%reduce DEFERRED INDEX NodeName IndexExtArgList \
+                    OnExpr OptExceptExpr \
+                    CreateConcreteIndexSDLCommandsBlock \
+        """
+        _, _, name, arg_list, on_expr, except_expr, commands = kids
+        kwargs = self._process_arguments(arg_list.val)
+        self.val = qlast.CreateConcreteIndex(
+            name=name.val,
+            kwargs=kwargs,
+            expr=on_expr.val,
+            except_expr=except_expr.val,
+            deferred=True,
+            commands=commands.val,
         )
 
 
-class IndexDeclarationShort(Nonterm):
+class ConcreteIndexDeclarationShort(Nonterm, commondl.ProcessIndexMixin):
     def reduce_INDEX_OnExpr_OptExceptExpr(self, *kids):
-        self.val = qlast.CreateIndex(
-            name=qlast.ObjectRef(name='idx'),
-            expr=kids[1].val,
-            except_expr=kids[2].val,
+        _, on_expr, except_expr = kids
+        self.val = qlast.CreateConcreteIndex(
+            name=qlast.ObjectRef(module='__', name='idx'),
+            expr=on_expr.val,
+            except_expr=except_expr.val,
+        )
+
+    def reduce_DEFERRED_INDEX_OnExpr_OptExceptExpr(self, *kids):
+        _, _, on_expr, except_expr = kids
+        self.val = qlast.CreateConcreteIndex(
+            name=qlast.ObjectRef(module='__', name='idx'),
+            expr=on_expr.val,
+            except_expr=except_expr.val,
+            deferred=True,
+        )
+
+    def reduce_CreateConcreteIndex(self, *kids):
+        r"""%reduce INDEX NodeName OnExpr OptExceptExpr
+        """
+        _, name, on_expr, except_expr = kids
+        self.val = qlast.CreateConcreteIndex(
+            name=name.val,
+            expr=on_expr.val,
+            except_expr=except_expr.val,
+        )
+
+    def reduce_CreateConcreteDeferredIndex(self, *kids):
+        r"""%reduce DEFERRED INDEX NodeName OnExpr OptExceptExpr
+        """
+        _, _, name, on_expr, except_expr = kids
+        self.val = qlast.CreateConcreteIndex(
+            name=name.val,
+            expr=on_expr.val,
+            except_expr=except_expr.val,
+            deferred=True,
+        )
+
+    def reduce_CreateConcreteIndexWithArgs(self, *kids):
+        r"""%reduce INDEX NodeName IndexExtArgList \
+                    OnExpr OptExceptExpr \
+        """
+        _, name, arg_list, on_expr, except_expr = kids
+        kwargs = self._process_arguments(arg_list.val)
+        self.val = qlast.CreateConcreteIndex(
+            name=name.val,
+            kwargs=kwargs,
+            expr=on_expr.val,
+            except_expr=except_expr.val,
+        )
+
+    def reduce_CreateConcreteDeferredIndexWithArgs(self, *kids):
+        r"""%reduce DEFERRED INDEX NodeName IndexExtArgList
+                    OnExpr OptExceptExpr
+        """
+        _, _, name, arg_list, on_expr, except_expr = kids
+        kwargs = self._process_arguments(arg_list.val)
+        self.val = qlast.CreateConcreteIndex(
+            name=name.val,
+            kwargs=kwargs,
+            expr=on_expr.val,
+            except_expr=except_expr.val,
+            deferred=True,
+        )
+
+
+#
+# Mutation rewrites
+#
+sdl_commands_block(
+    'CreateRewrite',
+    SetField,
+    SetAnnotation
+)
+
+
+class RewriteDeclarationBlock(Nonterm):
+    def reduce_CreateRewrite(self, _r, kinds, _u, expr, commands):
+        """%reduce
+            REWRITE RewriteKindList
+            USING ParenExpr
+            CreateRewriteSDLCommandsBlock
+        """
+        # The name isn't important (it gets replaced) but we need to
+        # have one.
+        name = '/'.join(str(kind) for kind in kinds.val)
+        self.val = qlast.CreateRewrite(
+            name=qlast.ObjectRef(name=name),
+            kinds=kinds.val,
+            expr=expr.val,
+            commands=commands.val,
+        )
+
+
+class RewriteDeclarationShort(Nonterm):
+    def reduce_CreateRewrite(self, _r, kinds, _u, expr):
+        """%reduce
+            REWRITE RewriteKindList
+            USING ParenExpr
+        """
+        # The name isn't important (it gets replaced) but we need to
+        # have one.
+        name = '/'.join(str(kind) for kind in kinds.val)
+        self.val = qlast.CreateRewrite(
+            name=qlast.ObjectRef(name=name),
+            kinds=kinds.val,
+            expr=expr.val,
+        )
+
+
+#
+# Unknown kind pointers (could be link or property)
+#
+
+class PtrTarget(Nonterm):
+
+    def reduce_ARROW_FullTypeExpr(self, *kids):
+        _arrow, type_expr = kids
+
+        self.val = type_expr.val
+        self.span = type_expr.val.span
+
+    def reduce_COLON_FullTypeExpr(self, *kids):
+        _, type_expr = kids
+        self.val = type_expr.val
+        self.span = type_expr.val.span
+
+
+class OptPtrTarget(Nonterm):
+
+    def reduce_empty(self, *kids):
+        self.val = None
+
+    @parsing.inline(0)
+    def reduce_PtrTarget(self, *kids):
+        pass
+
+
+class ConcreteUnknownPointerBlock(Nonterm):
+    def _validate(self):
+        on_target_delete = None
+        for cmd in self.val.commands:
+            if isinstance(cmd, qlast.OnTargetDelete):
+                if on_target_delete:
+                    raise errors.EdgeQLSyntaxError(
+                        f"more than one 'on target delete' specification",
+                        span=cmd.span)
+                else:
+                    on_target_delete = cmd
+
+    def _extract_target(self, target, cmds, span, *, overloaded=False):
+        if target:
+            return target, cmds
+
+        for cmd in cmds:
+            if isinstance(cmd, qlast.SetField) and cmd.name == 'expr':
+                if target is not None:
+                    raise errors.EdgeQLSyntaxError(
+                        f'computed link with more than one expression',
+                        span=span)
+                target = cmd.value
+
+        if not overloaded and target is None:
+            raise errors.EdgeQLSyntaxError(
+                f'computed link without expression',
+                span=span)
+
+        return target, cmds
+
+    def reduce_CreateRegularPointer(self, *kids):
+        """%reduce
+            PathNodeName OptExtendingSimple
+            OptPtrTarget CreateConcreteLinkSDLCommandsBlock
+        """
+        name, opt_bases, opt_target, block = kids
+        target, cmds = self._extract_target(
+            opt_target.val, block.val, name.span)
+        vbases, vcmds = commondl.extract_bases(opt_bases.val, cmds)
+        self.val = qlast.CreateConcreteUnknownPointer(
+            name=name.val,
+            bases=vbases,
+            target=target,
+            commands=vcmds,
+        )
+        self._validate()
+
+    def reduce_CreateRegularQualifiedPointer(self, *kids):
+        """%reduce
+            PtrQuals PathNodeName OptExtendingSimple
+            OptPtrTarget CreateConcreteLinkSDLCommandsBlock
+        """
+        quals, name, opt_bases, opt_target, block = kids
+        target, cmds = self._extract_target(
+            opt_target.val, block.val, name.span)
+        vbases, vcmds = commondl.extract_bases(opt_bases.val, cmds)
+        self.val = qlast.CreateConcreteUnknownPointer(
+            is_required=quals.val.required,
+            cardinality=quals.val.cardinality,
+            name=name.val,
+            bases=vbases,
+            target=target,
+            commands=vcmds,
+        )
+        self._validate()
+
+    def reduce_CreateOverloadedPointer(self, *kids):
+        """%reduce
+            OVERLOADED PathNodeName OptExtendingSimple
+            OptPtrTarget CreateConcreteLinkSDLCommandsBlock
+        """
+        _, name, opt_bases, opt_target, block = kids
+        target, cmds = self._extract_target(
+            opt_target.val, block.val, name.span, overloaded=True)
+        vbases, vcmds = commondl.extract_bases(opt_bases.val, cmds)
+        self.val = qlast.CreateConcreteUnknownPointer(
+            name=name.val,
+            bases=vbases,
+            declared_overloaded=True,
+            is_required=None,
+            cardinality=None,
+            target=target,
+            commands=vcmds,
+        )
+        self._validate()
+
+    def reduce_CreateOverloadedQualifiedPointer(self, *kids):
+        """%reduce
+            OVERLOADED PtrQuals PathNodeName OptExtendingSimple
+            OptPtrTarget CreateConcreteLinkSDLCommandsBlock
+        """
+        _, quals, name, opt_bases, opt_target, block = kids
+        target, cmds = self._extract_target(
+            opt_target.val, block.val, name.span, overloaded=True)
+        vbases, vcmds = commondl.extract_bases(opt_bases.val, cmds)
+        self.val = qlast.CreateConcreteUnknownPointer(
+            name=name.val,
+            bases=vbases,
+            declared_overloaded=True,
+            is_required=quals.val.required,
+            cardinality=quals.val.cardinality,
+            target=target,
+            commands=vcmds,
+        )
+        self._validate()
+
+
+class ConcreteUnknownPointerShort(Nonterm):
+
+    def reduce_CreateRegularPointer(self, *kids):
+        """%reduce
+            PathNodeName OptExtendingSimple
+            PtrTarget
+        """
+        name, opt_bases, target = kids
+        self.val = qlast.CreateConcreteUnknownPointer(
+            name=name.val,
+            bases=opt_bases.val,
+            target=target.val,
+        )
+
+    def reduce_CreateRegularQualifiedPointer(self, *kids):
+        """%reduce
+            PtrQuals PathNodeName OptExtendingSimple
+            PtrTarget
+        """
+        quals, name, opt_bases, target = kids
+        self.val = qlast.CreateConcreteUnknownPointer(
+            name=name.val,
+            bases=opt_bases.val,
+            target=target.val,
+            is_required=quals.val.required,
+            cardinality=quals.val.cardinality,
+        )
+
+    def reduce_CreateOverloadedPointer(self, *kids):
+        """%reduce
+            OVERLOADED PathNodeName OptExtendingSimple
+            OptPtrTarget
+        """
+        _, name, opt_bases, opt_target = kids
+        self.val = qlast.CreateConcreteUnknownPointer(
+            name=name.val,
+            bases=opt_bases.val,
+            declared_overloaded=True,
+            is_required=None,
+            cardinality=None,
+            target=opt_target.val,
+        )
+
+    def reduce_CreateOverloadedQualifiedPointer(self, *kids):
+        """%reduce
+            OVERLOADED PtrQuals PathNodeName OptExtendingSimple
+            OptPtrTarget
+        """
+        _, quals, name, opt_bases, opt_target = kids
+        self.val = qlast.CreateConcreteUnknownPointer(
+            name=name.val,
+            bases=opt_bases.val,
+            declared_overloaded=True,
+            is_required=quals.val.required,
+            cardinality=quals.val.cardinality,
+            target=opt_target.val,
+        )
+
+
+# Unknown simple computed pointers can only go on objects, since they
+# conflict with SetField on links.
+class ConcreteUnknownPointerObjectShort(Nonterm):
+    def reduce_CreateComputableUnknownPointer(self, *kids):
+        """%reduce
+            PathNodeName ASSIGN Expr
+        """
+        name, _, expr = kids
+        self.val = qlast.CreateConcreteUnknownPointer(
+            name=name.val,
+            target=expr.val,
+        )
+
+    def reduce_CreateQualifiedComputableUnknownPointer(self, *kids):
+        """%reduce
+            PtrQuals PathNodeName ASSIGN Expr
+        """
+        quals, name, _, expr = kids
+        self.val = qlast.CreateConcreteUnknownPointer(
+            name=name.val,
+            is_required=quals.val.required,
+            cardinality=quals.val.cardinality,
+            target=expr.val,
         )
 
 
 #
 # Properties
 #
+sdl_commands_block(
+    'CreateProperty',
+    Using,
+    SetField,
+    SetAnnotation,
+    commondl.CreateSimpleExtending,
+)
+
+
 class PropertyDeclaration(Nonterm):
     def reduce_CreateProperty(self, *kids):
         r"""%reduce ABSTRACT PROPERTY PtrNodeName OptExtendingSimple \
-                    CreateSDLCommandsBlock \
+                    CreatePropertySDLCommandsBlock \
         """
+        _, _, name, extending, commands_block = kids
+
+        vbases, vcommands = commondl.extract_bases(
+            extending.val,
+            commands_block.val
+        )
         self.val = qlast.CreateProperty(
-            name=kids[2].val,
-            bases=kids[3].val,
-            commands=kids[4].val,
+            name=name.val,
+            bases=vbases,
+            commands=vcommands,
             abstract=True,
         )
 
@@ -589,9 +1109,10 @@ class PropertyDeclaration(Nonterm):
 class PropertyDeclarationShort(Nonterm):
     def reduce_CreateProperty(self, *kids):
         r"""%reduce ABSTRACT PROPERTY PtrNodeName OptExtendingSimple"""
+        _, _, name, extending = kids
         self.val = qlast.CreateProperty(
-            name=kids[2].val,
-            bases=kids[3].val,
+            name=name.val,
+            bases=extending.val,
             abstract=True,
         )
 
@@ -603,27 +1124,14 @@ sdl_commands_block(
     SetAnnotation,
     ConcreteConstraintBlock,
     ConcreteConstraintShort,
+    RewriteDeclarationBlock,
+    RewriteDeclarationShort,
+    commondl.CreateSimpleExtending,
 )
 
 
-class PtrTarget(Nonterm):
-
-    def reduce_ARROW_FullTypeExpr(self, *kids):
-        self.val = kids[1].val
-        self.context = kids[1].val.context
-
-
-class OptPtrTarget(Nonterm):
-
-    def reduce_empty(self, *kids):
-        self.val = None
-
-    def reduce_PtrTarget(self, *kids):
-        self.val = kids[0].val
-
-
 class ConcretePropertyBlock(Nonterm):
-    def _extract_target(self, target, cmds, context, *, overloaded=False):
+    def _extract_target(self, target, cmds, span, *, overloaded=False):
         if target:
             return target, cmds
 
@@ -632,13 +1140,13 @@ class ConcretePropertyBlock(Nonterm):
                 if target is not None:
                     raise errors.EdgeQLSyntaxError(
                         f'computed property with more than one expression',
-                        context=context)
+                        span=span)
                 target = cmd.value
 
         if not overloaded and target is None:
             raise errors.EdgeQLSyntaxError(
                 f'computed property without expression',
-                context=context)
+                span=span)
 
         return target, cmds
 
@@ -647,13 +1155,17 @@ class ConcretePropertyBlock(Nonterm):
             PROPERTY PathNodeName OptExtendingSimple
             OptPtrTarget CreateConcretePropertySDLCommandsBlock
         """
+        _, name, extending, target, commands_block = kids
+
         target, cmds = self._extract_target(
-            kids[3].val, kids[4].val, kids[1].context)
+            target.val, commands_block.val, name.span
+        )
+        vbases, vcmds = commondl.extract_bases(extending.val, cmds)
         self.val = qlast.CreateConcreteProperty(
-            name=kids[1].val,
-            bases=kids[2].val,
+            name=name.val,
+            bases=vbases,
             target=target,
-            commands=cmds,
+            commands=vcmds,
         )
 
     def reduce_CreateRegularQualifiedProperty(self, *kids):
@@ -661,32 +1173,57 @@ class ConcretePropertyBlock(Nonterm):
             PtrQuals PROPERTY PathNodeName OptExtendingSimple
             OptPtrTarget CreateConcretePropertySDLCommandsBlock
         """
+        (quals, property, name, extending, target, commands) = kids
+
         target, cmds = self._extract_target(
-            kids[4].val, kids[5].val, kids[1].context)
+            target.val, commands.val, property.span
+        )
+        vbases, vcmds = commondl.extract_bases(extending.val, cmds)
         self.val = qlast.CreateConcreteProperty(
-            name=kids[2].val,
-            bases=kids[3].val,
-            is_required=kids[0].val.required,
-            cardinality=kids[0].val.cardinality,
+            name=name.val,
+            bases=vbases,
+            is_required=quals.val.required,
+            cardinality=quals.val.cardinality,
             target=target,
-            commands=cmds,
+            commands=vcmds,
         )
 
     def reduce_CreateOverloadedProperty(self, *kids):
         """%reduce
-            OVERLOADED OptPtrQuals PROPERTY PathNodeName OptExtendingSimple
+            OVERLOADED PROPERTY PathNodeName OptExtendingSimple
             OptPtrTarget CreateConcretePropertySDLCommandsBlock
         """
+        _, _, name, opt_bases, opt_target, block = kids
         target, cmds = self._extract_target(
-            kids[5].val, kids[6].val, kids[3].context, overloaded=True)
+            opt_target.val, block.val, name.span, overloaded=True)
+        vbases, vcmds = commondl.extract_bases(opt_bases.val, cmds)
         self.val = qlast.CreateConcreteProperty(
-            name=kids[3].val,
-            bases=kids[4].val,
+            name=name.val,
+            bases=vbases,
             declared_overloaded=True,
-            is_required=kids[1].val.required,
-            cardinality=kids[1].val.cardinality,
+            is_required=None,
+            cardinality=None,
             target=target,
-            commands=cmds,
+            commands=vcmds,
+        )
+
+    def reduce_CreateOverloadedQualifiedProperty(self, *kids):
+        """%reduce
+            OVERLOADED PtrQuals PROPERTY PathNodeName OptExtendingSimple
+            OptPtrTarget CreateConcretePropertySDLCommandsBlock
+        """
+        _, quals, _, name, opt_bases, opt_target, block = kids
+        target, cmds = self._extract_target(
+            opt_target.val, block.val, name.span, overloaded=True)
+        vbases, vcmds = commondl.extract_bases(opt_bases.val, cmds)
+        self.val = qlast.CreateConcreteProperty(
+            name=name.val,
+            bases=vbases,
+            declared_overloaded=True,
+            is_required=quals.val.required,
+            cardinality=quals.val.cardinality,
+            target=target,
+            commands=vcmds,
         )
 
 
@@ -695,56 +1232,76 @@ class ConcretePropertyShort(Nonterm):
         """%reduce
             PROPERTY PathNodeName OptExtendingSimple PtrTarget
         """
+        _, name, extending, target = kids
         self.val = qlast.CreateConcreteProperty(
-            name=kids[1].val,
-            bases=kids[2].val,
-            target=kids[3].val,
+            name=name.val,
+            bases=extending.val,
+            target=target.val,
         )
 
     def reduce_CreateRegularQualifiedProperty(self, *kids):
         """%reduce
             PtrQuals PROPERTY PathNodeName OptExtendingSimple PtrTarget
         """
+        quals, _, name, extending, target = kids
         self.val = qlast.CreateConcreteProperty(
-            name=kids[2].val,
-            bases=kids[3].val,
-            is_required=kids[0].val.required,
-            cardinality=kids[0].val.cardinality,
-            target=kids[4].val,
+            name=name.val,
+            bases=extending.val,
+            is_required=quals.val.required,
+            cardinality=quals.val.cardinality,
+            target=target.val,
         )
 
     def reduce_CreateOverloadedProperty(self, *kids):
         """%reduce
-            OVERLOADED OptPtrQuals PROPERTY PathNodeName OptExtendingSimple
+            OVERLOADED PROPERTY PathNodeName OptExtendingSimple
             OptPtrTarget
         """
+        _, _, name, opt_bases, opt_target = kids
         self.val = qlast.CreateConcreteProperty(
-            name=kids[3].val,
-            bases=kids[4].val,
+            name=name.val,
+            bases=opt_bases.val,
             declared_overloaded=True,
-            is_required=kids[1].val.required,
-            cardinality=kids[1].val.cardinality,
-            target=kids[5].val,
+            is_required=None,
+            cardinality=None,
+            target=opt_target.val,
+        )
+
+    def reduce_CreateOverloadedQualifiedProperty(self, *kids):
+        """%reduce
+            OVERLOADED PtrQuals PROPERTY PathNodeName OptExtendingSimple
+            OptPtrTarget
+        """
+        _, quals, _, name, opt_bases, opt_target = kids
+        self.val = qlast.CreateConcreteProperty(
+            name=name.val,
+            bases=opt_bases.val,
+            declared_overloaded=True,
+            is_required=quals.val.required,
+            cardinality=quals.val.cardinality,
+            target=opt_target.val,
         )
 
     def reduce_CreateComputableProperty(self, *kids):
         """%reduce
             PROPERTY PathNodeName ASSIGN Expr
         """
+        _, name, _, expr = kids
         self.val = qlast.CreateConcreteProperty(
-            name=kids[1].val,
-            target=kids[3].val,
+            name=name.val,
+            target=expr.val,
         )
 
     def reduce_CreateQualifiedComputableProperty(self, *kids):
         """%reduce
             PtrQuals PROPERTY PathNodeName ASSIGN Expr
         """
+        quals, _, name, _, expr = kids
         self.val = qlast.CreateConcreteProperty(
-            name=kids[2].val,
-            is_required=kids[0].val.required,
-            cardinality=kids[0].val.cardinality,
-            target=kids[4].val,
+            name=name.val,
+            is_required=quals.val.required,
+            cardinality=quals.val.cardinality,
+            target=expr.val,
         )
 
 
@@ -760,8 +1317,13 @@ sdl_commands_block(
     ConcreteConstraintShort,
     ConcretePropertyBlock,
     ConcretePropertyShort,
-    IndexDeclarationBlock,
-    IndexDeclarationShort,
+    ConcreteUnknownPointerBlock,
+    ConcreteUnknownPointerShort,
+    ConcreteIndexDeclarationBlock,
+    ConcreteIndexDeclarationShort,
+    RewriteDeclarationShort,
+    RewriteDeclarationBlock,
+    commondl.CreateSimpleExtending,
 )
 
 
@@ -771,10 +1333,12 @@ class LinkDeclaration(Nonterm):
             ABSTRACT LINK PtrNodeName OptExtendingSimple \
             CreateLinkSDLCommandsBlock \
         """
+        _, _, name, extending, commands = kids
+        vbases, vcommands = commondl.extract_bases(extending.val, commands.val)
         self.val = qlast.CreateLink(
-            name=kids[2].val,
-            bases=kids[3].val,
-            commands=kids[4].val,
+            name=name.val,
+            bases=vbases,
+            commands=vcommands,
             abstract=True,
         )
 
@@ -783,9 +1347,10 @@ class LinkDeclarationShort(Nonterm):
     def reduce_CreateLink(self, *kids):
         r"""%reduce \
             ABSTRACT LINK PtrNodeName OptExtendingSimple"""
+        _, _, name, extending = kids
         self.val = qlast.CreateLink(
-            name=kids[2].val,
-            bases=kids[3].val,
+            name=name.val,
+            bases=extending.val,
             abstract=True,
         )
 
@@ -799,10 +1364,15 @@ sdl_commands_block(
     ConcreteConstraintShort,
     ConcretePropertyBlock,
     ConcretePropertyShort,
-    IndexDeclarationBlock,
-    IndexDeclarationShort,
+    ConcreteUnknownPointerBlock,
+    ConcreteUnknownPointerShort,
+    ConcreteIndexDeclarationBlock,
+    ConcreteIndexDeclarationShort,
     commondl.OnTargetDeleteStmt,
     commondl.OnSourceDeleteStmt,
+    RewriteDeclarationShort,
+    RewriteDeclarationBlock,
+    commondl.CreateSimpleExtending,
 )
 
 
@@ -814,11 +1384,11 @@ class ConcreteLinkBlock(Nonterm):
                 if on_target_delete:
                     raise errors.EdgeQLSyntaxError(
                         f"more than one 'on target delete' specification",
-                        context=cmd.context)
+                        span=cmd.span)
                 else:
                     on_target_delete = cmd
 
-    def _extract_target(self, target, cmds, context, *, overloaded=False):
+    def _extract_target(self, target, cmds, span, *, overloaded=False):
         if target:
             return target, cmds
 
@@ -827,13 +1397,13 @@ class ConcreteLinkBlock(Nonterm):
                 if target is not None:
                     raise errors.EdgeQLSyntaxError(
                         f'computed link with more than one expression',
-                        context=context)
+                        span=span)
                 target = cmd.value
 
         if not overloaded and target is None:
             raise errors.EdgeQLSyntaxError(
                 f'computed link without expression',
-                context=context)
+                span=span)
 
         return target, cmds
 
@@ -842,13 +1412,16 @@ class ConcreteLinkBlock(Nonterm):
             LINK PathNodeName OptExtendingSimple
             OptPtrTarget CreateConcreteLinkSDLCommandsBlock
         """
+        _, name, extending, target, commands = kids
         target, cmds = self._extract_target(
-            kids[3].val, kids[4].val, kids[1].context)
+            target.val, commands.val, name.span
+        )
+        vbases, vcmds = commondl.extract_bases(extending.val, cmds)
         self.val = qlast.CreateConcreteLink(
-            name=kids[1].val,
-            bases=kids[2].val,
+            name=name.val,
+            bases=vbases,
             target=target,
-            commands=cmds,
+            commands=vcmds,
         )
         self._validate()
 
@@ -857,33 +1430,58 @@ class ConcreteLinkBlock(Nonterm):
             PtrQuals LINK PathNodeName OptExtendingSimple
             OptPtrTarget CreateConcreteLinkSDLCommandsBlock
         """
+        quals, _, name, extending, target, commands = kids
         target, cmds = self._extract_target(
-            kids[4].val, kids[5].val, kids[2].context)
+            target.val, commands.val, name.span
+        )
+        vbases, vcmds = commondl.extract_bases(extending.val, cmds)
         self.val = qlast.CreateConcreteLink(
-            is_required=kids[0].val.required,
-            cardinality=kids[0].val.cardinality,
-            name=kids[2].val,
-            bases=kids[3].val,
+            is_required=quals.val.required,
+            cardinality=quals.val.cardinality,
+            name=name.val,
+            bases=vbases,
             target=target,
-            commands=cmds,
+            commands=vcmds,
         )
         self._validate()
 
     def reduce_CreateOverloadedLink(self, *kids):
         """%reduce
-            OVERLOADED OptPtrQuals LINK PathNodeName OptExtendingSimple
+            OVERLOADED LINK PathNodeName OptExtendingSimple
             OptPtrTarget CreateConcreteLinkSDLCommandsBlock
         """
+        _, _, name, opt_bases, opt_target, block = kids
         target, cmds = self._extract_target(
-            kids[5].val, kids[6].val, kids[3].context, overloaded=True)
+            opt_target.val, block.val, name.span, overloaded=True)
+        vbases, vcmds = commondl.extract_bases(opt_bases.val, cmds)
         self.val = qlast.CreateConcreteLink(
-            is_required=kids[1].val.required,
-            cardinality=kids[1].val.cardinality,
+            name=name.val,
+            bases=vbases,
             declared_overloaded=True,
-            name=kids[3].val,
-            bases=kids[4].val,
+            is_required=None,
+            cardinality=None,
             target=target,
-            commands=cmds,
+            commands=vcmds,
+        )
+        self._validate()
+
+    def reduce_CreateOverloadedQualifiedLink(self, *kids):
+        """%reduce
+            OVERLOADED PtrQuals LINK PathNodeName OptExtendingSimple
+            OptPtrTarget CreateConcreteLinkSDLCommandsBlock
+        """
+        _, quals, _, name, opt_bases, opt_target, block = kids
+        target, cmds = self._extract_target(
+            opt_target.val, block.val, name.span, overloaded=True)
+        vbases, vcmds = commondl.extract_bases(opt_bases.val, cmds)
+        self.val = qlast.CreateConcreteLink(
+            name=name.val,
+            bases=vbases,
+            declared_overloaded=True,
+            is_required=quals.val.required,
+            cardinality=quals.val.cardinality,
+            target=target,
+            commands=vcmds,
         )
         self._validate()
 
@@ -895,10 +1493,11 @@ class ConcreteLinkShort(Nonterm):
             LINK PathNodeName OptExtendingSimple
             PtrTarget
         """
+        _, name, opt_bases, target = kids
         self.val = qlast.CreateConcreteLink(
-            name=kids[1].val,
-            bases=kids[2].val,
-            target=kids[3].val,
+            name=name.val,
+            bases=opt_bases.val,
+            target=target.val,
         )
 
     def reduce_CreateRegularQualifiedLink(self, *kids):
@@ -906,46 +1505,65 @@ class ConcreteLinkShort(Nonterm):
             PtrQuals LINK PathNodeName OptExtendingSimple
             PtrTarget
         """
+        quals, _, name, opt_bases, target = kids
         self.val = qlast.CreateConcreteLink(
-            is_required=kids[0].val.required,
-            cardinality=kids[0].val.cardinality,
-            name=kids[2].val,
-            bases=kids[3].val,
-            target=kids[4].val,
+            name=name.val,
+            bases=opt_bases.val,
+            target=target.val,
+            is_required=quals.val.required,
+            cardinality=quals.val.cardinality,
         )
 
     def reduce_CreateOverloadedLink(self, *kids):
         """%reduce
-            OVERLOADED OptPtrQuals LINK PathNodeName OptExtendingSimple
+            OVERLOADED LINK PathNodeName OptExtendingSimple
             OptPtrTarget
         """
+        _, _, name, opt_bases, opt_target = kids
         self.val = qlast.CreateConcreteLink(
+            name=name.val,
+            bases=opt_bases.val,
             declared_overloaded=True,
-            is_required=kids[1].val.required,
-            cardinality=kids[1].val.cardinality,
-            name=kids[3].val,
-            bases=kids[4].val,
-            target=kids[5].val,
+            is_required=None,
+            cardinality=None,
+            target=opt_target.val,
+        )
+
+    def reduce_CreateOverloadedQualifiedLink(self, *kids):
+        """%reduce
+            OVERLOADED PtrQuals LINK PathNodeName OptExtendingSimple
+            OptPtrTarget
+        """
+        _, quals, _, name, opt_bases, opt_target = kids
+        self.val = qlast.CreateConcreteLink(
+            name=name.val,
+            bases=opt_bases.val,
+            declared_overloaded=True,
+            is_required=quals.val.required,
+            cardinality=quals.val.cardinality,
+            target=opt_target.val,
         )
 
     def reduce_CreateComputableLink(self, *kids):
         """%reduce
             LINK PathNodeName ASSIGN Expr
         """
+        _, name, _, expr = kids
         self.val = qlast.CreateConcreteLink(
-            name=kids[1].val,
-            target=kids[3].val,
+            name=name.val,
+            target=expr.val,
         )
 
     def reduce_CreateQualifiedComputableLink(self, *kids):
         """%reduce
             PtrQuals LINK PathNodeName ASSIGN Expr
         """
+        quals, _, name, _, expr = kids
         self.val = qlast.CreateConcreteLink(
-            is_required=kids[0].val.required,
-            cardinality=kids[0].val.cardinality,
-            name=kids[2].val,
-            target=kids[4].val,
+            is_required=quals.val.required,
+            cardinality=quals.val.cardinality,
+            name=name.val,
+            target=expr.val,
         )
 
 
@@ -967,13 +1585,14 @@ class AccessPolicyDeclarationBlock(Nonterm):
             OptUsingBlock
             CreateAccessPolicySDLCommandsBlock
         """
+        _, _, name, when, action, access_kinds, using, commands = kids
         self.val = qlast.CreateAccessPolicy(
-            name=kids[2].val,
-            condition=kids[3].val,
-            action=kids[4].val,
-            access_kinds=[y for x in kids[5].val for y in x],
-            expr=kids[6].val,
-            commands=kids[7].val,
+            name=name.val,
+            condition=when.val,
+            action=action.val,
+            access_kinds=[y for x in access_kinds.val for y in x],
+            expr=using.val,
+            commands=commands.val,
         )
 
 
@@ -984,12 +1603,65 @@ class AccessPolicyDeclarationShort(Nonterm):
             OptWhenBlock AccessPolicyAction AccessKindList
             OptUsingBlock
         """
+        _, _, name, when, action, access_kinds, using = kids
         self.val = qlast.CreateAccessPolicy(
-            name=kids[2].val,
-            condition=kids[3].val,
-            action=kids[4].val,
-            access_kinds=[y for x in kids[5].val for y in x],
-            expr=kids[6].val,
+            name=name.val,
+            condition=when.val,
+            action=action.val,
+            access_kinds=[y for x in access_kinds.val for y in x],
+            expr=using.val,
+        )
+
+
+#
+# Triggers
+#
+sdl_commands_block(
+    'CreateTrigger',
+    SetField,
+    SetAnnotation
+)
+
+
+class TriggerDeclarationBlock(Nonterm):
+    def reduce_CreateTrigger(self, *kids):
+        """%reduce
+            TRIGGER NodeName
+            TriggerTiming TriggerKindList
+            FOR TriggerScope
+            OptWhenBlock
+            DO ParenExpr
+            CreateTriggerSDLCommandsBlock
+        """
+        _, name, timing, kinds, _, scope, when, _, expr, commands = kids
+        self.val = qlast.CreateTrigger(
+            name=name.val,
+            timing=timing.val,
+            kinds=kinds.val,
+            scope=scope.val,
+            expr=expr.val,
+            condition=when.val,
+            commands=commands.val,
+        )
+
+
+class TriggerDeclarationShort(Nonterm):
+    def reduce_CreateTrigger(self, *kids):
+        """%reduce
+            TRIGGER NodeName
+            TriggerTiming TriggerKindList
+            FOR TriggerScope
+            OptWhenBlock
+            DO ParenExpr
+        """
+        _, name, timing, kinds, _, scope, when, _, expr = kids
+        self.val = qlast.CreateTrigger(
+            name=name.val,
+            timing=timing.val,
+            kinds=kinds.val,
+            scope=scope.val,
+            expr=expr.val,
+            condition=when.val,
         )
 
 
@@ -999,18 +1671,22 @@ class AccessPolicyDeclarationShort(Nonterm):
 
 sdl_commands_block(
     'CreateObjectType',
-    SetField,
     SetAnnotation,
     ConcretePropertyBlock,
     ConcretePropertyShort,
     ConcreteLinkBlock,
     ConcreteLinkShort,
+    ConcreteUnknownPointerBlock,
+    ConcreteUnknownPointerShort,
+    ConcreteUnknownPointerObjectShort,
     ConcreteConstraintBlock,
     ConcreteConstraintShort,
-    IndexDeclarationBlock,
-    IndexDeclarationShort,
+    ConcreteIndexDeclarationBlock,
+    ConcreteIndexDeclarationShort,
     AccessPolicyDeclarationBlock,
     AccessPolicyDeclarationShort,
+    TriggerDeclarationBlock,
+    TriggerDeclarationShort,
 )
 
 
@@ -1020,11 +1696,12 @@ class ObjectTypeDeclaration(Nonterm):
             ABSTRACT TYPE NodeName OptExtendingSimple \
             CreateObjectTypeSDLCommandsBlock \
         """
+        _, _, name, extending, commands = kids
         self.val = qlast.CreateObjectType(
             abstract=True,
-            name=kids[2].val,
-            bases=kids[3].val,
-            commands=kids[4].val,
+            name=name.val,
+            bases=extending.val,
+            commands=commands.val,
         )
 
     def reduce_CreateRegularObjectTypeStmt(self, *kids):
@@ -1032,10 +1709,11 @@ class ObjectTypeDeclaration(Nonterm):
             TYPE NodeName OptExtendingSimple \
             CreateObjectTypeSDLCommandsBlock \
         """
+        _, name, extending, commands = kids
         self.val = qlast.CreateObjectType(
-            name=kids[1].val,
-            bases=kids[2].val,
-            commands=kids[3].val,
+            name=name.val,
+            bases=extending.val,
+            commands=commands.val,
         )
 
 
@@ -1043,18 +1721,20 @@ class ObjectTypeDeclarationShort(Nonterm):
     def reduce_CreateAbstractObjectTypeStmt(self, *kids):
         r"""%reduce \
             ABSTRACT TYPE NodeName OptExtendingSimple"""
+        _, _, name, extending = kids
         self.val = qlast.CreateObjectType(
             abstract=True,
-            name=kids[2].val,
-            bases=kids[3].val,
+            name=name.val,
+            bases=extending.val,
         )
 
     def reduce_CreateRegularObjectTypeStmt(self, *kids):
         r"""%reduce \
             TYPE NodeName OptExtendingSimple"""
+        _, name, extending = kids
         self.val = qlast.CreateObjectType(
-            name=kids[1].val,
-            bases=kids[2].val,
+            name=name.val,
+            bases=extending.val,
         )
 
 
@@ -1076,9 +1756,10 @@ class AliasDeclaration(Nonterm):
         r"""%reduce
             ALIAS NodeName CreateAliasSDLCommandsBlock
         """
+        _, name, commands = kids
         self.val = qlast.CreateAlias(
-            name=kids[1].val,
-            commands=kids[2].val,
+            name=name.val,
+            commands=commands.val,
         )
 
 
@@ -1087,12 +1768,13 @@ class AliasDeclarationShort(Nonterm):
         r"""%reduce
             ALIAS NodeName ASSIGN Expr
         """
+        _, name, _, expr = kids
         self.val = qlast.CreateAlias(
-            name=kids[1].val,
+            name=name.val,
             commands=[
                 qlast.SetField(
                     name='expr',
-                    value=kids[3].val,
+                    value=expr.val,
                     special_syntax=True,
                 )
             ]
@@ -1102,9 +1784,10 @@ class AliasDeclarationShort(Nonterm):
         r"""%reduce
             ALIAS NodeName CreateAliasSingleSDLCommandBlock
         """
+        _, name, commands = kids
         self.val = qlast.CreateAlias(
-            name=kids[1].val,
-            commands=kids[2].val,
+            name=name.val,
+            commands=commands.val,
         )
 
 
@@ -1128,12 +1811,13 @@ class FunctionDeclaration(Nonterm, commondl.ProcessFunctionBlockMixin):
                 ARROW OptTypeQualifier FunctionType \
                 CreateFunctionSDLCommandsBlock
         """
+        _, name, args, _, type_qualifier, function_type, body = kids
         self.val = qlast.CreateFunction(
-            name=kids[1].val,
-            params=kids[2].val,
-            returning=kids[5].val,
-            returning_typemod=kids[4].val,
-            **self._process_function_body(kids[6]),
+            name=name.val,
+            params=args.val,
+            returning=function_type.val,
+            returning_typemod=type_qualifier.val,
+            **self._process_function_body(body),
         )
 
 
@@ -1143,12 +1827,13 @@ class FunctionDeclarationShort(Nonterm, commondl.ProcessFunctionBlockMixin):
                 ARROW OptTypeQualifier FunctionType \
                 CreateFunctionSingleSDLCommandBlock
         """
+        _, name, args, _, type_qualifier, function_type, body = kids
         self.val = qlast.CreateFunction(
-            name=kids[1].val,
-            params=kids[2].val,
-            returning=kids[5].val,
-            returning_typemod=kids[4].val,
-            **self._process_function_body(kids[6]),
+            name=name.val,
+            params=args.val,
+            returning=function_type.val,
+            returning_typemod=type_qualifier.val,
+            **self._process_function_body(body),
         )
 
 
@@ -1165,7 +1850,7 @@ sdl_commands_block(
 
 
 class GlobalDeclaration(Nonterm):
-    def _extract_target(self, target, cmds, context, *, overloaded=False):
+    def _extract_target(self, target, cmds, span, *, overloaded=False):
         if target:
             return target, cmds
 
@@ -1174,13 +1859,13 @@ class GlobalDeclaration(Nonterm):
                 if target is not None:
                     raise errors.EdgeQLSyntaxError(
                         f'computed global with more than one expression',
-                        context=context)
+                        span=span)
                 target = cmd.value
 
         if not overloaded and target is None:
             raise errors.EdgeQLSyntaxError(
                 f'computed property without expression',
-                context=context)
+                span=span)
 
         return target, cmds
 
@@ -1189,12 +1874,14 @@ class GlobalDeclaration(Nonterm):
             PtrQuals GLOBAL NodeName
             OptPtrTarget CreateGlobalSDLCommandsBlock
         """
+        quals, glob, name, target, commands = kids
         target, cmds = self._extract_target(
-            kids[3].val, kids[4].val, kids[1].context)
+            target.val, commands.val, glob.span
+        )
         self.val = qlast.CreateGlobal(
-            name=kids[2].val,
-            is_required=kids[0].val.required,
-            cardinality=kids[0].val.cardinality,
+            name=name.val,
+            is_required=quals.val.required,
+            cardinality=quals.val.cardinality,
             target=target,
             commands=cmds,
         )
@@ -1204,10 +1891,12 @@ class GlobalDeclaration(Nonterm):
             GLOBAL NodeName
             OptPtrTarget CreateGlobalSDLCommandsBlock
         """
+        glob, name, target, commands = kids
         target, cmds = self._extract_target(
-            kids[2].val, kids[3].val, kids[0].context)
+            target.val, commands.val, glob.span
+        )
         self.val = qlast.CreateGlobal(
-            name=kids[1].val,
+            name=name.val,
             target=target,
             commands=cmds,
         )
@@ -1218,38 +1907,42 @@ class GlobalDeclarationShort(Nonterm):
         """%reduce
             PtrQuals GLOBAL NodeName PtrTarget
         """
+        quals, _, name, target = kids
         self.val = qlast.CreateGlobal(
-            name=kids[2].val,
-            is_required=kids[0].val.required,
-            cardinality=kids[0].val.cardinality,
-            target=kids[3].val,
+            name=name.val,
+            is_required=quals.val.required,
+            cardinality=quals.val.cardinality,
+            target=target.val,
         )
 
     def reduce_CreateRegularGlobalShort(self, *kids):
         """%reduce
             GLOBAL NodeName PtrTarget
         """
+        _, name, target = kids
         self.val = qlast.CreateGlobal(
-            name=kids[1].val,
-            target=kids[2].val,
+            name=name.val,
+            target=target.val,
         )
 
     def reduce_CreateComputedGlobalShortQuals(self, *kids):
         """%reduce
             PtrQuals GLOBAL NodeName ASSIGN Expr
         """
+        quals, _, name, _, expr = kids
         self.val = qlast.CreateGlobal(
-            name=kids[2].val,
-            is_required=kids[0].val.required,
-            cardinality=kids[0].val.cardinality,
-            target=kids[4].val,
+            name=name.val,
+            is_required=quals.val.required,
+            cardinality=quals.val.cardinality,
+            target=expr.val,
         )
 
     def reduce_CreateComputedGlobalShort(self, *kids):
         """%reduce
             GLOBAL NodeName ASSIGN Expr
         """
+        _, name, _, expr = kids
         self.val = qlast.CreateGlobal(
-            name=kids[1].val,
-            target=kids[3].val,
+            name=name.val,
+            target=expr.val,
         )

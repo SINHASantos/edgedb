@@ -1,5 +1,5 @@
-use crate::position::Pos;
-use crate::tokenizer::{Kind, TokenStream};
+use crate::position::{InflatedPos, Pos};
+use crate::tokenizer::{self, Kind};
 
 /// Error of expression checking
 ///
@@ -10,7 +10,11 @@ pub enum Error {
     Tokenizer(String, Pos),
     #[error(
         "{}: closing bracket mismatch, opened {:?} at {}, encountered {:?}",
-        closing_pos, opened, opened_pos, encountered)]
+        closing_pos,
+        opened,
+        opened_pos,
+        encountered
+    )]
     BracketMismatch {
         opened: &'static str,
         encountered: &'static str,
@@ -21,8 +25,12 @@ pub enum Error {
     ExtraBracket(&'static str, Pos),
     #[error("{}: bracket {:?} has never been closed", _1, _0)]
     MissingBracket(&'static str, Pos),
-    #[error("{}: token {:?} is not allowed in expression \
-             (try parenthesize the expression)", _1, _0)]
+    #[error(
+        "{}: token {:?} is not allowed in expression \
+             (try parenthesize the expression)",
+        _1,
+        _0
+    )]
     UnexpectedToken(String, Pos),
     #[error("expression is empty")]
     Empty,
@@ -69,24 +77,24 @@ pub fn check(text: &str) -> Result<(), Error> {
     use Error::*;
 
     let mut brackets = Vec::new();
-    let mut parser = &mut TokenStream::new(text);
+    let mut parser = &mut tokenizer::Tokenizer::new(text);
     let mut empty = true;
     for token in &mut parser {
-        let (token, pos) = match token {
-            Ok(t) => (t.token, t.start),
-            Err(combine::easy::Error::Unexpected(s)) => {
-                return Err(Tokenizer(
-                    s.to_string(), parser.current_pos()));
-            }
-            Err(e) => {
-                return Err(Tokenizer(
-                    e.to_string(), parser.current_pos()));
+        let token = match token {
+            Ok(t) => t,
+            Err(crate::tokenizer::Error { message, .. }) => {
+                return Err(Tokenizer(message, parser.current_pos()));
             }
         };
+        let pos = token.span.start;
+        let pos = InflatedPos::from_offset(text.as_bytes(), pos)
+            .unwrap()
+            .deflate();
+
         empty = false;
         match token.kind {
             Comma | Semicolon if brackets.is_empty() => {
-                return Err(UnexpectedToken(token.value.to_string(), pos));
+                return Err(UnexpectedToken(token.text.into(), pos));
             }
             OpenParen | OpenBracket | OpenBrace => {
                 brackets.push((token.kind, pos));
@@ -108,7 +116,7 @@ pub fn check(text: &str) -> Result<(), Error> {
             },
             _ => {}
         }
-    };
+    }
     if let Some((bracket, pos)) = brackets.pop() {
         return Err(MissingBracket(bracket_str(bracket), pos));
     }

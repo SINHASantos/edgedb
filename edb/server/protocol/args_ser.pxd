@@ -26,6 +26,7 @@ cdef WriteBuffer recode_bind_args(
     dbview.CompiledQuery compiled,
     bytes bind_args,
     list positions = ?,
+    list data_types = ?,
 )
 
 
@@ -36,3 +37,11 @@ cdef recode_bind_args_for_script(
     ssize_t start,
     ssize_t end,
 )
+
+cdef bytes recode_global(
+    dbview.DatabaseConnectionView dbv,
+    bytes glob,
+    object glob_descriptor,
+)
+
+cdef WriteBuffer combine_raw_args(object args = ?)

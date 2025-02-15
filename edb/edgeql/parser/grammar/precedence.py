@@ -22,11 +22,7 @@ from __future__ import annotations
 from edb.common import parsing
 
 
-class PrecedenceMeta(parsing.PrecedenceMeta):
-    pass
-
-
-class Precedence(parsing.Precedence, assoc='fail', metaclass=PrecedenceMeta):
+class Precedence(parsing.Precedence, assoc='fail', is_internal=True):
     pass
 
 
@@ -54,15 +50,6 @@ class P_NOT(Precedence, assoc='right', tokens=('NOT',)):
     pass
 
 
-class P_EQUALS(Precedence, assoc='right', tokens=('EQUALS',)):
-    pass
-
-
-class P_ANGBRACKET(Precedence, assoc='nonassoc',
-                   tokens=('LANGBRACKET', 'RANGBRACKET')):
-    pass
-
-
 class P_LIKE_ILIKE(Precedence, assoc='nonassoc', tokens=('LIKE', 'ILIKE')):
     pass
 
@@ -75,7 +62,20 @@ class P_IDENT(Precedence, assoc='nonassoc', tokens=('IDENT', 'PARTITION')):
     pass
 
 
-class P_OP(Precedence, assoc='left', tokens=('OP',)):
+class P_COMPARE_OP(
+    Precedence,
+    assoc='nonassoc',
+    tokens=(
+        'DISTINCTFROM',
+        'GREATEREQ',
+        'LESSEQ',
+        'NOTDISTINCTFROM',
+        'NOTEQ',
+        'LANGBRACKET',
+        'RANGBRACKET',
+        'EQUALS',
+    )
+):
     pass
 
 
@@ -164,4 +164,25 @@ class P_DOUBLECOLON(Precedence, assoc='left', tokens=('DOUBLECOLON',)):
 
 
 class P_AT(Precedence, assoc='left', tokens=('AT',)):
+    pass
+
+
+# XXX: I don't remember why this helps.
+
+class P_REQUIRED(Precedence, assoc='right', tokens=('REQUIRED',)):
+    pass
+
+
+class P_MULTI(Precedence, assoc='right', tokens=('MULTI',),
+              rel_to_last='='):
+    pass
+
+
+class P_OPTIONAL(Precedence, assoc='right', tokens=('OPTIONAL',),
+                 rel_to_last='='):
+    pass
+
+
+class P_SINGLE(Precedence, assoc='right', tokens=('SINGLE',),
+               rel_to_last='='):
     pass

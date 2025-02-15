@@ -21,6 +21,9 @@ UUIDs
     * - :eql:func:`uuid_generate_v4`
       - :eql:func-desc:`uuid_generate_v4`
 
+    * - :eql:func:`to_uuid`
+      - :eql:func-desc:`to_uuid`
+
 
 ---------
 
@@ -33,6 +36,16 @@ UUIDs
 
     Every :eql:type:`Object` has a globally unique property ``id``
     represented by a UUID value.
+
+    .. versionadded:: 3.0
+
+        A UUID can be cast to an object type if an object of that type with a
+        matching ID exists.
+
+        .. code-block:: edgeql-repl
+
+            db> select <Hero><uuid>'01d9cc22-b776-11ed-8bef-73f84c7e91e7';
+            {default::Hero {id: 01d9cc22-b776-11ed-8bef-73f84c7e91e7}}
 
 
 ---------
@@ -76,4 +89,27 @@ UUIDs
     .. code-block:: edgeql-repl
 
         db> select uuid_generate_v4();
+        {92673afc-9c4f-42b3-8273-afe0053f0f48}
+
+
+---------
+
+
+.. eql:function:: std::to_uuid(val: bytes) -> uuid
+
+    :index: parse uuid
+
+    Returns a :eql:type:`uuid` value parsed from 128-bit input.
+
+    The :eql:type:`bytes` string has to be a valid 128-bit UUID
+    representation.
+
+    .. code-block:: edgeql-repl
+
+        db> select to_uuid(
+        ...   b'\x92\x67\x3a\xfc\
+        ...     \x9c\x4f\
+        ...     \x42\xb3\
+        ...     \x82\x73\
+        ...     \xaf\xe0\x05\x3f\x0f\x48');
         {92673afc-9c4f-42b3-8273-afe0053f0f48}

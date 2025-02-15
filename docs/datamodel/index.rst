@@ -1,4 +1,5 @@
 .. eql:section-intro-page:: datamodel
+.. versioned-section::
 
 .. _ref_datamodel_index:
 
@@ -22,10 +23,13 @@ Schema
     globals
     access_policies
     functions
+    triggers
+    mutation_rewrites
     inheritance
     extensions
     future
     comparison
+    introspection/index
 
 
 EdgeDB schemas are declared using **SDL** (EdgeDB's Schema Definition
@@ -34,26 +38,39 @@ Language).
 SDL
 ---
 
-Your schema is defined inside ``.esdl`` files. Its common to define your
+Your schema is defined inside ``.esdl`` files. It's common to define your
 entire schema in a single file called ``default.esdl``, but you can split it
 across multiple files if you wish.
 
-By convention, your schema
-files should live in a directory called ``dbschema`` in the root of your
-project.
+By convention, your schema files should live in a directory called ``dbschema``
+in the root of your project.
+
+.. code-block:: sdl
+    :version-lt: 3.0
+
+    # dbschema/default.esdl
+
+    type Movie {
+      required property title -> str;
+      required link director -> Person;
+    }
+
+    type Person {
+      required property name -> str;
+    }
 
 .. code-block:: sdl
 
-  # dbschema/default.esdl
+    # dbschema/default.esdl
 
-  type Movie {
-    required property title -> str;
-    required link director -> Person;
-  }
+    type Movie {
+      required title: str;
+      required director: Person;
+    }
 
-  type Person {
-    required property name -> str;
-  }
+    type Person {
+      required name: str;
+    }
 
 .. important::
 
@@ -96,16 +113,31 @@ Terminology
 
 .. _ref_datamodel_instances:
 
-.. rubric:: Instance
+Instance
+^^^^^^^^
 
-An EdgeDB **instance** is a collection of databases that store their data in
-a shared directory, listen for queries on a particular port, and are managed
-by a running EdgeDB process. Instances can be created, started, stopped, and
-destroyed locally with the :ref:`EdgeDB CLI <ref_cli_overview>`.
+An EdgeDB **instance** is a running EdgeDB process. Instances can be created,
+started, stopped, and destroyed locally with the :ref:`EdgeDB CLI
+<ref_cli_overview>`.
+
+.. _ref_datamodel_branches:
+
+Branches
+^^^^^^^^
+
+.. versionadded:: 5.0
+
+Instances can be branched when working on new features, similar to branches in
+your VCS. Each branch has its own schema and data.
 
 .. _ref_datamodel_databases:
 
-.. rubric:: Database
+Database
+^^^^^^^^
+
+.. versionadded:: 5.0
+
+    In EdgeDB 5, databases were replaced by branches.
 
 Each instance can contain several **databases**, each with a unique name. At
 the time of creation, all instances contain a single default database called
@@ -114,18 +146,50 @@ against it unless otherwise specified.
 
 .. _ref_datamodel_modules:
 
-.. rubric:: Module
+Module
+^^^^^^
 
-Each database has a schema consisting of several **modules**, each with a
-unique name. Modules can be used to organize large schemas into logical units.
-In practice, though, most users put their entire schema inside a single module
-called ``default``.
+Each branch (or database pre-v5) has a schema consisting of several
+**modules**, each with a unique name. Modules can be used to organize large
+schemas into logical units. In practice, though, most users put their entire
+schema inside a single module called ``default``.
 
 .. code-block:: sdl
 
   module default {
     # declare types here
   }
+
+.. versionadded:: 3.0
+
+    You may define nested modules using the following syntax:
+
+    .. code-block:: sdl
+
+        module dracula {
+            type Person {
+              required property name -> str;
+              multi link places_visited -> City;
+              property strength -> int16;
+            }
+
+            module combat {
+                function fight(
+                  one: dracula::Person,
+                  two: dracula::Person
+                ) -> str
+                  using (
+                    (one.name ?? 'Fighter 1') ++ ' wins!'
+                    IF (one.strength ?? 0) > (two.strength ?? 0)
+                    ELSE (two.name ?? 'Fighter 2') ++ ' wins!'
+                  );
+            }
+        }
+
+    Here we have a ``dracula`` module containing a ``Person`` type. Nested in
+    the ``dracula`` module we have a ``combat`` module which will be used for
+    all the combat functionality for our game based on Bram Stoker's Dracula we
+    built in the `Easy EdgeDB textbook </easy-edgedb>`_.
 
 .. _ref_name_resolution:
 
@@ -142,8 +206,15 @@ types, utility functions, and operators.
 * ``math``: algebraic and statistical :ref:`functions <ref_std_math>`
 * ``cal``: local (non-timezone-aware) and relative date/time :ref:`types and
   functions <ref_std_datetime>`
-* ``schema``: types describing the :ref:`introspection <ref_eql_introspection>`
-  schema
+* ``schema``: types describing the :ref:`introspection
+  <ref_datamodel_introspection>` schema
 * ``sys``: system-wide entities, such as user roles and
   :ref:`databases <ref_datamodel_databases>`
 * ``cfg``: configuration and settings
+
+.. versionadded:: 3.0
+
+    You can chain together module names in a fully-qualified name to traverse a
+    tree of nested modules. For example, to call the ``fight`` function in the
+    nested module example above, you would use
+    ``dracula::combat::fight(<arguments>)``.
