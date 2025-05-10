@@ -143,10 +143,12 @@ class BaseServer:
         runstate_dir,
         internal_runstate_dir,
         compiler_pool_size,
+        compiler_worker_branch_limit,
         compiler_pool_mode: srvargs.CompilerPoolMode,
         compiler_pool_addr,
         nethosts,
         netport,
+        compiler_worker_max_rss: Optional[int] = None,
         listen_sockets: tuple[socket.socket, ...] = (),
         testmode: bool = False,
         daemonized: bool = False,
@@ -190,8 +192,10 @@ class BaseServer:
         self._internal_runstate_dir = internal_runstate_dir
         self._compiler_pool = None
         self._compiler_pool_size = compiler_pool_size
+        self._compiler_worker_branch_limit = compiler_worker_branch_limit
         self._compiler_pool_mode = compiler_pool_mode
         self._compiler_pool_addr = compiler_pool_addr
+        self._compiler_worker_max_rss = compiler_worker_max_rss
         self._system_compile_cache = lru.LRUMapping(
             maxsize=defines._MAX_QUERIES_CACHE
         )
@@ -600,6 +604,7 @@ class BaseServer:
 
         args = dict(
             pool_size=self._compiler_pool_size,
+            worker_branch_limit=self._compiler_worker_branch_limit,
             pool_class=self._compiler_pool_mode.pool_class,
             runstate_dir=self._internal_runstate_dir,
             backend_runtime_params=runtime_params,
@@ -609,6 +614,9 @@ class BaseServer:
         )
         if self._compiler_pool_mode == srvargs.CompilerPoolMode.Remote:
             args['address'] = self._compiler_pool_addr
+        else:
+            if self._compiler_worker_max_rss is not None:
+                args['worker_max_rss'] = self._compiler_worker_max_rss
         return args
 
     async def _destroy_compiler_pool(self):
@@ -1063,12 +1071,13 @@ class BaseServer:
             self._request_stats_logger()
         )
 
-        self._compiler_pool = await compiler_pool.create_compiler_pool(
+        pool = await compiler_pool.create_compiler_pool(
             **self._get_compiler_args()
         )
         self.compilation_config_serializer = (
-            await self._compiler_pool.make_compilation_config_serializer()
+            await pool.make_compilation_config_serializer()
         )
+        self._compiler_pool = pool
 
         await self._before_start_servers()
         self._servers, actual_port, listen_addrs = await self._start_servers(
@@ -1737,12 +1746,13 @@ class Server(BaseServer):
         """Run the script specified in *startup_script* and exit immediately"""
         if self._startup_script is None:
             raise AssertionError('startup script is not defined')
-        self._compiler_pool = await compiler_pool.create_compiler_pool(
+        pool = await compiler_pool.create_compiler_pool(
             **self._get_compiler_args()
         )
         self.compilation_config_serializer = (
-            await self._compiler_pool.make_compilation_config_serializer()
+            await pool.make_compilation_config_serializer()
         )
+        self._compiler_pool = pool
         try:
             await binary.run_script(
                 server=self,

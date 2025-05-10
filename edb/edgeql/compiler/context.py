@@ -145,8 +145,6 @@ class ServerParamConversion:
     volatility: qltypes.Volatility
 
     # If the parameter is a query parameter, track its script params index.
-    # This is passed to the server if the query parameter is not a normalized
-    # constant.
     script_param_index: Optional[int] = None
 
     # If the parameter is a constant value, pass to directly to the server.
@@ -857,9 +855,10 @@ class ContextLevel(compiler.ContextLevel):
         self.no_factoring = s_futures.future_enabled(
             self.env.schema, 'simple_scoping'
         )
-        self.warn_factoring = s_futures.future_enabled(
-            self.env.schema, 'warn_old_scoping'
-        )
+        # When compiling schema things, we don't want to cause warnings
+        # The warnings will be emitted when updating the schema,
+        # and interact poorly with compilation.
+        self.warn_factoring = False
 
 
 class CompilerContext(compiler.CompilerContext[ContextLevel]):

@@ -16,7 +16,7 @@
 # limitations under the License.
 #
 
-from typing import Any
+from typing import Optional
 
 from pygls.server import LanguageServer
 from pygls.workspace import TextDocument
@@ -34,7 +34,7 @@ from . import utils as ls_utils
 
 
 def parse(
-    doc: TextDocument, ls: LanguageServer
+    doc: TextDocument,
 ) -> Result[list[qlast.Base] | qlast.Schema, list[lsp_types.Diagnostic]]:
     sdl = is_schema_file(doc.filename) if doc.filename else False
 
@@ -93,9 +93,42 @@ def parse(
     return Result(ok=ast)
 
 
-def parse_and_suggest(
-    doc: TextDocument, position: lsp_types.Position, ls: LanguageServer
-) -> list[lsp_types.CompletionItem]:
+def parse_and_recover(
+    doc: TextDocument,
+) -> Optional[list[qlast.Base] | qlast.Schema]:
+    sdl = is_schema_file(doc.filename) if doc.filename else False
+
+    start_t = qltokens.T_STARTSDLDOCUMENT if sdl else qltokens.T_STARTBLOCK
+    start_t_name = start_t.__name__[2:]
+
+    source_res = _tokenize(doc.source)
+    if not source_res.ok:
+        return None
+    source = source_res.ok
+
+    result, productions = rust_parser.parse(start_t_name, source.tokens())
+
+    if not isinstance(result.out, rust_parser.CSTNode):
+        return None
+
+    try:
+        ast = qlparser._cst_to_ast(
+            result.out, productions, source, doc.filename
+        ).val
+    except errors.EdgeDBError:
+        return None
+
+    if sdl:
+        assert isinstance(ast, qlast.Schema), ast
+    else:
+        assert isinstance(ast, list), ast
+
+    return ast
+
+
+def get_completion(
+    doc: TextDocument, target: int, ls: LanguageServer
+) -> tuple[list[lsp_types.CompletionItem], bool]:
     sdl = is_schema_file(doc.path)
 
     start_t = qltokens.T_STARTSDLDOCUMENT if sdl else qltokens.T_STARTBLOCK
@@ -104,22 +137,21 @@ def parse_and_suggest(
     # tokenize
     source_res = _tokenize(doc.source)
     if not source_res.ok:
-        return []
+        return [], False
     source: tokenizer.Source = source_res.ok
 
     # limit tokens to things preceding cursor position
-    target = tokenizer.line_col_to_source_point(
-        doc.source, position.line, position.character
-    )
     cut_index = len(source.tokens())
     for index, tok in enumerate(source.tokens()):
-        if not tok.span_end() <= target.offset:
+        if not tok.span_end() <= target:
             cut_index = index
             break
     tokens = source.tokens()[0:cut_index]
 
     # run parser and suggest next possible keywords
-    suggestions = rust_parser.suggest_next_keywords(start_t_name, tokens)
+    suggestions, can_be_ident = rust_parser.suggest_next_keywords(
+        start_t_name, tokens
+    )
 
     # convert to CompletionItem
     return [
@@ -128,7 +160,7 @@ def parse_and_suggest(
             kind=lsp_types.CompletionItemKind.Keyword,
         )
         for keyword in suggestions
-    ]
+    ], can_be_ident
 
 
 def _tokenize(
@@ -146,17 +178,3 @@ def _tokenize(
                 )
             ]
         )
-
-
-def _position_in_span(pos: lsp_types.Position, span: tuple[Any, Any]):
-    start, end = span
-
-    if pos.line < start.line - 1:
-        return False
-    if pos.line > end.line - 1:
-        return False
-    if pos.line == start.line - 1 and pos.character < start.column - 1:
-        return False
-    if pos.line == end.line - 1 and pos.character > end.column - 1:
-        return False
-    return True

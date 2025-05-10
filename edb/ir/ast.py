@@ -779,8 +779,6 @@ class ServerParamConversion:
     additional_info: tuple[str, ...]
 
     # If the parameter is a query parameter, track its script params index.
-    # This is passed to the server if the query parameter is not a normalized
-    # constant.
     script_param_index: typing.Optional[int] = None
 
     # If the parameter is a constant value, pass to directly to the server.
@@ -953,6 +951,7 @@ class CallArg(ImmutableBase):
     multiplicity: qltypes.Multiplicity = qltypes.Multiplicity.UNKNOWN
     is_default: bool = False
     param_typemod: qltypes.TypeModifier
+    polymorphism: qltypes.Polymorphism = qltypes.Polymorphism.NotUsed
 
 
 class Call(ImmutableExpr):
@@ -1003,6 +1002,11 @@ class Call(ImmutableExpr):
 
     # If this is a set of call but is allowed in singleton expressions.
     is_singleton_set_of: typing.Optional[bool] = None
+
+    # The polymorphism of the return type
+    # This is used to identify cases where polymorphism needs to be handled in
+    # a specialized way (eg. arrays of arrays).
+    return_polymorphism: qltypes.Polymorphism = qltypes.Polymorphism.NotUsed
 
 
 class FunctionCall(Call):
@@ -1350,6 +1354,7 @@ class ConfigCommand(Command, Expr):
     requires_restart: bool
     backend_setting: typing.Optional[str]
     is_system_config: bool
+    type_rewrites: typing.Optional[dict[tuple[uuid.UUID, bool], Set]] = None
     globals: typing.Optional[list[Global]] = None
     scope_tree: typing.Optional[ScopeTreeNode] = None
 

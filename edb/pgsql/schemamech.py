@@ -557,6 +557,10 @@ class SchemaDomainConstraint:
         ops = dbops.CommandGroup()
         return ops
 
+    def fixup_trigger_ops(self) -> dbops.CommandGroup:
+        ops = dbops.CommandGroup()
+        return ops
+
 
 @dataclasses.dataclass(kw_only=True, repr=False, eq=False, slots=True)
 class SchemaTableConstraint:
@@ -714,6 +718,22 @@ class SchemaTableConstraint:
 
         return ops
 
+    def fixup_trigger_ops(self) -> dbops.CommandGroup:
+        # Pre 6.8 versions of gel created needless disabled triggers
+        # in some cases. This path (invoked by administer
+        # remove_pointless_triggers()) deletes them.
+        ops = dbops.CommandGroup()
+
+        tabconstr = self._table_constraint(self)
+        add_constr = deltadbops.AlterTableUpdateConstraintTriggerFixup(
+            name=tabconstr.get_subject_name(quote=False),
+            constraint=tabconstr,
+        )
+
+        ops.add_command(add_constr)
+
+        return ops
+
 
 SchemaConstraint = SchemaDomainConstraint | SchemaTableConstraint
 
@@ -819,7 +839,7 @@ def get_ref_storage_info(
 
     for ref, (ptr, src) in ref_ptrs.items():
         ptr_info = types.get_pointer_storage_info(
-            ptr, source=src, resolve_type=False, schema=schema)
+            ptr, source=src, resolve_type=False, schema=schema)  # type: ignore
 
         # See if any of the refs are hosted in pointer tables and others
         # are not...
@@ -835,8 +855,11 @@ def get_ref_storage_info(
         for ref in objtype_biased.copy():
             ptr, src = ref_ptrs[ref]
             ptr_info = types.get_pointer_storage_info(
-                ptr, source=src, resolve_type=False, link_bias=True,
-                schema=schema)
+                ptr, source=src,  # type: ignore
+                resolve_type=False,
+                link_bias=True,
+                schema=schema,
+            )
 
             if ptr_info is not None and ptr_info.table_type == 'link':
                 link_biased[ref] = ptr_info

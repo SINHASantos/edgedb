@@ -71,6 +71,7 @@ pub fn parse<'a>(input: &'a [Terminal], ctx: &'a Context) -> (Option<CSTNode<'a>
 
     for token in input {
         // println!("token {:?}", token);
+
         while let Some(mut parser) = parsers.pop() {
             let res = parser.act(ctx, token);
 
@@ -91,12 +92,17 @@ pub fn parse<'a>(input: &'a [Terminal], ctx: &'a Context) -> (Option<CSTNode<'a>
                 };
 
                 // option 1: inject a token
-                if parser.error_cost <= ERROR_COST_INJECT_MAX {
+                if parser.error_cost <= ERROR_COST_INJECT_MAX && !parser.has_custom_error {
                     let possible_actions = &ctx.spec.actions[parser.stack_top.state];
                     for token_kind in possible_actions.keys() {
+                        if parser.can_act(ctx, token_kind).is_none() {
+                            continue;
+                        }
+
                         let mut inject = parser.clone();
 
-                        let injection = new_token_for_injection(*token_kind, ctx);
+                        let injection =
+                            new_token_for_injection(*token_kind, &prev_span, token.span, ctx);
 
                         let cost = injection_cost(token_kind);
                         let error = Error::new(format!("Missing {injection}")).with_span(gap_span);
@@ -154,29 +160,24 @@ pub fn parse<'a>(input: &'a [Terminal], ctx: &'a Context) -> (Option<CSTNode<'a>
         if new_parsers.len() > 1 {
             new_parsers.sort_by_key(Parser::adjusted_cost);
 
-            let recovered = new_parsers.iter().position(Parser::has_recovered);
+            if new_parsers[0].has_custom_error {
+                // if we have a custom error, just keep that
 
-            if let Some(recovered) = recovered {
-                // make sure not to discard custom errors
-                let any_custom_error = new_parsers.iter().any(|p| p.has_custom_error);
-                if !any_custom_error || new_parsers[recovered].has_custom_error {
-                    // recover a parser and discard the rest
-                    let mut recovered = new_parsers.swap_remove(recovered);
-                    recovered.error_cost = 0;
-                    recovered.has_custom_error = false;
-
-                    new_parsers.clear();
-                    new_parsers.push(recovered);
-                }
-            }
-
-            // prune: pick only 1 best parsers that has cost > ERROR_COST_INJECT_MAX
-            if new_parsers[0].error_cost > ERROR_COST_INJECT_MAX {
                 new_parsers.drain(1..);
-            }
+            } else if new_parsers[0].has_recovered() {
+                // recover parsers whose "adjusted error cost" reached 0 and discard the rest
 
-            // prune: pick only X best parsers
-            if new_parsers.len() > PARSER_COUNT_MAX {
+                new_parsers.retain(|p| p.has_recovered());
+                for p in &mut new_parsers {
+                    p.error_cost = 0;
+                }
+            } else if new_parsers[0].error_cost > ERROR_COST_INJECT_MAX {
+                // prune: pick only 1 best parsers that has cost > ERROR_COST_INJECT_MAX
+
+                new_parsers.drain(1..);
+            } else if new_parsers.len() > PARSER_COUNT_MAX {
+                // prune: pick only X best parsers
+
                 new_parsers.drain(PARSER_COUNT_MAX..);
             }
         }
@@ -184,6 +185,18 @@ pub fn parse<'a>(input: &'a [Terminal], ctx: &'a Context) -> (Option<CSTNode<'a>
         assert!(parsers.is_empty());
         std::mem::swap(&mut parsers, &mut new_parsers);
         prev_span = Some(token.span);
+
+        // for (index, parser) in parsers.iter().enumerate() {
+        //     print!(
+        //         "p{index} {:06} {:5}:",
+        //         parser.error_cost, parser.can_recover
+        //     );
+        //     for e in &parser.errors {
+        //         print!(" {}", e.message);
+        //     }
+        //     println!("");
+        // }
+        // println!("");
     }
 
     // there will always be a parser left,
@@ -207,12 +220,12 @@ pub fn parse<'a>(input: &'a [Terminal], ctx: &'a Context) -> (Option<CSTNode<'a>
 }
 
 /// Parses tokens and then inspects the state of the parser to suggest possible
-/// next keywords.
+/// next keywords and a boolean indicating if next token can be an identifier.
 /// This is done by looking at available actions in current state.
 /// An important detail is that not all of these actions are valid.
 /// They might trigger a chain of reductions that ends in a state that
 /// does not accept the suggested token.
-pub fn suggest_next_keyword<'a>(input: &'a [Terminal], ctx: &'a Context) -> Vec<Keyword> {
+pub fn suggest_next_keyword<'a>(input: &'a [Terminal], ctx: &'a Context) -> (Vec<Keyword>, bool) {
     // init
     let stack_top = ctx.arena.alloc(StackNode {
         parent: None,
@@ -230,19 +243,24 @@ pub fn suggest_next_keyword<'a>(input: &'a [Terminal], ctx: &'a Context) -> Vec<
 
     // parse tokens
     for token in input.iter() {
+        if matches!(token.kind, Kind::EOI) {
+            break;
+        }
+
         let res = parser.act(ctx, token);
 
         if res.is_err() {
-            return vec![];
+            return (vec![], false);
         }
     }
 
     // extract possible next actions
     let actions = &ctx.spec.actions[parser.stack_top.state];
 
-    let can_be_ident = actions.contains_key(&Kind::Ident);
+    let can_be_ident =
+        actions.contains_key(&Kind::Ident) && parser.can_act(ctx, &Kind::Ident).is_some();
 
-    actions
+    let keywords = actions
         .keys()
         // suggest only keywords
         .filter_map(|kind| {
@@ -258,7 +276,9 @@ pub fn suggest_next_keyword<'a>(input: &'a [Terminal], ctx: &'a Context) -> Vec<
         .filter(|k| !(can_be_ident && k.is_unreserved()))
         // filter only valid actions
         .filter(|k| parser.can_act(ctx, &Kind::Keyword(*k)).is_some())
-        .collect()
+        .collect();
+
+    (keywords, can_be_ident)
 }
 
 fn starts_with_unexpected_error(a: &Parser) -> bool {
@@ -284,11 +304,16 @@ impl Context<'_> {
     }
 }
 
-fn new_token_for_injection<'a>(kind: Kind, ctx: &'a Context) -> &'a Terminal {
+fn new_token_for_injection<'a>(
+    kind: Kind,
+    prev_span: &Option<Span>,
+    next_span: Span,
+    ctx: &'a Context,
+) -> &'a Terminal {
     let (text, value) = match kind {
         Kind::Keyword(Keyword(kw)) => (kind.text(), Some(Value::String(kw.to_string()))),
         Kind::Ident => {
-            let ident = "`ident_placeholder`";
+            let ident = "ident_placeholder";
             (Some(ident), Some(Value::String(ident.into())))
         }
         _ => (kind.text(), None),
@@ -298,7 +323,10 @@ fn new_token_for_injection<'a>(kind: Kind, ctx: &'a Context) -> &'a Terminal {
         kind,
         text: text.unwrap_or_default().to_string(),
         value,
-        span: Span::default(),
+        span: Span {
+            start: prev_span.map_or(0, |x| x.end),
+            end: next_span.start,
+        },
         is_placeholder: true,
     })
 }
@@ -366,6 +394,7 @@ impl<'s> Parser<'s> {
 
         let value = CSTNode::Production(Production {
             id: reduce.production_id,
+            span: get_span_of_nodes(args),
             args,
             inlined_ids: None,
         });
@@ -381,7 +410,6 @@ impl<'s> Parser<'s> {
                 let inlined_id = production.id;
                 // inline rule found
                 let args = production.args;
-                let span = get_span_of_nodes(args);
 
                 value = args[*inline_position as usize];
 
@@ -390,8 +418,6 @@ impl<'s> Parser<'s> {
                     new_prod.inlined_ids =
                         Some(ctx.alloc_slice_and_push(&new_prod.inlined_ids, inlined_id));
                 }
-
-                extend_span(&mut value, span, ctx);
             } else {
                 // place back
                 value = CSTNode::Production(production);
@@ -579,38 +605,19 @@ impl<'a> StackNode<'a> {
     }
 }
 
-fn get_span_of_nodes(args: &[CSTNode]) -> Option<Span> {
-    let start = args.iter().find_map(|x| match x {
+/// Returns the span of syntactically ordered nodes. Panic on empty nodes.
+fn get_span_of_nodes(nodes: &[CSTNode]) -> Option<Span> {
+    let start = nodes.iter().find_map(|x| match x {
         CSTNode::Terminal(t) => Some(t.span.start),
-        CSTNode::Production(p) => get_span_of_nodes(p.args).map(|x| x.start),
-        _ => None,
+        CSTNode::Production(p) => Some(p.span?.start),
+        CSTNode::Empty => panic!(),
     })?;
-    let end = args.iter().rev().find_map(|x| match x {
+    let end = nodes.iter().rev().find_map(|x| match x {
         CSTNode::Terminal(t) => Some(t.span.end),
-        CSTNode::Production(p) => get_span_of_nodes(p.args).map(|x| x.end),
-        _ => None,
+        CSTNode::Production(p) => Some(p.span?.end),
+        CSTNode::Empty => panic!(),
     })?;
     Some(Span { start, end })
-}
-
-fn extend_span<'a>(value: &mut CSTNode<'a>, span: Option<Span>, ctx: &'a Context) {
-    let Some(span) = span else {
-        return;
-    };
-
-    let CSTNode::Terminal(terminal) = value else {
-        return;
-    };
-
-    let mut new_term = terminal.clone();
-
-    if span.start < new_term.span.start {
-        new_term.span.start = span.start;
-    }
-    if span.end > new_term.span.end {
-        new_term.span.end = span.end;
-    }
-    *terminal = ctx.alloc_terminal(new_term);
 }
 
 const PARSER_COUNT_MAX: usize = 10;
@@ -629,7 +636,7 @@ fn injection_cost(kind: &Kind) -> u16 {
         // Manual keyword tweaks to encourage some error messages and discourage others.
         Keyword(keywords::Keyword(
             "delete" | "update" | "migration" | "role" | "global" | "administer" | "future"
-            | "database",
+            | "database", //  | "if" | "group",
         )) => 100,
         Keyword(keywords::Keyword("insert" | "module" | "extension" | "branch")) => 20,
         Keyword(keywords::Keyword("select" | "property" | "type")) => 10,
